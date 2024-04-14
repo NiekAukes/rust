@@ -2126,6 +2126,12 @@ pub struct FnSig<'hir> {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy, HashStable_Generic)]
+pub struct KernelSig<'hir> {
+    pub inputs: &'hir [Ty<'hir>],
+    pub span: Span,
+}
+
 // The bodies for items are stored "out of line", in a separate
 // hashmap in the `Crate`. Here we just record the hir-id of the item
 // so it can fetched later.
@@ -3166,6 +3172,8 @@ pub enum ItemKind<'hir> {
     Const(&'hir Ty<'hir>, &'hir Generics<'hir>, BodyId),
     /// A function declaration.
     Fn(FnSig<'hir>, &'hir Generics<'hir>, BodyId),
+    /// A kernel declaration.
+    Kernel(KernelSig<'hir>, BodyId),
     /// A MBE macro definition (`macro_rules!` or `macro`).
     Macro(&'hir ast::MacroDef, MacroKind),
     /// A module.

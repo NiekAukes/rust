@@ -87,6 +87,9 @@ symbols! {
         Await:              "await", // >= 2018 Edition only
         Dyn:                "dyn", // >= 2018 Edition only
 
+        // new keywords for kernel programming
+        Kernel:             "kernel",
+
         // Edition-specific keywords that are used in unstable Rust or reserved for future use.
         Try:                "try", // >= 2018 Edition only
 
@@ -238,6 +241,7 @@ symbols! {
         IterPeekable,
         Iterator,
         IteratorItem,
+        Kernel,
         Layout,
         Left,
         LinkedList,
@@ -2400,11 +2404,13 @@ impl Symbol {
     }
 
     fn is_used_keyword_always(self) -> bool {
-        self >= kw::As && self <= kw::While
+        (self >= kw::As && self <= kw::While) || self == kw::Kernel
     }
 
     fn is_used_keyword_conditional(self, edition: impl FnOnce() -> Edition) -> bool {
-        (self >= kw::Async && self <= kw::Dyn) && edition() >= Edition::Edition2018
+        let e = edition();
+        ((self >= kw::Async && self <= kw::Dyn) && e >= Edition::Edition2018)
+        || (self == kw::Kernel && e >= Edition::Edition2021)
     }
 
     fn is_unused_keyword_always(self) -> bool {

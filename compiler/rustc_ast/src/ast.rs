@@ -2451,6 +2451,8 @@ impl FnDecl {
     }
 }
 
+
+
 /// Is the trait definition an auto trait?
 #[derive(Copy, Clone, PartialEq, Encodable, Decodable, Debug, HashStable_Generic)]
 pub enum IsAuto {
@@ -2941,6 +2943,8 @@ impl Item {
             | ItemKind::Union(_, generics) => Some(&generics),
             ItemKind::Trait(i) => Some(&i.generics),
             ItemKind::Impl(i) => Some(&i.generics),
+
+            ItemKind::Kernel(_) => None, // not implemented yet, but could be made
         }
     }
 }
@@ -3186,6 +3190,8 @@ pub enum ItemKind {
     ///
     /// E.g. `reuse <Type as Trait>::name { target_expr_template }`.
     Delegation(Box<Delegation>),
+
+    Kernel(Box<Kernel>),
 }
 
 impl ItemKind {
@@ -3194,7 +3200,7 @@ impl ItemKind {
         match self {
             Use(..) | Static(..) | Const(..) | Fn(..) | Mod(..) | GlobalAsm(..) | TyAlias(..)
             | Struct(..) | Union(..) | Trait(..) | TraitAlias(..) | MacroDef(..)
-            | Delegation(..) => "a",
+            | Delegation(..) | Kernel(..) => "a",
             ExternCrate(..) | ForeignMod(..) | MacCall(..) | Enum(..) | Impl { .. } => "an",
         }
     }
@@ -3219,6 +3225,8 @@ impl ItemKind {
             ItemKind::MacroDef(..) => "macro definition",
             ItemKind::Impl { .. } => "implementation",
             ItemKind::Delegation(..) => "delegated function",
+
+            ItemKind::Kernel(..) => "compute kernel",
         }
     }
 
@@ -3380,4 +3388,39 @@ mod size_asserts {
     static_assert_size!(Ty, 64);
     static_assert_size!(TyKind, 40);
     // tidy-alphabetical-end
+}
+
+
+
+
+
+
+//  ===========================================================================
+//  new additions
+//  ===========================================================================
+
+/// Similar to `Fn`, but for Kernels. 
+/// 
+/// E.g., `kernel foo(i: i32, a: &mut [f32])`
+/// 
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub struct Kernel {
+    pub inputs: ThinVec<Param>,
+    pub sigspan: Span,
+    pub body: P<Block>,
+}
+
+
+/// A kernel call. This should be delegated to the specific gpu backend.
+/// example: `my_kernel[blocks, threads](&a, &b, &mut c)`
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub struct KernelCall {
+    /// identical to a function call, but with a kernel path
+    pub segment: PathSegment,
+    /// the number of blocks to launch
+    pub blocks: P<Expr>,
+    /// the number of threads per block
+    pub threads: P<Expr>,
+    /// the arguments to the kernel call
+    pub args: ThinVec<P<Expr>>,
 }

@@ -1066,6 +1066,12 @@ pub fn noop_visit_item_kind<T: MutVisitor>(kind: &mut ItemKind, vis: &mut T) {
             vis.visit_generics(generics);
             visit_opt(body, |body| vis.visit_block(body));
         }
+        // new
+        ItemKind::Kernel(box Kernel {inputs, body}) => {
+            inputs.flat_map_in_place(|param| vis.flat_map_param(param));
+            vis.visit_block(body);
+        
+        }
         ItemKind::Mod(unsafety, mod_kind) => {
             visit_unsafety(unsafety, vis);
             match mod_kind {
@@ -1136,6 +1142,7 @@ pub fn noop_visit_item_kind<T: MutVisitor>(kind: &mut ItemKind, vis: &mut T) {
                 vis.visit_block(body);
             }
         }
+
     }
 }
 

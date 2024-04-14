@@ -205,6 +205,16 @@ impl<'a> Parser<'a> {
             let (ident, sig, generics, body) =
                 self.parse_fn(attrs, fn_parse_mode, lo, vis, case)?;
             (ident, ItemKind::Fn(Box::new(Fn { defaultness: def_(), sig, generics, body })))
+        } else if self.eat_keyword(kw::Kernel) {
+            // KERNEL ITEM
+            if self.eat_keyword(kw::Fn) {
+                // not implemented yet
+                self.dcx().emit_err(errors::AsyncImpl { span: self.prev_token.span }); 
+                return Ok(None);
+            } else {
+                let (ident, kernel) = self.parse_kernel(attrs, fn_parse_mode, lo, vis, case)?;
+                (ident, ItemKind::Kernel(Box::new(kernel)))
+            }
         } else if self.eat_keyword(kw::Extern) {
             if self.eat_keyword(kw::Crate) {
                 // EXTERN CRATE
@@ -2859,9 +2869,40 @@ impl<'a> Parser<'a> {
             Ok(Some(_))
         )
     }
+    // ========================================================================
+    // new parsing code
+    // ========================================================================
+
+    fn parse_kernel(&mut self,
+        attrs: &mut AttrVec,
+        _fn_parse_mode: FnParseMode,
+        _sig_lo: Span,
+        _vis: &Visibility,
+        _case: Case,
+    ) -> PResult<'a, (Ident, Kernel)> {
+        self.expect_keyword(kw::Kernel)?;
+        let ident = self.parse_ident()?;
+        let inputs = self.parse_fn_params(|_| false)?;
+        // why was this here?
+        //let body = self.parse_delim_args()?;
+        let mut sig_hi = self.prev_token.span;
+        let body = self.parse_fn_body(attrs, &ident, &mut sig_hi, true)?;
+        match body {
+            Some(body) => {
+                Ok((ident, Kernel { inputs, body }))
+            }
+            None => {
+                //self.dcx().emit_err(errors::KernelMissingBody { span: sig_lo.to(sig_hi) });
+                //Ok((ident, Kernel { inputs, body: self.mk_block_err(sig_lo.to(sig_hi), None) }))
+                panic!("kernel missing body"); // TODO: do error recovery
+            }
+        }
+    }
 }
 
 enum IsMacroRulesItem {
     Yes { has_bang: bool },
     No,
 }
+
+

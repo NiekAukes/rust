@@ -195,6 +195,8 @@ impl<'a> State<'a> {
                     &item.attrs,
                 );
             }
+            // TODO: Implement
+            ast::ItemKind::Kernel(_) => {},
             ast::ItemKind::Mod(unsafety, mod_kind) => {
                 self.head(Self::to_string(|s| {
                     s.print_visibility(&item.vis);

@@ -236,6 +236,14 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     hir::ItemKind::Fn(sig, generics, body_id)
                 })
             }
+            ItemKind::Kernel(box Kernel { inputs, sigspan, body }) => {
+                self.with_new_scopes(ident.span, |this| {
+                    let body_id = this.lower_kernel_body(span, hir_id, inputs, body);
+                    let decl = this.lower_kernel_decl(id, inputs, sigspan, body_id);
+
+                    hir::ItemKind::Kernel(decl, body_id)
+                })
+            }
             ItemKind::Mod(_, mod_kind) => match mod_kind {
                 ModKind::Loaded(items, _, spans) => {
                     hir::ItemKind::Mod(self.lower_mod(items, spans))

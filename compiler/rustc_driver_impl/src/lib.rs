@@ -388,8 +388,9 @@ fn run_compiler(
 
         let linker = compiler.enter(|queries| {
             let early_exit = || early_exit().map(|_| None);
-            queries.parse()?;
-
+            queries.parse()?; // the code gets parsed here
+            
+            // if pretty print is enabled, print the AST and exit
             if let Some(ppm) = &sess.opts.pretty {
                 if ppm.needs_ast_map() {
                     queries.global_ctxt()?.enter(|tcx| {
@@ -420,6 +421,7 @@ fn run_compiler(
             }
 
             // Make sure name resolution and macro expansion is run.
+            // lower AST to HIR.
             queries.global_ctxt()?.enter(|tcx| tcx.resolver_for_lowering());
 
             if callbacks.after_expansion(compiler, queries) == Compilation::Stop {
@@ -438,12 +440,14 @@ fn run_compiler(
                 return early_exit();
             }
 
+            // do analysis and optionally stop before codegen
             queries.global_ctxt()?.enter(|tcx| tcx.analysis(()))?;
 
             if callbacks.after_analysis(compiler, queries) == Compilation::Stop {
                 return early_exit();
             }
 
+            // creates a code generator, this generator may be exchanged
             let linker = queries.codegen_and_build_linker()?;
 
             // This must run after monomorphization so that all generic types

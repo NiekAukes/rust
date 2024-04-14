@@ -329,6 +329,12 @@ pub fn walk_item<'a, V: Visitor<'a>>(visitor: &mut V, item: &'a Item) -> V::Resu
                 FnKind::Fn(FnCtxt::Free, item.ident, sig, &item.vis, generics, body.as_deref());
             try_visit!(visitor.visit_fn(kind, item.span, item.id));
         }
+        // new
+        // TODO: visit kernel
+        //ItemKind::Kernel(box Kernel { inputs, body}) => {
+            
+        //}
+        ItemKind::Kernel(_) => {}
         ItemKind::Mod(_unsafety, mod_kind) => match mod_kind {
             ModKind::Loaded(items, _inline, _inner_span) => {
                 walk_list!(visitor, visit_item, items);
