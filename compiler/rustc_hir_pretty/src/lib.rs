@@ -531,6 +531,9 @@ impl<'a> State<'a> {
                 self.end(); // need to close a box
                 self.ann.nested(self, Nested::Body(body));
             }
+            hir::ItemKind::Kernel(ref _sig, _body) => {
+                // TODO GPU: Implement kernel pretty-printing
+            }
             hir::ItemKind::Macro(macro_def, _) => {
                 self.print_mac_def(macro_def, &item.ident, item.span, |_| {});
             }

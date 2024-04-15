@@ -1067,7 +1067,7 @@ pub fn noop_visit_item_kind<T: MutVisitor>(kind: &mut ItemKind, vis: &mut T) {
             visit_opt(body, |body| vis.visit_block(body));
         }
         // new
-        ItemKind::Kernel(box Kernel {inputs, body}) => {
+        ItemKind::Kernel(box Kernel {inputs, sigspan: _, body}) => {
             inputs.flat_map_in_place(|param| vis.flat_map_param(param));
             vis.visit_block(body);
         

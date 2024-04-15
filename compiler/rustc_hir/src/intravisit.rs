@@ -506,6 +506,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) -> V::
                 item.owner_id.def_id,
             ));
         }
+        ItemKind::Kernel(..) => {} //TODO GPU: visit kernel item
         ItemKind::Macro(..) => {
             try_visit!(visitor.visit_id(item.hir_id()));
         }

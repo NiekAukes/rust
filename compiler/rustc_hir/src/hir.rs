@@ -3242,6 +3242,7 @@ impl ItemKind<'_> {
             ItemKind::Static(..) => "static item",
             ItemKind::Const(..) => "constant item",
             ItemKind::Fn(..) => "function",
+            ItemKind::Kernel(..) => "kernel",
             ItemKind::Macro(..) => "macro",
             ItemKind::Mod(..) => "module",
             ItemKind::ForeignMod { .. } => "extern block",

@@ -2876,7 +2876,7 @@ impl<'a> Parser<'a> {
     fn parse_kernel(&mut self,
         attrs: &mut AttrVec,
         _fn_parse_mode: FnParseMode,
-        _sig_lo: Span,
+        sig_lo: Span,
         _vis: &Visibility,
         _case: Case,
     ) -> PResult<'a, (Ident, Kernel)> {
@@ -2887,9 +2887,10 @@ impl<'a> Parser<'a> {
         //let body = self.parse_delim_args()?;
         let mut sig_hi = self.prev_token.span;
         let body = self.parse_fn_body(attrs, &ident, &mut sig_hi, true)?;
+        let sigspan = sig_lo.to(sig_hi);
         match body {
             Some(body) => {
-                Ok((ident, Kernel { inputs, body }))
+                Ok((ident, Kernel { inputs, body, sigspan }))
             }
             None => {
                 //self.dcx().emit_err(errors::KernelMissingBody { span: sig_lo.to(sig_hi) });

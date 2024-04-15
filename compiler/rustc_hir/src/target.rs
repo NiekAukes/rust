@@ -30,6 +30,7 @@ pub enum Target {
     Static,
     Const,
     Fn,
+    Kernel,
     Closure,
     Mod,
     ForeignMod,
@@ -75,6 +76,7 @@ impl Target {
             | Target::Static
             | Target::Const
             | Target::Fn
+            | Target::Kernel
             | Target::Closure
             | Target::Mod
             | Target::ForeignMod
@@ -110,6 +112,7 @@ impl Target {
             ItemKind::Static { .. } => Target::Static,
             ItemKind::Const(..) => Target::Const,
             ItemKind::Fn(..) => Target::Fn,
+            ItemKind::Kernel(..) => Target::Kernel,
             ItemKind::Macro(..) => Target::MacroDef,
             ItemKind::Mod(..) => Target::Mod,
             ItemKind::ForeignMod { .. } => Target::ForeignMod,
@@ -187,6 +190,7 @@ impl Target {
             Target::Static => "static item",
             Target::Const => "constant item",
             Target::Fn => "function",
+            Target::Kernel => "kernel",
             Target::Closure => "closure",
             Target::Mod => "module",
             Target::ForeignMod => "foreign module",

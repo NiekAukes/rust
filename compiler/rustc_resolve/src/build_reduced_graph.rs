@@ -743,6 +743,9 @@ impl<'a, 'b, 'tcx> BuildReducedGraphVisitor<'a, 'b, 'tcx> {
                 // in the macro namespace as well (see #52225).
                 self.define_macro(item);
             }
+            ItemKind::Kernel(..) => {
+                self.r.define(parent, ident, ValueNS, (res, vis, sp, expansion));
+            }
 
             // These items live in the type namespace.
             ItemKind::TyAlias(..) | ItemKind::TraitAlias(..) => {

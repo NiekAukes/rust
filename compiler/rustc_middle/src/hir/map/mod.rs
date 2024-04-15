@@ -1100,6 +1100,7 @@ fn hir_id_to_string(map: Map<'_>, id: HirId) -> String {
                 ItemKind::Static(..) => "static",
                 ItemKind::Const(..) => "const",
                 ItemKind::Fn(..) => "fn",
+                ItemKind::Kernel(..) => "kernel",
                 ItemKind::Macro(..) => "macro",
                 ItemKind::Mod(..) => "mod",
                 ItemKind::ForeignMod { .. } => "foreign mod",

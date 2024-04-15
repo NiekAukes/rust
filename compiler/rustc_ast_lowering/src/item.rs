@@ -239,7 +239,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             ItemKind::Kernel(box Kernel { inputs, sigspan, body }) => {
                 self.with_new_scopes(ident.span, |this| {
                     let body_id = this.lower_kernel_body(span, hir_id, inputs, body);
-                    let decl = this.lower_kernel_decl(id, inputs, sigspan, body_id);
+                    let decl = this.lower_kernel_decl(id, inputs, *sigspan, body_id);
 
                     hir::ItemKind::Kernel(decl, body_id)
                 })
@@ -1734,6 +1734,24 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     span: self.lower_span(*span),
                 })
             }
+        }
+    }
+
+
+    fn lower_kernel_body(&mut self, _span: Span, _hir_id: hir::HirId, params: &ThinVec<Param>, body: &Block) -> hir::BodyId {
+        self.lower_body(|this| {
+            (
+                this.arena.alloc_from_iter(params.iter().map(|x| this.lower_param(x))),
+                this.lower_block_expr(body),
+            )
+        })
+    }
+
+    fn lower_kernel_decl(&mut self, _id: NodeId, inputs: &ThinVec<Param>, span: Span, _body_id: rustc_hir::BodyId) -> hir::KernelSig<'hir> {
+        let inputs = self.arena.alloc_from_iter(inputs.iter().map(|x| self.lower_ty_direct(&x.ty, ImplTraitContext::Universal)));
+        hir::KernelSig {
+            inputs,
+            span: self.lower_span(span),
         }
     }
 }
