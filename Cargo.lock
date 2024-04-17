@@ -4146,6 +4146,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc_kernelgen_spirv"
+version = "0.1.0"
+
+[[package]]
 name = "rustc_lexer"
 version = "0.0.0"
 dependencies = [
