@@ -102,6 +102,9 @@ bitflags::bitflags! {
         const ALLOCATOR_ZEROED          = 1 << 18;
         /// `#[no_builtins]`: indicates that disable implicit builtin knowledge of functions for the function.
         const NO_BUILTINS               = 1 << 19;
+        
+        /// `#[kernel]`: indicates that the function is a kernel function.
+        const KERNEL                    = 1 << 20;
     }
 }
 rustc_data_structures::external_bitflags_debug! { CodegenFnAttrFlags }

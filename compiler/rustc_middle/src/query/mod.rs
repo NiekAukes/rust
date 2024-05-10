@@ -1906,6 +1906,14 @@ rustc_queries! {
     query codegen_unit(sym: Symbol) -> &'tcx CodegenUnit<'tcx> {
         desc { "getting codegen unit `{sym}`" }
     }
+    
+    query kernel_unit(sym: Symbol) -> &'tcx CodegenUnit<'tcx> {
+        desc { "getting kernel codegen unit" }
+    }
+
+    query compile_kernel_module(sym: Symbol) -> &'tcx CodegenUnit<'tcx> {
+        desc { "compiling kernel module" }
+    }
 
     query unused_generic_params(key: ty::InstanceDef<'tcx>) -> UnusedGenericParams {
         cache_on_disk_if { key.def_id().is_local() }

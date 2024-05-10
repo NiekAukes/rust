@@ -324,6 +324,17 @@ impl<'tcx> UsageMap<'tcx> {
             }
         }
     }
+
+    /// Internally iterate over all inlined items used by `item`.
+    pub fn for_each_used_item<F>(&self, item: MonoItem<'tcx>, mut f: F)
+    where
+        F: FnMut(MonoItem<'tcx>),
+    {
+        let used_items = self.used_map.get(&item).unwrap();
+        for used_item in used_items.iter() {
+            f(*used_item);
+        }
+    }
 }
 
 /// Collect all monomorphized items reachable from `starting_point`, and emit a note diagnostic if a
@@ -1496,7 +1507,16 @@ impl<'v> RootCollector<'_, 'v> {
     /// outputs. (Note that all roots must be monomorphic.)
     #[instrument(skip(self), level = "debug")]
     fn push_if_root(&mut self, def_id: LocalDefId) {
-        if self.is_root(def_id) {
+        if self
+        .tcx
+        .codegen_fn_attrs(def_id)
+        .flags
+        .contains(CodegenFnAttrFlags::KERNEL) {
+            debug!("found kernel function");
+            let instance = Instance::mono(self.tcx, def_id.to_def_id());
+            self.output.push(create_fn_mono_item(self.tcx, instance, DUMMY_SP));
+        }
+        else if self.is_root(def_id) {
             debug!("found root");
 
             let instance = Instance::mono(self.tcx, def_id.to_def_id());

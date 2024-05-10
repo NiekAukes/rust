@@ -49,6 +49,7 @@ pub(super) fn build_custom_mir<'tcx>(
         phase: MirPhase::Built,
         source_scopes: IndexVec::new(),
         coroutine: None,
+        kernel: None,
         local_decls: IndexVec::new(),
         user_type_annotations: IndexVec::new(),
         arg_count: params.len(),

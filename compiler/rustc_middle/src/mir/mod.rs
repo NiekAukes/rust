@@ -253,6 +253,15 @@ impl<'tcx> MirSource<'tcx> {
     }
 }
 
+/// Additional information carried by a MIR body when the function is annotated with `#[kernel]`.
+/// This information is added during a MIR pass.
+/// The Partitioner makes sure that the kernel is added to a special CGU.
+#[derive(Clone, TyEncodable, TyDecodable, Debug, HashStable, TypeFoldable, TypeVisitable)]
+pub struct KernelInfo<'tcx> {
+    //TODO GPU: add kernel info
+    tst: Ty<'tcx>,
+}
+
 /// Additional information carried by a MIR body when it is lowered from a coroutine.
 /// This information is modified as it is lowered during the `StateTransform` MIR pass,
 /// so not all fields will be active at a given time. For example, the `yield_ty` is
@@ -352,6 +361,8 @@ pub struct Body<'tcx> {
     /// themselves, and should probably set this to `None` to avoid carrying redundant
     /// information.
     pub coroutine: Option<Box<CoroutineInfo<'tcx>>>,
+
+    pub kernel: Option<KernelInfo<'tcx>>,
 
     /// Declarations of locals.
     ///
@@ -472,6 +483,7 @@ impl<'tcx> Body<'tcx> {
             basic_blocks: BasicBlocks::new(basic_blocks),
             source_scopes,
             coroutine,
+            kernel: None,
             local_decls,
             user_type_annotations,
             arg_count,
@@ -503,6 +515,7 @@ impl<'tcx> Body<'tcx> {
             basic_blocks: BasicBlocks::new(basic_blocks),
             source_scopes: IndexVec::new(),
             coroutine: None,
+            kernel: None,
             local_decls: IndexVec::new(),
             user_type_annotations: IndexVec::new(),
             arg_count: 0,
@@ -666,6 +679,11 @@ impl<'tcx> Body<'tcx> {
 
     pub fn coroutine_by_move_body(&self) -> Option<&Body<'tcx>> {
         self.coroutine.as_ref()?.by_move_body.as_ref()
+    }
+
+    #[inline]
+    pub fn is_kernel(&self) -> bool {
+        self.kernel.is_some()
     }
 
     #[inline]

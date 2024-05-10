@@ -93,6 +93,21 @@ impl<'tcx> MonoItem<'tcx> {
         }
     }
 
+    pub fn is_kernel(&self, tcx: TyCtxt<'tcx>) -> bool {
+        match self {
+            MonoItem::Fn(instance) => {
+                match instance.def {
+                    InstanceDef::Item(def) => {
+                        tcx.codegen_fn_attrs(def).
+                            flags.contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::KERNEL)
+                    }
+                    _ => false,
+                }
+            }
+            MonoItem::Static(..) | MonoItem::GlobalAsm(..) => false,
+        }
+    }
+
     pub fn symbol_name(&self, tcx: TyCtxt<'tcx>) -> SymbolName<'tcx> {
         match *self {
             MonoItem::Fn(instance) => tcx.symbol_name(instance),
@@ -253,6 +268,13 @@ pub struct CodegenUnit<'tcx> {
     /// True if this is CGU is used to hold code coverage information for dead code,
     /// false otherwise.
     is_code_coverage_dead_code_cgu: bool,
+    kernel: Option<KernelMetaData>,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug, HashStable)]
+pub struct KernelMetaData {
+    pub entry_def_id: DefId,
+    // TODO!
 }
 
 /// Auxiliary info about a `MonoItem`.
@@ -296,13 +318,14 @@ pub enum Visibility {
 
 impl<'tcx> CodegenUnit<'tcx> {
     #[inline]
-    pub fn new(name: Symbol) -> CodegenUnit<'tcx> {
+    pub fn new(name: Symbol, kernel: Option<KernelMetaData>) -> CodegenUnit<'tcx> {
         CodegenUnit {
             name,
             items: Default::default(),
             size_estimate: 0,
             primary: false,
             is_code_coverage_dead_code_cgu: false,
+            kernel: kernel,
         }
     }
 
@@ -312,6 +335,16 @@ impl<'tcx> CodegenUnit<'tcx> {
 
     pub fn set_name(&mut self, name: Symbol) {
         self.name = name;
+    }
+
+    /// Returns `true` if this CGU describes a kernel module.
+    pub fn is_kernel(&self) -> bool {
+        self.kernel.is_some()
+    }
+
+    /// Returns the kernel metadata for this CGU, if it is a kernel module.
+    pub fn kernel(&self) -> Option<KernelMetaData> {
+        self.kernel
     }
 
     pub fn is_primary(&self) -> bool {
@@ -438,10 +471,12 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for CodegenUnit<'tcx> {
             size_estimate: _,
             primary: _,
             is_code_coverage_dead_code_cgu,
+            kernel,
         } = *self;
 
         name.hash_stable(hcx, hasher);
         is_code_coverage_dead_code_cgu.hash_stable(hcx, hasher);
+        kernel.hash_stable(hcx, hasher);
 
         let mut items: Vec<(Fingerprint, _)> = items
             .iter()
