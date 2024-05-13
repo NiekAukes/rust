@@ -1,0 +1,12 @@
+[package]
+name = "rustc_kernel"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+rustc_middle = { path = "../rustc_middle" }
+rustc_span = { path = "../rustc_span" }
+rustc_session = { path = "../rustc_session" }
+rustc_codegen_ssa = { path = "../rustc_codegen_ssa" }
+
+tracing = "0.1"

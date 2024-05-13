@@ -44,7 +44,7 @@ members = [
   "src/tools/generate-windows-sys",
   "src/tools/rustdoc-gui-test",
   "src/tools/opt-dist",
-  "src/tools/coverage-dump",
+  "src/tools/coverage-dump", "compiler/rustc_kernel",
 ]
 
 exclude = [
