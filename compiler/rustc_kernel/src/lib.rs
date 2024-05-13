@@ -8,9 +8,9 @@ extern crate tracing;
 
 pub fn provide(providers: &mut Providers) {
     providers.compile_kernel_module = |tcx, module| {
-        //let mut codegen_backend = tcx.codegen_backend();
-        //codegen_backend.compile_kernel_module(tcx, module)
-        let _ = kernel_embedder::embed_kernel(tcx, &[]);
+        let cgu = tcx.kernel_unit(module);
+        let kernel_metadata = cgu.kernel().unwrap_or(bug!("no kernel metadata for {:?}", module));
+        let _ = kernel_embedder::embed_kernel(tcx, &[], kernel_metadata);
         // tcx.arena.alloc
         todo!()
     };

@@ -101,7 +101,7 @@ use std::path::{Path, PathBuf};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{DefId, DefIdSet, LOCAL_CRATE};
+use rustc_hir::def_id::{DefId, DefIdSet, DefIndex, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathDataName;
 use rustc_middle::bug;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
@@ -250,6 +250,11 @@ where
         let cgu = if is_kernel {
             let kernel_data = KernelMetaData {
                 entry_def_id: mono_item.def_id(),
+                kernel_adt_id: DefId::local(DefIndex::from_u32(0)), // TODO: get the kernel adt id
+
+                dim: cx.tcx.types.i32,
+                kernel_args: todo!(), // TODO: get the kernel args, should be possible with mono_item.def_id()
+                kernel_ret: todo!(), // TODO: get the kernel return type, should be possible with mono_item.def_id()
             };
             kernel_units.entry(cgu_name).or_insert_with(|| CodegenUnit::new(cgu_name, Some(kernel_data)))
         } else {

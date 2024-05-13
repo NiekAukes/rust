@@ -1,5 +1,5 @@
 use crate::dep_graph::{DepNode, WorkProduct, WorkProductId};
-use crate::ty::{GenericArgs, Instance, InstanceDef, SymbolName, TyCtxt};
+use crate::ty::{GenericArgs, Instance, InstanceDef, SymbolName, TyCtxt, Ty};
 use rustc_attr::InlineAttr;
 use rustc_data_structures::base_n::BaseNString;
 use rustc_data_structures::base_n::ToBaseN;
@@ -268,12 +268,18 @@ pub struct CodegenUnit<'tcx> {
     /// True if this is CGU is used to hold code coverage information for dead code,
     /// false otherwise.
     is_code_coverage_dead_code_cgu: bool,
-    kernel: Option<KernelMetaData>,
+    kernel: Option<KernelMetaData<'tcx>>,
 }
 
-#[derive(Copy, Clone, PartialEq, Debug, HashStable)]
-pub struct KernelMetaData {
+#[derive(Clone, PartialEq, Debug, HashStable)]
+pub struct KernelMetaData<'tcx> {
     pub entry_def_id: DefId,
+    pub dim: Ty<'tcx>,
+    pub kernel_args: Ty<'tcx>, // Tuple
+    pub kernel_ret: Ty<'tcx>,
+
+    /// The `DefId` of the `Kernel` struct definition.
+    pub kernel_adt_id: DefId,
     // TODO!
 }
 
@@ -318,7 +324,7 @@ pub enum Visibility {
 
 impl<'tcx> CodegenUnit<'tcx> {
     #[inline]
-    pub fn new(name: Symbol, kernel: Option<KernelMetaData>) -> CodegenUnit<'tcx> {
+    pub fn new(name: Symbol, kernel: Option<KernelMetaData<'tcx>>) -> CodegenUnit<'tcx> {
         CodegenUnit {
             name,
             items: Default::default(),
@@ -343,8 +349,8 @@ impl<'tcx> CodegenUnit<'tcx> {
     }
 
     /// Returns the kernel metadata for this CGU, if it is a kernel module.
-    pub fn kernel(&self) -> Option<KernelMetaData> {
-        self.kernel
+    pub fn kernel(&self) -> Option<&KernelMetaData<'tcx>> {
+        self.kernel.as_ref()
     }
 
     pub fn is_primary(&self) -> bool {
@@ -471,12 +477,12 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for CodegenUnit<'tcx> {
             size_estimate: _,
             primary: _,
             is_code_coverage_dead_code_cgu,
-            kernel,
+            kernel: _,
         } = *self;
 
         name.hash_stable(hcx, hasher);
         is_code_coverage_dead_code_cgu.hash_stable(hcx, hasher);
-        kernel.hash_stable(hcx, hasher);
+        //kernel.hash_stable(hcx, hasher);
 
         let mut items: Vec<(Fingerprint, _)> = items
             .iter()
