@@ -1350,15 +1350,29 @@ pub fn provide(providers: &mut Providers) {
         all_mono_items.contains(&def_id)
     };
 
+    providers.kernel_def_id_cgu_symbol = |tcx, def_id| {
+        let (_, codegen_units) = tcx.collect_and_partition_mono_items(());
+        
+        // search from back to front, because the kernel CGUs are always at the end
+        for cgu in codegen_units.iter().rev() {
+            if let Some(k) = cgu.kernel() {
+                if k.entry_def_id == def_id {
+                    return cgu.name();
+                }
+            }
+        }
+        bug!("failed to find CGU for kernel def_id {def_id:?}");
+    };
+
     providers.codegen_unit = |tcx, name| {
         let (_, all) = tcx.collect_and_partition_mono_items(());
         let cgu = all.iter()
             .find(|cgu| cgu.name() == name)
             .unwrap_or_else(|| panic!("failed to find cgu with name {name:?}"));
         
-        // if the CGU is a kernel module, we need to compile it with the kernel
+        // if the CGU is a kernel module, strip all the non-kernel items
         if cgu.is_kernel() {
-            tcx.compile_kernel_module(name)
+            tcx.compile_kernel_module(cgu.name()).0
         } else {
             cgu
         }

@@ -29,11 +29,10 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_index::IndexVec;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::visit::Visitor as _;
 use rustc_middle::mir::{
-    traversal, AnalysisPhase, Body, CallSource, ClearCrossCrate, ConstOperand, ConstQualifs,
-    LocalDecl, MirPass, MirPhase, Operand, Place, ProjectionElem, Promoted, RuntimePhase, Rvalue,
-    SourceInfo, Statement, StatementKind, TerminatorKind, START_BLOCK,
+    tcx, traversal, AnalysisPhase, Body, CallSource, ClearCrossCrate, ConstOperand, ConstQualifs, LocalDecl, MirPass, MirPhase, Operand, Place, ProjectionElem, Promoted, RuntimePhase, Rvalue, SourceInfo, Statement, StatementKind, TerminatorKind, START_BLOCK
 };
 use rustc_middle::query;
 use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
@@ -624,7 +623,13 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
 /// Optimize the MIR and prepare it for codegen.
 fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
-    tcx.arena.alloc(inner_optimized_mir(tcx, did))
+    if is_kernel(tcx, did) {
+        // do not do any optimizations
+        // return the processed mir directly
+        tcx.processed_kernel_mir(did)
+    } else {
+        tcx.arena.alloc(inner_optimized_mir(tcx, did))
+    }
 }
 
 fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
@@ -666,6 +671,12 @@ fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
     body
 }
 
+// Fixme: make this a query
+fn is_kernel(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
+    let flags = tcx.codegen_fn_attrs(def_id);
+    flags.flags.contains(CodegenFnAttrFlags::KERNEL)
+}
+
 /// Fetch all the promoteds of an item and prepare their MIR bodies to be ready for
 /// constant evaluation once all generic parameters become known.
 fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_>> {
@@ -673,7 +684,21 @@ fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_
         return tcx.arena.alloc(IndexVec::new());
     }
 
+    
+
     tcx.ensure_with_value().mir_borrowck(def);
+    let mut promoted = tcx.mir_promoted(def).1.steal();
+
+    for body in &mut promoted {
+        run_analysis_to_runtime_passes(tcx, body);
+    }
+
+    tcx.arena.alloc(promoted)
+}
+
+/// same as promoted mir, but actually returns the result in a kernel context
+/// instead of passing it to the kernel compiler
+fn promoted_kernel_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_>> {
     let mut promoted = tcx.mir_promoted(def).1.steal();
 
     for body in &mut promoted {

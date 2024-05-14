@@ -1911,8 +1911,24 @@ rustc_queries! {
         desc { "getting kernel codegen unit" }
     }
 
-    query compile_kernel_module(sym: Symbol) -> &'tcx CodegenUnit<'tcx> {
-        desc { "compiling kernel module" }
+    query kernel_def_id_cgu_symbol(def_id: DefId) -> Symbol {
+        desc { |tcx| "getting kernel codegen unit symbol for `{}`", tcx.def_path_str(def_id) }
+    }
+
+    query compile_kernel_module(sym: Symbol) -> (&'tcx CodegenUnit<'tcx>, &'tcx mir::Body<'tcx>) {
+        desc { "compiling kernel module and embedding it in MIR" }
+    }
+
+    query kernel_mir_promoted(key: LocalDefId) -> (
+        &'tcx Steal<mir::Body<'tcx>>,
+        &'tcx Steal<IndexVec<mir::Promoted, mir::Body<'tcx>>>
+    ) {
+        no_hash
+        desc { |tcx| "promoting constants in MIR for `{}`", tcx.def_path_str(key) }
+    }
+
+    query processed_kernel_mir(sym: DefId) -> &'tcx mir::Body<'tcx> {
+        desc { "getting kernel MIR" }
     }
 
     query unused_generic_params(key: ty::InstanceDef<'tcx>) -> UnusedGenericParams {
