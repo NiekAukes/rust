@@ -294,6 +294,7 @@ fn characteristic_def_id_of_type_cached<'a>(
         | ty::Bound(..)
         | ty::Error(_)
         | ty::Never
+        | ty::Kernel(..)
         | ty::Float(_) => None,
     }
 }

@@ -251,6 +251,12 @@ impl FlagComputation {
                 self.add_args(args);
             }
 
+            &ty::Kernel(_, dim, args, ret) => {
+                self.add_ty(ret);
+                self.add_tys(args);
+                self.add_ty(dim);
+            }
+
             &ty::FnPtr(fn_sig) => self.bound_computation(fn_sig, |computation, fn_sig| {
                 computation.add_tys(fn_sig.inputs());
                 computation.add_ty(fn_sig.output());

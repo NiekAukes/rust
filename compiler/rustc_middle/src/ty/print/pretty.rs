@@ -698,6 +698,9 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                     p!(print(sig), " {{", print_value_path(def_id, args), "}}");
                 }
             }
+
+            ty::Kernel(..) => todo!(),
+
             ty::FnPtr(ref bare_fn) => p!(print(bare_fn)),
             ty::Infer(infer_ty) => {
                 if self.should_print_verbose() {

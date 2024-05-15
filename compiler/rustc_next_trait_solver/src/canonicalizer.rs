@@ -362,6 +362,7 @@ impl<Infcx: InferCtxtLike<Interner = I>, I: Interner> TypeFolder<I>
             | ty::Tuple(_)
             | ty::Alias(_, _)
             | ty::Bound(_, _)
+            | ty::Kernel(..)
             | ty::Error(_) => return t.super_fold_with(self),
         };
 

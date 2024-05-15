@@ -8,7 +8,7 @@ use rustc_middle::ty::print::with_forced_trimmed_paths;
 use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt};
 use rustc_span::symbol::Ident;
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::{sym, Span, DUMMY_SP};
 
 use crate::errors::TypeofReservedKeywordUsed;
 
@@ -433,6 +433,19 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
                 _ => icx.lower_ty(*self_ty),
             },
             ItemKind::Fn(..) => {
+                // check if the `#[kernel]` attribute is present,
+                // if it is, the final type of this function will be a const &'static [u8]
+                if tcx.has_attr(def_id, sym::kernel) {
+                    let innerkind = ty::Slice(tcx.types.u8);
+
+                    let tykind = ty::Ref(
+                        tcx.lifetimes.re_static,
+                        tcx.mk_ty_from_kind(innerkind),
+                        ty::Mutability::Not,
+                    );
+                    let ty = tcx.mk_ty_from_kind(tykind);
+                    return ty::EarlyBinder::bind(ty);
+                }
                 let args = ty::GenericArgs::identity_for_item(tcx, def_id);
                 Ty::new_fn_def(tcx, def_id.to_def_id(), args)
             }

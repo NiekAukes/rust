@@ -2302,6 +2302,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Never
             | ty::Tuple(_)
             | ty::Error(_)
+            | ty::Kernel(..)
             | ty::Infer(IntVar(_) | FloatVar(_)) => tcx.types.u8,
 
             ty::Bound(..)
@@ -2466,6 +2467,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::CoroutineClosure(..)
             | ty::Never
             | ty::Error(_)
+            | ty::Kernel(..)
             // Extern types have metadata = ().
             | ty::Foreign(..)
             // `dyn*` has metadata = ().
@@ -2631,6 +2633,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::CoroutineClosure(..)
             | ty::Never
             | ty::Error(_)
+            | ty::Kernel(..)
             | ty::Dynamic(_, _, ty::DynStar) => true,
 
             ty::Str | ty::Slice(_) | ty::Dynamic(_, _, ty::Dyn) | ty::Foreign(..) => false,
@@ -2665,6 +2668,7 @@ impl<'tcx> Ty<'tcx> {
 
             // These aren't even `Clone`
             ty::Str | ty::Slice(..) | ty::Foreign(..) | ty::Dynamic(..) => false,
+            ty::Kernel(..) => false, // the kernel is a wrapper around a `&[u8]`
 
             ty::Infer(ty::InferTy::FloatVar(_) | ty::InferTy::IntVar(_))
             | ty::Int(..)
@@ -2673,6 +2677,7 @@ impl<'tcx> Ty<'tcx> {
 
             // ZST which can't be named are fine.
             ty::FnDef(..) => true,
+
 
             ty::Array(element_ty, _len) => element_ty.is_trivially_pure_clone_copy(),
 
@@ -2776,6 +2781,7 @@ impl<'tcx> Ty<'tcx> {
             | Coroutine(_, _)
             | CoroutineWitness(..)
             | Never
+            | Kernel(..)
             | Tuple(_) => true,
             Error(_) | Infer(_) | Alias(_, _) | Param(_) | Bound(_, _) | Placeholder(_) => false,
         }

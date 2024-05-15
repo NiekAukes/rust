@@ -204,6 +204,11 @@ fn push_inner<'tcx>(stack: &mut TypeWalkerStack<'tcx>, parent: GenericArg<'tcx>)
             | ty::FnDef(_, args) => {
                 stack.extend(args.iter().rev());
             }
+            ty::Kernel(_, dim, args, ret) => {
+                stack.push(ret.into());
+                stack.extend(args.iter().rev().map(GenericArg::from));
+                stack.push(dim.into());
+            }
             ty::Tuple(ts) => stack.extend(ts.iter().rev().map(GenericArg::from)),
             ty::FnPtr(sig) => {
                 stack.push(sig.skip_binder().output().into());

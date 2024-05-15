@@ -608,6 +608,9 @@ impl<'tcx> TypeSuperFoldable<TyCtxt<'tcx>> for Ty<'tcx> {
             ),
             ty::Tuple(ts) => ty::Tuple(ts.try_fold_with(folder)?),
             ty::FnDef(def_id, args) => ty::FnDef(def_id, args.try_fold_with(folder)?),
+            ty::Kernel(def_id, dim, args, ret) => {
+                ty::Kernel(def_id, dim.try_fold_with(folder)?, args.try_fold_with(folder)?, ret.try_fold_with(folder)?)
+            }
             ty::FnPtr(f) => ty::FnPtr(f.try_fold_with(folder)?),
             ty::Ref(r, ty, mutbl) => {
                 ty::Ref(r.try_fold_with(folder)?, ty.try_fold_with(folder)?, mutbl)
@@ -672,6 +675,12 @@ impl<'tcx> TypeSuperVisitable<TyCtxt<'tcx>> for Ty<'tcx> {
             ty::Pat(ty, pat) => {
                 try_visit!(ty.visit_with(visitor));
                 pat.visit_with(visitor)
+            }
+
+            ty::Kernel(_, dim, args, ret) => {
+                try_visit!(dim.visit_with(visitor));
+                try_visit!(args.visit_with(visitor));
+                ret.visit_with(visitor)
             }
 
             ty::Bool

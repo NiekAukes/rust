@@ -762,6 +762,7 @@ where
                 | ty::CoroutineWitness(..)
                 | ty::Foreign(..)
                 | ty::Pat(_, _)
+                | ty::Kernel(..)
                 | ty::Dynamic(_, _, ty::Dyn) => {
                     bug!("TyAndLayout::field({:?}): not applicable", this)
                 }

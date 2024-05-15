@@ -247,6 +247,10 @@ pub enum TyKind<I: Interner> {
     /// A placeholder for a type which could not be computed; this is
     /// propagated to avoid useless error messages.
     Error(I::ErrorGuaranteed),
+
+    /// A kernel type, this is needed because the kernel behaves differently on declaration
+    /// compared to usage. This is used to represent the type of a (compiled) kernel function.
+    Kernel(I::DefId, I::Ty, I::Tys, I::Ty),
 }
 
 impl<I: Interner> TyKind<I> {
@@ -289,6 +293,7 @@ const fn tykind_discriminant<I: Interner>(value: &TyKind<I>) -> usize {
         Placeholder(_) => 25,
         Infer(_) => 26,
         Error(_) => 27,
+        Kernel(..) => 28,
     }
 }
 
@@ -416,6 +421,9 @@ impl<I: Interner> DebugWithInfcx<I> for TyKind<I> {
             Placeholder(p) => write!(f, "{p:?}"),
             Infer(t) => write!(f, "{:?}", this.wrap(t)),
             TyKind::Error(_) => write!(f, "{{type error}}"),
+            Kernel(_did, t, args, ret) => {
+                write!(f, "kernel {:?}(?) -> {:?}", &this.wrap(t), &this.wrap(ret))
+            }
         }
     }
 }

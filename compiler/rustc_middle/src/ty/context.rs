@@ -1678,6 +1678,7 @@ macro_rules! sty_debug_print {
                             ty::Bool | ty::Char | ty::Int(..) | ty::Uint(..) |
                                 ty::Float(..) | ty::Str | ty::Never => continue,
                             ty::Error(_) => /* unimportant */ continue,
+                            ty::Kernel(..) => continue,
                             $(ty::$variant(..) => &mut $variant,)*
                         };
                         let lt = t.flags.intersects(ty::TypeFlags::HAS_RE_INFER);
@@ -1745,7 +1746,8 @@ impl<'tcx> TyCtxt<'tcx> {
                     Infer,
                     Alias,
                     Pat,
-                    Foreign
+                    Foreign,
+                    Kernel
                 )?;
 
                 writeln!(fmt, "GenericArgs interner: #{}", self.0.interners.args.len())?;

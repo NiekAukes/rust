@@ -1259,6 +1259,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Infer(_)
             | ty::Alias(..)
             | ty::Param(_)
+            | ty::Kernel(..)
             | ty::Placeholder(_) => false,
         }
     }
@@ -1299,6 +1300,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Infer(_)
             | ty::Alias(..)
             | ty::Param(_)
+            | ty::Kernel(..)
             | ty::Placeholder(_) => false,
         }
     }
@@ -1510,6 +1512,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
             | ty::Dynamic(..)
+            | ty::Kernel(..)
             | ty::Coroutine(..) => false,
 
             // Generic or inferred types
@@ -1614,6 +1617,7 @@ pub fn needs_drop_components<'tcx>(
         | ty::Float(_)
         | ty::Never
         | ty::FnDef(..)
+        | ty::Kernel(..)
         | ty::FnPtr(_)
         | ty::Char
         | ty::RawPtr(_, _)
@@ -1674,6 +1678,7 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
         | ty::RawPtr(_, _)
         | ty::Ref(..)
         | ty::FnDef(..)
+        | ty::Kernel(..)
         | ty::FnPtr(_)
         | ty::Never
         | ty::Foreign(_) => true,

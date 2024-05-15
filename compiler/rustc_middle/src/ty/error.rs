@@ -299,6 +299,7 @@ impl<'tcx> Ty<'tcx> {
                 DefKind::Ctor(CtorOf::Variant, _) => "enum constructor".into(),
                 _ => "fn item".into(),
             },
+            ty::Kernel(..) => "kernel".into(),
             ty::FnPtr(_) => "fn pointer".into(),
             ty::Dynamic(..) => "trait object".into(),
             ty::Closure(..) | ty::CoroutineClosure(..) => "closure".into(),
