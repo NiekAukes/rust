@@ -1043,6 +1043,7 @@ symbols! {
         iterator,
         iterator_collect_fn,
         kcfi,
+        kernel,
         keyword,
         kind,
         kreg,

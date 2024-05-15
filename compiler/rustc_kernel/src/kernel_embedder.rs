@@ -17,30 +17,19 @@ fn literal_const_builder<'tcx>(tcx: TyCtxt<'tcx>, code: &[u8]) -> Const<'tcx> {
 
     Const::from_ty_const(x, tcx)
 }
-
+/*
 // TODO! kernel builder. needs THIR or HIR
-/*fn kernel_const_builder<'tcx>(tcx: TyCtxt<'tcx>, kernel_metadata: KernelMetaData) -> Const<'tcx> {
+fn kernel_const_builder<'tcx>(tcx: TyCtxt<'tcx>, instance: &'tcx Instance, kernel_metadata: &'tcx KernelMetaData) -> Body<'tcx> {
     // create a kernel kind with the following definition:
     // struct Kernel<Dim, Args, Ret> where Args: Tuple { ... }
     
-    // we first need the kernel dimension
-    let dim_ty = kernel_metadata.dim;
-
-    // we then need the kernel arguments
-    let args_ty = kernel_metadata.kernel_args;
-
-    // we then need the kernel return type
-    let ret_ty = kernel_metadata.kernel_ret; 
+    let ty = tcx.type_of(kernel_metadata.entry_def_id);
     
-    let d = GenericArg::from(dim_ty);
-    let a = GenericArg::from(args_ty);
-    let r = GenericArg::from(ret_ty);
 
-    // create the generic arguments
-    let adt_def = tcx.adt_def(kernel_metadata.kernel_adt_id);
-    let ty_kind = TyKind::Adt(adt_def, &generic_args);
-}*/
-
+    ty.
+    todo!()
+}
+ */
 
 pub fn embed_kernel<'tcx>(
     tcx: TyCtxt<'tcx>, 

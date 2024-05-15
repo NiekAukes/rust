@@ -17,7 +17,7 @@ pub fn provide(providers: &mut Providers) {
         let _ = kernel_embedder::embed_kernel(tcx, &[], kernel_metadata);
         // compile the kernel module using processed_kernel_mir
         // and return a new modified CGU that compiles that processed kernel MIR
-
+            
         todo!()        
     };
 
