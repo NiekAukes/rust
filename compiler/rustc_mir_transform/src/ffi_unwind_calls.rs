@@ -55,13 +55,16 @@ fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
 
     let body = &*tcx.mir_built(local_def_id).borrow();
 
+
     let body_ty = tcx.type_of(def_id).skip_binder();
+    // IMPORTANT: due to kernels, the DefKind may be fn_like, but the Ty can be something else
     let body_abi = match body_ty.kind() {
         ty::FnDef(..) => body_ty.fn_sig(tcx).abi(),
         ty::Closure(..) => Abi::RustCall,
         ty::CoroutineClosure(..) => Abi::RustCall,
         ty::Coroutine(..) => Abi::Rust,
         ty::Error(_) => return false,
+        _ if tcx.is_kernel(def_id) => return false, // if the function is a kernel, return false
         _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
     };
     let body_can_unwind = layout::fn_can_unwind(tcx, Some(def_id), body_abi);

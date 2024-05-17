@@ -1315,7 +1315,12 @@ pub fn build_global_var_di_node<'ll>(cx: &CodegenCx<'ll, '_>, def_id: DefId, glo
 
     let is_local_to_unit = is_node_local_to_unit(cx, def_id);
 
-    let DefKind::Static { nested, .. } = cx.tcx.def_kind(def_id) else { bug!() };
+    let AA = 1;
+    let nested = match cx.tcx.def_kind(def_id) {
+        DefKind::Static {nested, ..} => nested,
+        _ if cx.tcx.is_kernel(def_id) => false,
+        _ => bug!("get_static: expected a static, but got {:?}", def_id),
+    };
     if nested {
         return;
     }

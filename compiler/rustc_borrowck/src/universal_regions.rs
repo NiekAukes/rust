@@ -35,6 +35,8 @@ use std::iter;
 use crate::renumber::RegionCtxt;
 use crate::BorrowckInferCtxt;
 
+use rustc_middle::kernel;
+
 #[derive(Debug)]
 pub struct UniversalRegions<'tcx> {
     indices: UniversalRegionIndices<'tcx>,
@@ -588,6 +590,11 @@ impl<'cx, 'tcx> UniversalRegionsBuilder<'cx, 'tcx> {
                         DefiningTy::CoroutineClosure(def_id, args)
                     }
                     ty::FnDef(def_id, args) => DefiningTy::FnDef(def_id, args),
+                    _ if tcx.is_kernel(self.mir_def.to_def_id()) => {
+                        // If the function is a kernel, return FnDef with no args
+                        
+                        DefiningTy::FnDef(self.mir_def.to_def_id(), GenericArgs::empty())
+                    }
                     _ => span_bug!(
                         tcx.def_span(self.mir_def),
                         "expected defining type for `{:?}`: `{:?}`",

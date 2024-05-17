@@ -14,6 +14,7 @@ use rustc_index::bit_set::GrowableBitSet;
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_middle::hir::place::PlaceBase as HirPlaceBase;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::region;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::*;
@@ -477,7 +478,19 @@ fn construct_fn<'tcx>(
             args.as_coroutine().resume_ty(),
         ))),
         ty::Closure(..) | ty::CoroutineClosure(..) | ty::FnDef(..) => None,
-        ty => span_bug!(span_with_body, "unexpected type of body: {ty:?}"),
+        ty => {
+            let a = 1;
+            // we may have a kernel type, check CodegenFnAttrFlags
+            if tcx.def_kind(fn_def) != DefKind::Fn {
+                span_bug!(span_with_body, "unexpected type of body: {ty:?}")
+            }
+            let flags = tcx.codegen_fn_attrs(fn_def).flags;
+            if flags.contains(CodegenFnAttrFlags::KERNEL) {
+                None // same as FnDef
+            } else { 
+                span_bug!(span_with_body, "unexpected type of body: {ty:?}") 
+            }
+        },
     };
 
     if let Some(custom_mir_attr) =

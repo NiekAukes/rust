@@ -130,6 +130,7 @@ pub fn provide(providers: &mut Providers) {
         mir_for_ctfe,
         mir_coroutine_witnesses: coroutine::mir_coroutine_witnesses,
         optimized_mir,
+        optimized_kernel_mir,
         is_mir_available,
         is_ctfe_mir_available: |tcx, did| is_mir_available(tcx, did),
         mir_callgraph_reachable: inline::cycle::mir_callgraph_reachable,
@@ -623,13 +624,21 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
 /// Optimize the MIR and prepare it for codegen.
 fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
-    if is_kernel(tcx, did) {
+    if tcx.is_kernel(did) {
         // do not do any optimizations
         // return the processed mir directly
+        bug!("optimized_mir should not be called for kernel functions");
         tcx.processed_kernel_mir(did)
     } else {
         tcx.arena.alloc(inner_optimized_mir(tcx, did))
     }
+}
+
+/// Optimize the MIR and prepare it for codegen.
+/// specifically for kernel code
+fn optimized_kernel_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
+    assert!(tcx.is_kernel(did));
+    tcx.arena.alloc(inner_optimized_mir(tcx, did))
 }
 
 fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
@@ -669,12 +678,6 @@ fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
     run_optimization_passes(tcx, &mut body);
 
     body
-}
-
-// Fixme: make this a query
-fn is_kernel(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
-    let flags = tcx.codegen_fn_attrs(def_id);
-    flags.flags.contains(CodegenFnAttrFlags::KERNEL)
 }
 
 /// Fetch all the promoteds of an item and prepare their MIR bodies to be ready for

@@ -9,6 +9,7 @@
 use crate::dep_graph;
 use crate::infer::canonical::{self, Canonical};
 use crate::lint::LintExpectation;
+use crate::kernel::KernelCode;
 use crate::metadata::ModChild;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrs;
 use crate::middle::debugger_visualizer::DebuggerVisualizerFile;
@@ -23,7 +24,7 @@ use crate::mir::interpret::{
     EvalStaticInitializerRawResult, EvalToAllocationRawResult, EvalToConstValueResult,
     EvalToValTreeResult,
 };
-use crate::mir::interpret::{LitToConstError, LitToConstInput};
+use crate::mir::interpret::{LitToConstError, LitToConstInput, AllocDecodingSession};
 use crate::mir::mono::CodegenUnit;
 use crate::query::erase::{erase, restore, Erase};
 use crate::query::plumbing::{
@@ -89,6 +90,7 @@ use std::mem;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
+
 
 pub mod erase;
 mod keys;
@@ -567,6 +569,12 @@ rustc_queries! {
     /// for codegen. This is also the only query that can fetch non-local MIR, at present.
     query optimized_mir(key: DefId) -> &'tcx mir::Body<'tcx> {
         desc { |tcx| "optimizing MIR for `{}`", tcx.def_path_str(key) }
+        cache_on_disk_if { key.is_local() }
+        separate_provide_extern
+    }
+
+    query optimized_kernel_mir(key: DefId) -> &'tcx mir::Body<'tcx> {
+        desc { |tcx| "optimizing kernel MIR for `{}`", tcx.def_path_str(key) }
         cache_on_disk_if { key.is_local() }
         separate_provide_extern
     }
@@ -1911,11 +1919,15 @@ rustc_queries! {
         desc { "getting kernel codegen unit" }
     }
 
+    query is_kernel(def_id: DefId) -> bool {
+        desc { |tcx| "determining whether `{}` is a kernel item", tcx.def_path_str(def_id) }
+    }
+
     query kernel_def_id_cgu_symbol(def_id: DefId) -> Symbol {
         desc { |tcx| "getting kernel codegen unit symbol for `{}`", tcx.def_path_str(def_id) }
     }
 
-    query compile_kernel_module(sym: Symbol) -> (&'tcx CodegenUnit<'tcx>, &'tcx mir::Body<'tcx>) {
+    query compile_kernel_module(sym: Symbol) -> &'tcx KernelCode<'tcx> {
         desc { "compiling kernel module and embedding it in MIR" }
     }
 

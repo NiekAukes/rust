@@ -27,6 +27,7 @@ rustc_hir = { path = "../rustc_hir" }
 rustc_hir_analysis = { path = "../rustc_hir_analysis" }
 rustc_hir_typeck = { path = "../rustc_hir_typeck" }
 rustc_incremental = { path = "../rustc_incremental" }
+rustc_kernel = { path = "../rustc_kernel" }
 rustc_lint = { path = "../rustc_lint" }
 rustc_macros = { path = "../rustc_macros" }
 rustc_metadata = { path = "../rustc_metadata" }

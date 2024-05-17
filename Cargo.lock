@@ -4180,6 +4180,7 @@ dependencies = [
  "rustc_hir_analysis",
  "rustc_hir_typeck",
  "rustc_incremental",
+ "rustc_kernel",
  "rustc_lint",
  "rustc_macros",
  "rustc_metadata",
@@ -4209,6 +4210,7 @@ name = "rustc_kernel"
 version = "0.0.0"
 dependencies = [
  "rustc_codegen_ssa",
+ "rustc_hir",
  "rustc_middle",
  "rustc_session",
  "rustc_span",

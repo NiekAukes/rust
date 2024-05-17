@@ -214,6 +214,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                 sym::link_name => self.check_link_name(hir_id, attr, span, target),
                 sym::link_section => self.check_link_section(hir_id, attr, span, target),
                 sym::no_mangle => self.check_no_mangle(hir_id, attr, span, target),
+                sym::kernel => self.check_kernel(hir_id, attr, span, target),
                 sym::deprecated => self.check_deprecated(hir_id, attr, span, target),
                 sym::macro_use | sym::macro_escape => self.check_macro_use(hir_id, attr, target),
                 sym::path => self.check_generic_attr(hir_id, attr, target, Target::Mod),
@@ -1768,6 +1769,11 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                 );
             }
         }
+    }
+
+    fn check_kernel(&self, hir_id: HirId, attr: &Attribute, span: Span, target: Target) {
+        // TODO! check if the target is a function
+        // check if the target has the right signature
     }
 
     /// Checks if the `#[repr]` attributes on `item` are valid.

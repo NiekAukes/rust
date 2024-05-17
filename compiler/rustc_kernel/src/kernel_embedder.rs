@@ -1,6 +1,7 @@
-use rustc_middle::mir::mono::KernelMetaData;
+use rustc_middle::mir::interpret::{Allocation, ConstAllocation};
+use rustc_middle::mir::mono::{KernelMetaData, MonoItem};
 use rustc_middle::ty::{AdtDef, AdtKind, Const as TyConst, ConstData, ConstKind, GenericArg, GenericArgs, TyCtxt, TyKind, ValTree, VariantDef};
-use rustc_middle::mir::{Const, Body};
+use rustc_middle::mir::{Body, Const, ConstAlloc};
 
 
 fn literal_const_builder<'tcx>(tcx: TyCtxt<'tcx>, code: &[u8]) -> Const<'tcx> {
@@ -31,17 +32,27 @@ fn kernel_const_builder<'tcx>(tcx: TyCtxt<'tcx>, instance: &'tcx Instance, kerne
 }
  */
 
+pub fn literal_constalloc_builder<'tcx>(tcx: TyCtxt<'tcx>, code: &[u8]) -> ConstAllocation<'tcx> {
+    let alloc = Allocation::from_bytes_byte_aligned_immutable(code);
+    tcx.mk_const_alloc(alloc)
+}
+
 pub fn embed_kernel<'tcx>(
     tcx: TyCtxt<'tcx>, 
     code: &[u8], 
-    kernel_metadata: &KernelMetaData<'tcx>) 
-    -> Body<'tcx>
+    _kernel_metadata: &KernelMetaData) 
+    -> ConstAllocation<'tcx>
  {
     let lc = literal_const_builder(tcx, code);
     //let _ = kernel_const_builder(tcx, kernel_metadata);
     // to amend the MIR such that we add an object with the code
 
+    let const_alloc = literal_constalloc_builder(tcx, code);
+
+    //let mono = MonoItem::Static();
+
     // as a quick fix, bind the Constant to the kernel def_id
-    let did = kernel_metadata.entry_def_id;
-    todo!()
+    //let did = kernel_metadata.entry_def_id;
+    //todo!()
+    const_alloc
 }

@@ -313,6 +313,14 @@ pub fn eval_static_initializer_provider<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
 ) -> ::rustc_middle::mir::interpret::EvalStaticInitializerRawResult<'tcx> {
+    // if the static is a kernel, use the kernel evaluator
+    if tcx.is_kernel(def_id.to_def_id()) {
+        let A = 1;
+        let res = tcx.compile_kernel_module(tcx.kernel_def_id_cgu_symbol(def_id.to_def_id()));
+        let res = res.const_alloc;
+        return Ok(res);
+    }
+
     assert!(tcx.is_static(def_id.to_def_id()));
 
     let instance = ty::Instance::mono(tcx, def_id.to_def_id());

@@ -234,27 +234,25 @@ where
         let characteristic_def_id = characteristic_def_id_of_mono_item(cx.tcx, mono_item);
         let is_volatile = is_incremental_build && mono_item.is_generic_fn(cx.tcx);
 
+        let is_kernel = mono_item.is_kernel(cx.tcx);
+
         let cgu_name = match characteristic_def_id {
             Some(def_id) => compute_codegen_unit_name(
                 cx.tcx,
                 cgu_name_builder,
                 def_id,
                 is_volatile,
+                is_kernel,
                 cgu_name_cache,
             ),
             None => fallback_cgu_name(cgu_name_builder),
         };
 
-        let is_kernel = mono_item.is_kernel(cx.tcx);
         
         let cgu = if is_kernel {
             let kernel_data = KernelMetaData {
                 entry_def_id: mono_item.def_id(),
                 kernel_adt_id: DefId::local(DefIndex::from_u32(0)), // TODO: get the kernel adt id
-
-                dim: cx.tcx.types.i32,
-                kernel_args: todo!(), // TODO: get the kernel args, should be possible with mono_item.def_id()
-                kernel_ret: todo!(), // TODO: get the kernel return type, should be possible with mono_item.def_id()
             };
             kernel_units.entry(cgu_name).or_insert_with(|| CodegenUnit::new(cgu_name, Some(kernel_data)))
         } else {
@@ -318,10 +316,13 @@ where
     }
 
     let mut codegen_units: Vec<_> = codegen_units.into_values().collect();
-    let kernel_units: Vec<_> = kernel_units.into_values().collect();
+    let mut kernel_units: Vec<_> = kernel_units.into_values().collect();
     codegen_units.sort_by(|a, b| a.name().as_str().cmp(b.name().as_str()));
 
     for cgu in codegen_units.iter_mut() {
+        cgu.compute_size_estimate();
+    }
+    for cgu in kernel_units.iter_mut() {
         cgu.compute_size_estimate();
     }
 
@@ -725,6 +726,7 @@ fn compute_codegen_unit_name(
     name_builder: &mut CodegenUnitNameBuilder<'_>,
     def_id: DefId,
     volatile: bool,
+    kernel: bool,
     cache: &mut CguNameCache,
 ) -> Symbol {
     // Find the innermost module that is not nested within a function.
@@ -754,7 +756,7 @@ fn compute_codegen_unit_name(
 
     let cgu_def_id = cgu_def_id.unwrap();
 
-    *cache.entry((cgu_def_id, volatile)).or_insert_with(|| {
+    *cache.entry((cgu_def_id, volatile, kernel)).or_insert_with(|| {
         let def_path = tcx.def_path(cgu_def_id);
 
         let components = def_path.data.iter().map(|part| match part.data.name() {
@@ -762,9 +764,13 @@ fn compute_codegen_unit_name(
             DefPathDataName::Anon { .. } => unreachable!(),
         });
 
-        let volatile_suffix = volatile.then_some("volatile");
+        let suffix = if volatile { 
+            Some("volatile") 
+        } else { 
+            kernel.then_some("kernel")
+        };	
 
-        name_builder.build_cgu_name(def_path.krate, components, volatile_suffix)
+        name_builder.build_cgu_name(def_path.krate, components, suffix)
     })
 }
 
@@ -786,7 +792,7 @@ fn mono_item_linkage_and_visibility<'tcx>(
     (Linkage::External, vis)
 }
 
-type CguNameCache = FxHashMap<(DefId, bool), Symbol>;
+type CguNameCache = FxHashMap<(DefId, bool, bool), Symbol>;
 
 fn static_visibility<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -1181,6 +1187,10 @@ fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> (&DefIdSet, &[Co
         )
     });
 
+    for cgu in codegen_units {
+        debug!("CodegenUnit {} => kernel: {}", cgu.name(), cgu.is_kernel());
+    }
+
     if tcx.prof.enabled() {
         // Record CGU size estimates for self-profiling.
         for cgu in codegen_units {
@@ -1372,7 +1382,7 @@ pub fn provide(providers: &mut Providers) {
         
         // if the CGU is a kernel module, strip all the non-kernel items
         if cgu.is_kernel() {
-            tcx.compile_kernel_module(cgu.name()).0
+            tcx.compile_kernel_module(cgu.name()).cgu
         } else {
             cgu
         }

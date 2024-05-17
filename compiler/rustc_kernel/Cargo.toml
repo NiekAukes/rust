@@ -8,5 +8,6 @@ rustc_middle = { path = "../rustc_middle" }
 rustc_span = { path = "../rustc_span" }
 rustc_session = { path = "../rustc_session" }
 rustc_codegen_ssa = { path = "../rustc_codegen_ssa" }
+rustc_hir = { path = "../rustc_hir" }
 
 tracing = "0.1"

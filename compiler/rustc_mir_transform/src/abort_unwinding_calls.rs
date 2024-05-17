@@ -32,7 +32,7 @@ impl<'tcx> MirPass<'tcx> for AbortUnwindingCalls {
         if !kind.is_fn_like() {
             return;
         }
-
+        let a = 1;
         // Here we test for this function itself whether its ABI allows
         // unwinding or not.
         let body_ty = tcx.type_of(def_id).skip_binder();
@@ -42,6 +42,7 @@ impl<'tcx> MirPass<'tcx> for AbortUnwindingCalls {
             ty::CoroutineClosure(..) => Abi::RustCall,
             ty::Coroutine(..) => Abi::Rust,
             ty::Error(_) => return,
+            _ if tcx.is_kernel(def_id) => return, //TODO check if this is accurate
             _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
         };
         let body_can_unwind = layout::fn_can_unwind(tcx, Some(def_id), body_abi);
