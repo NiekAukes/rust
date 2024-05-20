@@ -406,7 +406,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         fake_borrow_temps: Option<&mut Vec<Local>>,
     ) -> BlockAnd<PlaceBuilder<'tcx>> {
         let expr = &self.thir[expr_id];
-        debug!("expr_as_place(block={:?}, expr={:?}, mutability={:?})", block, expr, mutability);
+        println!("expr_as_place(block={:?}, expr={:?}, mutability={:?})", block, expr, mutability);
 
         let this = self;
         let expr_span = expr.span;

@@ -55,7 +55,7 @@ impl<'tcx> MirPass<'tcx> for Validator {
         } else if !tcx.def_kind(def_id).is_fn_like() {
             true
         } else {
-            let A = 1;
+            //let A = 1;
             let body_ty = tcx.type_of(def_id).skip_binder();
             let body_abi = match body_ty.kind() {
                 ty::FnDef(..) => body_ty.fn_sig(tcx).abi(),

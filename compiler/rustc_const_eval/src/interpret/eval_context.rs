@@ -569,11 +569,10 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         promoted: Option<mir::Promoted>,
     ) -> InterpResult<'tcx, &'tcx mir::Body<'tcx>> {
         trace!("load mir(instance={:?}, promoted={:?})", instance, promoted);
-        let body = if let Some(promoted) = promoted {
-            let def = instance.def_id();
-            &self.tcx.promoted_mir(def)[promoted]
-        } else {
-            M::load_mir(self, instance)?
+        let body = match (promoted, self.tcx.is_kernel(instance.def_id())) {
+            (_, true) => self.tcx.processed_kernel_mir(instance.def_id()),
+            (Some(promoted), _) => &self.tcx.promoted_mir(instance.def_id())[promoted],
+            (None, _) => M::load_mir(self, instance)?,
         };
         // do not continue if typeck errors occurred (can only occur in local crate)
         if let Some(err) = body.tainted_by_errors {

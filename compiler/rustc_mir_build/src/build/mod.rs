@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use crate::build::expr::as_place::PlaceBuilder;
+use crate::build::expr::as_constant::as_constant_inner;
 use crate::build::scope::DropKind;
 use itertools::Itertools;
 use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_apfloat::Float;
-use rustc_ast::attr;
+use rustc_ast::{attr, LitKind};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sorted_map::SortedIndexMultiMap;
 use rustc_errors::ErrorGuaranteed;
@@ -16,16 +19,17 @@ use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_middle::hir::place::PlaceBase as HirPlaceBase;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::region;
-use rustc_middle::mir::interpret::Scalar;
+use rustc_middle::mir::interpret::{Allocation, Scalar};
 use rustc_middle::mir::*;
 use rustc_middle::query::TyCtxtAt;
-use rustc_middle::thir::{self, ExprId, LintLevel, LocalVarId, Param, ParamId, PatKind, Thir};
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::thir::{self, Expr, ExprId, ExprKind, LintLevel, LocalVarId, Param, ParamId, PatKind, Thir};
+use rustc_middle::ty::{self, Const as TyConst, Region, RegionKind, Ty, TyCtxt, TyKind, TypeVisitableExt};
 use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_span::Symbol;
 use rustc_target::abi::FieldIdx;
 use rustc_target::spec::abi::Abi;
+
 
 use super::lints;
 
@@ -1101,6 +1105,45 @@ pub(crate) fn parse_float_into_scalar(
     }
 }
 
+pub fn construct_literal_const<'tcx>(tcx: TyCtxt<'tcx>, code: &[u8]) -> Body<'tcx> {
+    // create a (const) body that will define the code as a [u8]
+    let a = 1;
+    let mut cfg = CFG { basic_blocks: IndexVec::new() };
+
+    // create type
+    //TyKind::Array(tcx.types.u8, TyConst::from_target_usize(tcx, code.len() as u64));
+    let tykind = TyKind::Ref(
+        Region::new_from_kind(tcx, RegionKind::ReStatic), 
+        tcx.mk_ty_from_kind(TyKind::Slice(tcx.types.u8)),
+        Mutability::Not
+    );
+    let ty = tcx.mk_ty_from_kind(tykind);
+    
+    // create const allocation
+    let allocation = Allocation::from_bytes_byte_aligned_immutable(code);
+    let allocation = tcx.mk_const_alloc(allocation);
+    let value = ConstValue::Slice { data: allocation, meta: allocation.inner().size().bytes() };
+    let constant = Const::Val(value, ty);
+    println!("constant: {:?}", constant);
+    let constant = ConstOperand { span: Span::default(), user_ty: None, const_: constant };
+
+    
+    // create rvalue
+    let rvalue = Rvalue::Use(Operand::Constant(Box::new(constant)));
+    let block = cfg.start_new_block();
+    let source_info = SourceInfo { span: Span::default(), scope: OUTERMOST_SOURCE_SCOPE };
+    cfg.push_assign(block, source_info, Place::return_place(), rvalue);
+
+    // terminate block
+    cfg.terminate(block, source_info, TerminatorKind::Return);
+
+    let localdecls = IndexVec::from_elem_n(LocalDecl::new(ty, Span::default()), 1);
+
+    let mut body = Body::new_cfg_only(cfg.basic_blocks);
+    body.local_decls = localdecls;
+    body
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Builder methods are broken up into modules, depending on what kind
 // of thing is being lowered. Note that they use the `unpack` macro
@@ -1110,7 +1153,7 @@ mod block;
 mod cfg;
 mod coverageinfo;
 mod custom;
-mod expr;
+pub mod expr;
 mod matches;
 mod misc;
 mod scope;

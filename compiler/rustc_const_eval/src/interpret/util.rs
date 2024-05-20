@@ -5,7 +5,7 @@ use rustc_middle::mir;
 use rustc_middle::mir::interpret::{Allocation, InterpResult, Pointer};
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::ty::{
-    self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor,
+    self, print, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor
 };
 use std::ops::ControlFlow;
 
@@ -87,6 +87,7 @@ impl<'tcx> InterpretationResult<'tcx> for mir::interpret::ConstAllocation<'tcx> 
         ecx: &mut InterpCx<'mir, 'tcx, CompileTimeInterpreter<'mir, 'tcx>>,
     ) -> Self {
         let alloc_id = mplace.ptr().provenance.unwrap().alloc_id();
+        println!("make_result: {:?}", alloc_id);
         let alloc = ecx.memory.alloc_map.swap_remove(&alloc_id).unwrap().1;
         ecx.tcx.mk_const_alloc(alloc)
     }

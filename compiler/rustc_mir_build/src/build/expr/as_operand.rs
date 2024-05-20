@@ -116,6 +116,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             });
         }
 
+        println!("as_operand: expr: {:?}", expr);
+
         let category = Category::of(&expr.kind).unwrap();
         debug!(?category, ?expr.kind);
         match category {
@@ -123,10 +125,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 if matches!(needs_temporary, NeedsTemporary::No)
                     || !expr.ty.needs_drop(this.tcx, this.param_env) =>
             {
+                println!("{:?}, category is constant no drop", expr.kind);
                 let constant = this.as_constant(expr);
                 block.and(Operand::Constant(Box::new(constant)))
             }
             Category::Constant | Category::Place | Category::Rvalue(..) => {
+                println!("category is place or rvalue with category {:?}", category);
                 let operand = unpack!(block = this.as_temp(block, scope, expr_id, Mutability::Mut));
                 // Overwrite temp local info if we have something more interesting to record.
                 if !matches!(local_info, LocalInfo::Boring) {

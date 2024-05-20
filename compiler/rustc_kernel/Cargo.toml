@@ -9,5 +9,7 @@ rustc_span = { path = "../rustc_span" }
 rustc_session = { path = "../rustc_session" }
 rustc_codegen_ssa = { path = "../rustc_codegen_ssa" }
 rustc_hir = { path = "../rustc_hir" }
+rustc_mir_build = { path = "../rustc_mir_build" }
+rustc_ast = { path = "../rustc_ast" }
 
 tracing = "0.1"

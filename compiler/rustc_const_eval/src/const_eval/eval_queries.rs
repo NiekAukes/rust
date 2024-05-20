@@ -36,8 +36,10 @@ fn eval_body_using_ecx<'mir, 'tcx, R: InterpretationResult<'tcx>>(
 ) -> InterpResult<'tcx, R> {
     trace!(?ecx.param_env);
     let tcx = *ecx.tcx;
+    let is_kernel = tcx.is_kernel(cid.instance.def_id());
     assert!(
         cid.promoted.is_some()
+            || is_kernel
             || matches!(
                 ecx.tcx.def_kind(cid.instance.def_id()),
                 DefKind::Const
@@ -55,6 +57,8 @@ fn eval_body_using_ecx<'mir, 'tcx, R: InterpretationResult<'tcx>>(
 
     let intern_kind = if cid.promoted.is_some() {
         InternKind::Promoted
+    } else if is_kernel {
+        InternKind::Static(ty::Mutability::Not)
     } else {
         match tcx.static_mutability(cid.instance.def_id()) {
             Some(m) => InternKind::Static(m),
@@ -314,14 +318,14 @@ pub fn eval_static_initializer_provider<'tcx>(
     def_id: LocalDefId,
 ) -> ::rustc_middle::mir::interpret::EvalStaticInitializerRawResult<'tcx> {
     // if the static is a kernel, use the kernel evaluator
-    if tcx.is_kernel(def_id.to_def_id()) {
+    /*if tcx.is_kernel(def_id.to_def_id()) {
         let A = 1;
         let res = tcx.compile_kernel_module(tcx.kernel_def_id_cgu_symbol(def_id.to_def_id()));
         let res = res.const_alloc;
         return Ok(res);
-    }
+    }*/
 
-    assert!(tcx.is_static(def_id.to_def_id()));
+    assert!(tcx.is_static(def_id.to_def_id()) || tcx.is_kernel(def_id.to_def_id()));
 
     let instance = ty::Instance::mono(tcx, def_id.to_def_id());
     let cid = rustc_middle::mir::interpret::GlobalId { instance, promoted: None };
