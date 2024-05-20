@@ -884,6 +884,25 @@ impl<'tcx> Cx<'tcx> {
     fn convert_path_expr(&mut self, expr: &'tcx hir::Expr<'tcx>, res: Res) -> ExprKind<'tcx> {
         let args = self.typeck_results().node_args(expr.hir_id);
         match res {
+            // We encode uses of statics as a `*&STATIC` where the `&STATIC` part is
+            // a constant reference (or constant raw pointer for `static mut`) in MIR
+            Res::Def(DefKind::Static { .. }, id) | 
+            Res::Def(DefKind::Fn, id) if self.tcx.is_kernel(id) || self.tcx.is_static(id) => {
+                let ty = self.tcx.static_ptr_ty(id);
+                let temp_lifetime = self
+                    .rvalue_scopes
+                    .temporary_scope(self.region_scope_tree, expr.hir_id.local_id);
+                let kind = if self.tcx.is_thread_local_static(id) {
+                    ExprKind::ThreadLocalRef(id)
+                } else {
+                    let alloc_id = self.tcx.reserve_and_set_static_alloc(id);
+                    ExprKind::StaticRef { alloc_id, ty, def_id: id }
+                };
+                ExprKind::Deref {
+                    arg: self.thir.exprs.push(Expr { ty, temp_lifetime, span: expr.span, kind }),
+                }
+            }
+
             // A regular function, constructor function or a constant.
             Res::Def(DefKind::Fn, _)
             | Res::Def(DefKind::AssocFn, _)
@@ -934,24 +953,6 @@ impl<'tcx> Cx<'tcx> {
                         base: None,
                     })),
                     _ => bug!("unexpected ty: {:?}", ty),
-                }
-            }
-
-            // We encode uses of statics as a `*&STATIC` where the `&STATIC` part is
-            // a constant reference (or constant raw pointer for `static mut`) in MIR
-            Res::Def(DefKind::Static { .. }, id) => {
-                let ty = self.tcx.static_ptr_ty(id);
-                let temp_lifetime = self
-                    .rvalue_scopes
-                    .temporary_scope(self.region_scope_tree, expr.hir_id.local_id);
-                let kind = if self.tcx.is_thread_local_static(id) {
-                    ExprKind::ThreadLocalRef(id)
-                } else {
-                    let alloc_id = self.tcx.reserve_and_set_static_alloc(id);
-                    ExprKind::StaticRef { alloc_id, ty, def_id: id }
-                };
-                ExprKind::Deref {
-                    arg: self.thir.exprs.push(Expr { ty, temp_lifetime, span: expr.span, kind }),
                 }
             }
 

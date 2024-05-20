@@ -15,7 +15,7 @@ extern crate tracing;
 #[macro_use]
 extern crate rustc_middle;
 
-mod build;
+pub mod build;
 mod check_unsafety;
 mod errors;
 pub mod lints;

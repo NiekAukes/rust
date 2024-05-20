@@ -40,7 +40,6 @@ pub fn build_cgu<'tcx>(tcx: TyCtxt<'tcx>, old_cgu: &'tcx CodegenUnit<'tcx>, size
     cgu
 }
 
-
 pub fn compile_kernel_module_inner<'tcx>(tcx: TyCtxt<'tcx>, cgu: &'tcx CodegenUnit<'tcx>)
     -> &'tcx KernelCode<'tcx> {
     debug!("compiling kernel module {:?}", cgu.name());
@@ -53,14 +52,14 @@ pub fn compile_kernel_module_inner<'tcx>(tcx: TyCtxt<'tcx>, cgu: &'tcx CodegenUn
     
     // TODO! compile the kernel module
     let code = b"1234";
-    let ca = kernel_embedder::embed_kernel(tcx, code, kernel_metadata);
+    let constant = kernel_embedder::embed_kernel(tcx, code, kernel_metadata);
     let new_cgu = build_cgu(tcx, cgu, code.len());
     let new_cgu = tcx.arena.alloc(new_cgu);
     // compile the kernel module using processed_kernel_mir
     // and return a new modified CGU that compiles that processed kernel MIR
     //let ca = tcx.arena.alloc(ca);
     tcx.arena.alloc(KernelCode {
-        const_alloc: ca,
+        const_body: constant,
         cgu: new_cgu,
         kernel_metadata: kernel_metadata,
     })
@@ -75,8 +74,7 @@ pub fn provide(providers: &mut Providers) {
     providers.processed_kernel_mir = |tcx, def_id| {
         // get the cgu name
         let cgu_name = tcx.kernel_def_id_cgu_symbol(def_id);
-        todo!()
-        //tcx.compile_kernel_module(cgu_name)
+        &tcx.compile_kernel_module(cgu_name).const_body
     };
 
     providers.is_kernel = is_kernel;
