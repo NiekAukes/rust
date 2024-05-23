@@ -628,7 +628,7 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     if tcx.is_kernel(did) {
         // do not do any optimizations
         // return the processed mir directly
-        bug!("optimized_mir should not be called for kernel functions");
+        bug!("optimized_mir should not be called yet for kernel functions");
         tcx.processed_kernel_mir(did)
     } else {
         tcx.arena.alloc(inner_optimized_mir(tcx, did))

@@ -9,7 +9,6 @@
 use crate::dep_graph;
 use crate::infer::canonical::{self, Canonical};
 use crate::lint::LintExpectation;
-use crate::kernel::KernelCode;
 use crate::metadata::ModChild;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrs;
 use crate::middle::debugger_visualizer::DebuggerVisualizerFile;
@@ -1925,10 +1924,6 @@ rustc_queries! {
 
     query kernel_def_id_cgu_symbol(def_id: DefId) -> Symbol {
         desc { |tcx| "getting kernel codegen unit symbol for `{}`", tcx.def_path_str(def_id) }
-    }
-
-    query compile_kernel_module(sym: Symbol) -> &'tcx KernelCode<'tcx> {
-        desc { "compiling kernel module and embedding it in MIR" }
     }
 
     query kernel_mir_promoted(key: LocalDefId) -> (

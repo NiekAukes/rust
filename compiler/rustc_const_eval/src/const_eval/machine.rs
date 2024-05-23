@@ -390,6 +390,10 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
         instance: ty::InstanceDef<'tcx>,
     ) -> InterpResult<'tcx, &'tcx mir::Body<'tcx>> {
         match instance {
+            ty::InstanceDef::Item(def) if ecx.tcx.is_kernel(def) => {
+                // load the final const mir for the kernel
+                Ok(ecx.tcx.processed_kernel_mir(def))
+            }
             ty::InstanceDef::Item(def) => {
                 if ecx.tcx.is_ctfe_mir_available(def) {
                     Ok(ecx.tcx.mir_for_ctfe(def))

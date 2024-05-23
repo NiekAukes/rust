@@ -86,7 +86,6 @@ pub mod thir;
 pub mod traits;
 pub mod ty;
 pub mod util;
-pub mod kernel;
 mod values;
 
 #[macro_use]

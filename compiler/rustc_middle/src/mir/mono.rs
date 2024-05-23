@@ -268,17 +268,8 @@ pub struct CodegenUnit<'tcx> {
     /// True if this is CGU is used to hold code coverage information for dead code,
     /// false otherwise.
     is_code_coverage_dead_code_cgu: bool,
-    kernel: Option<KernelMetaData>,
 }
 
-#[derive(Clone, PartialEq, Debug, HashStable)]
-pub struct KernelMetaData {
-    pub entry_def_id: DefId,
-
-    /// The `DefId` of the `Kernel` struct definition.
-    pub kernel_adt_id: DefId,
-    // TODO!
-}
 
 /// Auxiliary info about a `MonoItem`.
 #[derive(Copy, Clone, PartialEq, Debug, HashStable)]
@@ -321,14 +312,13 @@ pub enum Visibility {
 
 impl<'tcx> CodegenUnit<'tcx> {
     #[inline]
-    pub fn new(name: Symbol, kernel: Option<KernelMetaData>) -> CodegenUnit<'tcx> {
+    pub fn new(name: Symbol) -> CodegenUnit<'tcx> {
         CodegenUnit {
             name,
             items: Default::default(),
             size_estimate: 0,
             primary: false,
             is_code_coverage_dead_code_cgu: false,
-            kernel: kernel,
         }
     }
 
@@ -338,16 +328,6 @@ impl<'tcx> CodegenUnit<'tcx> {
 
     pub fn set_name(&mut self, name: Symbol) {
         self.name = name;
-    }
-
-    /// Returns `true` if this CGU describes a kernel module.
-    pub fn is_kernel(&self) -> bool {
-        self.kernel.is_some()
-    }
-
-    /// Returns the kernel metadata for this CGU, if it is a kernel module.
-    pub fn kernel(&self) -> Option<&KernelMetaData> {
-        self.kernel.as_ref()
     }
 
     pub fn is_primary(&self) -> bool {
@@ -474,9 +454,7 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for CodegenUnit<'tcx> {
             size_estimate: _,
             primary: _,
             is_code_coverage_dead_code_cgu,
-            kernel: _, // only need bool, cannot move out of reference
         } = *self;
-        self.is_kernel().hash_stable(hcx, hasher);
         name.hash_stable(hcx, hasher);
         is_code_coverage_dead_code_cgu.hash_stable(hcx, hasher);
 

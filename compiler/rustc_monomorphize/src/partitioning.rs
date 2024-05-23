@@ -101,13 +101,14 @@ use std::path::{Path, PathBuf};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{DefId, DefIdSet, DefIndex, LOCAL_CRATE};
+use rustc_hir::def_id::{DefId, DefIdSet, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathDataName;
 use rustc_middle::bug;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::exported_symbols::{SymbolExportInfo, SymbolExportLevel};
 use rustc_middle::mir::mono::{
-    CodegenUnit, CodegenUnitNameBuilder, InstantiationMode, KernelMetaData, Linkage, MonoItem, MonoItemData, Visibility
+    CodegenUnit, CodegenUnitNameBuilder, InstantiationMode, Linkage, MonoItem, MonoItemData,
+    Visibility,
 };
 use rustc_middle::query::Providers;
 use rustc_middle::ty::print::{characteristic_def_id_of_type, with_no_trimmed_paths};
@@ -128,7 +129,6 @@ struct PartitioningCx<'a, 'tcx> {
 struct PlacedMonoItems<'tcx> {
     /// The codegen units, sorted by name to make things deterministic.
     codegen_units: Vec<CodegenUnit<'tcx>>,
-    kernel_units: Vec<CodegenUnit<'tcx>>,
 
     internalization_candidates: FxHashSet<MonoItem<'tcx>>,
 }
@@ -148,7 +148,7 @@ where
 
     // Place all mono items into a codegen unit. `place_mono_items` is
     // responsible for initializing the CGU size estimates.
-    let PlacedMonoItems { mut codegen_units, kernel_units, internalization_candidates } = {
+    let PlacedMonoItems { mut codegen_units, internalization_candidates } = {
         let _prof_timer = tcx.prof.generic_activity("cgu_partitioning_place_items");
         let placed = place_mono_items(cx, mono_items);
 
@@ -162,9 +162,6 @@ where
     // estimates.
     {
         let _prof_timer = tcx.prof.generic_activity("cgu_partitioning_merge_cgus");
-        // filter out CGUs that are kernels
-
-
         merge_codegen_units(cx, &mut codegen_units);
         debug_dump(tcx, "MERGE", &codegen_units);
     }
@@ -192,8 +189,6 @@ where
         bug!("unsorted CGUs:\n{names}");
     }
 
-    // merge kernel units into the main codegen units
-    codegen_units.extend(kernel_units);
     codegen_units
 }
 
@@ -202,8 +197,6 @@ where
     I: Iterator<Item = MonoItem<'tcx>>,
 {
     let mut codegen_units = FxHashMap::default();
-    #[allow(unused_mut)]
-    let mut kernel_units = FxHashMap::default();
     let is_incremental_build = cx.tcx.sess.opts.incremental.is_some();
     let mut internalization_candidates = FxHashSet::default();
 
@@ -234,32 +227,18 @@ where
         let characteristic_def_id = characteristic_def_id_of_mono_item(cx.tcx, mono_item);
         let is_volatile = is_incremental_build && mono_item.is_generic_fn(cx.tcx);
 
-        let is_kernel = mono_item.is_kernel(cx.tcx);
-
         let cgu_name = match characteristic_def_id {
             Some(def_id) => compute_codegen_unit_name(
                 cx.tcx,
                 cgu_name_builder,
                 def_id,
                 is_volatile,
-                is_kernel,
                 cgu_name_cache,
             ),
             None => fallback_cgu_name(cgu_name_builder),
         };
 
-        
-        let cgu = if is_kernel {
-            let kernel_data = KernelMetaData {
-                entry_def_id: mono_item.def_id(),
-                kernel_adt_id: DefId::local(DefIndex::from_u32(0)), // TODO: get the kernel adt id
-            };
-            kernel_units.entry(cgu_name).or_insert_with(|| CodegenUnit::new(cgu_name, Some(kernel_data)))
-        } else {
-            codegen_units.entry(cgu_name).or_insert_with(|| CodegenUnit::new(cgu_name, None))
-        };
-
-        
+        let cgu = codegen_units.entry(cgu_name).or_insert_with(|| CodegenUnit::new(cgu_name));
 
         let mut can_be_internalized = true;
         let (linkage, visibility) = mono_item_linkage_and_visibility(
@@ -281,18 +260,7 @@ where
         // external crates, and local functions the definition of which is
         // marked with `#[inline]`.
         let mut reachable_inlined_items = FxHashSet::default();
-
-        // if the mono item is a kernel function, populate the KernelMeta field of the cgu
-        // set reachable_inlined_items to include all items that are reachable from the kernel function
-        // this is necessary because the entire kernel is put in a single cgu that should compile to a single module
-        if is_kernel {
-            get_items_used_by_kernel(mono_item, cx.usage_map, &mut reachable_inlined_items);
-        }
-        else {
-            get_reachable_inlined_items(cx.tcx, mono_item, cx.usage_map, &mut reachable_inlined_items);
-        }
-        
-        
+        get_reachable_inlined_items(cx.tcx, mono_item, cx.usage_map, &mut reachable_inlined_items);
 
         // Add those inlined items. It's possible an inlined item is reachable
         // from multiple root items within a CGU, which is fine, it just means
@@ -312,21 +280,17 @@ where
     // crate with just types (for example), we could wind up with no CGU.
     if codegen_units.is_empty() {
         let cgu_name = fallback_cgu_name(cgu_name_builder);
-        codegen_units.insert(cgu_name, CodegenUnit::new(cgu_name, None));
+        codegen_units.insert(cgu_name, CodegenUnit::new(cgu_name));
     }
 
     let mut codegen_units: Vec<_> = codegen_units.into_values().collect();
-    let mut kernel_units: Vec<_> = kernel_units.into_values().collect();
     codegen_units.sort_by(|a, b| a.name().as_str().cmp(b.name().as_str()));
 
     for cgu in codegen_units.iter_mut() {
         cgu.compute_size_estimate();
     }
-    for cgu in kernel_units.iter_mut() {
-        cgu.compute_size_estimate();
-    }
 
-    return PlacedMonoItems { codegen_units, kernel_units, internalization_candidates };
+    return PlacedMonoItems { codegen_units, internalization_candidates };
 
     fn get_reachable_inlined_items<'tcx>(
         tcx: TyCtxt<'tcx>,
@@ -338,19 +302,6 @@ where
             let is_new = visited.insert(inlined_item);
             if is_new {
                 get_reachable_inlined_items(tcx, inlined_item, usage_map, visited);
-            }
-        });
-    }
-
-    fn get_items_used_by_kernel<'tcx>(
-        item: MonoItem<'tcx>,
-        usage_map: &UsageMap<'tcx>,
-        visited: &mut FxHashSet<MonoItem<'tcx>>,
-    ) {
-        usage_map.for_each_used_item(item, |used_item| {
-            let is_new = visited.insert(used_item);
-            if is_new {
-                get_items_used_by_kernel(used_item, usage_map, visited);
             }
         });
     }
@@ -726,7 +677,6 @@ fn compute_codegen_unit_name(
     name_builder: &mut CodegenUnitNameBuilder<'_>,
     def_id: DefId,
     volatile: bool,
-    kernel: bool,
     cache: &mut CguNameCache,
 ) -> Symbol {
     // Find the innermost module that is not nested within a function.
@@ -756,7 +706,7 @@ fn compute_codegen_unit_name(
 
     let cgu_def_id = cgu_def_id.unwrap();
 
-    *cache.entry((cgu_def_id, volatile, kernel)).or_insert_with(|| {
+    *cache.entry((cgu_def_id, volatile)).or_insert_with(|| {
         let def_path = tcx.def_path(cgu_def_id);
 
         let components = def_path.data.iter().map(|part| match part.data.name() {
@@ -764,13 +714,9 @@ fn compute_codegen_unit_name(
             DefPathDataName::Anon { .. } => unreachable!(),
         });
 
-        let suffix = if volatile { 
-            Some("volatile") 
-        } else { 
-            kernel.then_some("kernel")
-        };	
+        let volatile_suffix = volatile.then_some("volatile");
 
-        name_builder.build_cgu_name(def_path.krate, components, suffix)
+        name_builder.build_cgu_name(def_path.krate, components, volatile_suffix)
     })
 }
 
@@ -792,7 +738,7 @@ fn mono_item_linkage_and_visibility<'tcx>(
     (Linkage::External, vis)
 }
 
-type CguNameCache = FxHashMap<(DefId, bool, bool), Symbol>;
+type CguNameCache = FxHashMap<(DefId, bool), Symbol>;
 
 fn static_visibility<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -1187,10 +1133,6 @@ fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> (&DefIdSet, &[Co
         )
     });
 
-    for cgu in codegen_units {
-        debug!("CodegenUnit {} => kernel: {}", cgu.name(), cgu.is_kernel());
-    }
-
     if tcx.prof.enabled() {
         // Record CGU size estimates for self-profiling.
         for cgu in codegen_units {
@@ -1360,40 +1302,10 @@ pub fn provide(providers: &mut Providers) {
         all_mono_items.contains(&def_id)
     };
 
-    providers.kernel_def_id_cgu_symbol = |tcx, def_id| {
-        let (_, codegen_units) = tcx.collect_and_partition_mono_items(());
-        
-        // search from back to front, because the kernel CGUs are always at the end
-        for cgu in codegen_units.iter().rev() {
-            if let Some(k) = cgu.kernel() {
-                if k.entry_def_id == def_id {
-                    return cgu.name();
-                }
-            }
-        }
-        bug!("failed to find CGU for kernel def_id {def_id:?}");
-    };
-
     providers.codegen_unit = |tcx, name| {
         let (_, all) = tcx.collect_and_partition_mono_items(());
-        let cgu = all.iter()
+        all.iter()
             .find(|cgu| cgu.name() == name)
-            .unwrap_or_else(|| panic!("failed to find cgu with name {name:?}"));
-        
-        // if the CGU is a kernel module, strip all the non-kernel items
-        if cgu.is_kernel() {
-            tcx.compile_kernel_module(cgu.name()).cgu
-        } else {
-            cgu
-        }
-    };
-    providers.kernel_unit = |tcx, name| {
-        let (_, all) = tcx.collect_and_partition_mono_items(());
-        let cgu = all.iter()
-            .find(|cgu| cgu.name() == name)
-            .unwrap_or_else(|| panic!("failed to find cgu with name {name:?}"));
-        
-        assert!(cgu.is_kernel(), "CGU {name:?} is not a kernel module");
-        cgu
+            .unwrap_or_else(|| panic!("failed to find cgu with name {name:?}"))
     };
 }

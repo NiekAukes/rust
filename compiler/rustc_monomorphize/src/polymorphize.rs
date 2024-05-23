@@ -68,7 +68,6 @@ fn unused_generic_params<'tcx>(
     let body = match tcx.hir().body_const_context(def_id.expect_local()) {
         // Const functions are actually called and should thus be considered for polymorphization
         // via their runtime MIR.
-        _ if tcx.is_kernel(def_id) => tcx.optimized_kernel_mir(def_id),
         Some(ConstContext::ConstFn) | None => tcx.optimized_mir(def_id),
         Some(_) => tcx.mir_for_ctfe(def_id),
     };

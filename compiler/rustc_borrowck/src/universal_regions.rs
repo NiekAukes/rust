@@ -35,8 +35,6 @@ use std::iter;
 use crate::renumber::RegionCtxt;
 use crate::BorrowckInferCtxt;
 
-use rustc_middle::kernel;
-
 #[derive(Debug)]
 pub struct UniversalRegions<'tcx> {
     indices: UniversalRegionIndices<'tcx>,

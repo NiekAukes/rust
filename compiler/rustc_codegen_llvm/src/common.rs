@@ -302,7 +302,7 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                         (value, AddressSpace::DATA)
                     }
                     GlobalAlloc::Static(def_id) => {
-                        assert!(self.tcx.is_static(def_id));
+                        assert!(self.tcx.is_static(def_id) || self.tcx.is_kernel(def_id));
                         assert!(!self.tcx.is_thread_local_static(def_id));
                         (self.get_static(def_id), AddressSpace::DATA)
                     }
