@@ -381,7 +381,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "curl",
- "indexmap",
+ "indexmap 2.2.6",
  "serde",
  "serde_json",
  "toml 0.5.11",
@@ -482,6 +482,10 @@ name = "cc"
 version = "1.0.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2678b2e3449475e95b0aa6f9b506a28e61b3dc8996592b983695e8ebb58a8b41"
+dependencies = [
+ "jobserver",
+ "libc",
+]
 
 [[package]]
 name = "cfg-if"
@@ -791,7 +795,7 @@ dependencies = [
  "getopts",
  "glob",
  "home",
- "indexmap",
+ "indexmap 2.2.6",
  "libc",
  "miow",
  "miropt-test-tools",
@@ -1539,6 +1543,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "generate-copyright"
 version = "0.1.0"
 dependencies = [
@@ -1594,7 +1607,7 @@ checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
 dependencies = [
  "compiler_builtins",
  "fallible-iterator",
- "indexmap",
+ "indexmap 2.2.6",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
  "stable_deref_trait",
@@ -1640,7 +1653,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "http",
- "indexmap",
+ "indexmap 2.2.6",
  "slab",
  "tokio",
  "tokio-util",
@@ -1660,6 +1673,12 @@ dependencies = [
  "serde_json",
  "thiserror",
 ]
+
+[[package]]
+name = "hashbrown"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "hashbrown"
@@ -1993,12 +2012,22 @@ checksum = "ce23b50ad8242c51a442f3ff322d56b02f08852c77e4c0b4d3fd684abc89c683"
 
 [[package]]
 name = "indexmap"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
+dependencies = [
+ "autocfg",
+ "hashbrown 0.12.3",
+]
+
+[[package]]
+name = "indexmap"
 version = "2.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "168fb715dda47215e360912c096649d23d58bf392ac62f73919e831745e40f26"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.14.3",
  "rustc-rayon",
  "serde",
 ]
@@ -2615,9 +2644,9 @@ checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
 
 [[package]]
 name = "num-traits"
-version = "0.2.18"
+version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0df0e5185db44f69b44f26786fe401b6c293d1907744beaa7fa62b2e5a517a"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
@@ -2648,8 +2677,8 @@ dependencies = [
  "compiler_builtins",
  "crc32fast",
  "flate2",
- "hashbrown",
- "indexmap",
+ "hashbrown 0.14.3",
+ "indexmap 2.2.6",
  "memchr",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -3395,6 +3424,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rspirv"
+version = "0.11.0+1.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1503993b59ca9ae4127365c3293517576d7ce56be9f3d8abb1625c85ddc583ba"
+dependencies = [
+ "fxhash",
+ "num-traits",
+ "spirv",
+]
+
+[[package]]
 name = "run_make_support"
 version = "0.0.0"
 dependencies = [
@@ -3819,7 +3859,7 @@ dependencies = [
  "either",
  "elsa",
  "ena",
- "indexmap",
+ "indexmap 2.2.6",
  "jobserver",
  "libc",
  "measureme",
@@ -4212,10 +4252,36 @@ dependencies = [
  "rustc_ast",
  "rustc_codegen_ssa",
  "rustc_hir",
+ "rustc_kernel_codegen",
  "rustc_middle",
  "rustc_mir_build",
  "rustc_session",
  "rustc_span",
+ "tracing",
+]
+
+[[package]]
+name = "rustc_kernel_codegen"
+version = "0.0.0"
+dependencies = [
+ "indexmap 1.9.3",
+ "num-traits",
+ "rspirv",
+ "rustc_apfloat",
+ "rustc_arena",
+ "rustc_ast",
+ "rustc_codegen_ssa",
+ "rustc_data_structures",
+ "rustc_errors",
+ "rustc_hir",
+ "rustc_index",
+ "rustc_middle",
+ "rustc_mir_build",
+ "rustc_session",
+ "rustc_span",
+ "rustc_target",
+ "smallvec",
+ "spirv-tools",
  "tracing",
 ]
 
@@ -4651,7 +4717,7 @@ dependencies = [
 name = "rustc_serialize"
 version = "0.0.0"
 dependencies = [
- "indexmap",
+ "indexmap 2.2.6",
  "rustc_macros",
  "smallvec",
  "tempfile",
@@ -4703,7 +4769,7 @@ dependencies = [
 name = "rustc_span"
 version = "0.0.0"
 dependencies = [
- "indexmap",
+ "indexmap 2.2.6",
  "itoa",
  "md-5",
  "rustc_arena",
@@ -4869,7 +4935,7 @@ dependencies = [
  "askama",
  "base64",
  "expect-test",
- "indexmap",
+ "indexmap 2.2.6",
  "itertools 0.12.1",
  "minifier",
  "regex",
@@ -5138,7 +5204,7 @@ version = "1.0.115"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12dc5c46daa8e9fdf4f5e71b6cf9a53f2487da0e86e55808e2d35539666497dd"
 dependencies = [
- "indexmap",
+ "indexmap 2.2.6",
  "itoa",
  "ryu",
  "serde",
@@ -5291,6 +5357,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "spirv"
+version = "0.2.0+1.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "246bfa38fe3db3f1dfc8ca5a2cdeb7348c78be2112740cc0ec8ef18b6d94f830"
+dependencies = [
+ "bitflags 1.3.2",
+ "num-traits",
+]
+
+[[package]]
+name = "spirv-tools"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcb3b0832881834994b7ec82b709ec5491043ceb4bf8101e27da6b5234b24261"
+dependencies = [
+ "memchr",
+ "spirv-tools-sys",
+ "tempfile",
+]
+
+[[package]]
+name = "spirv-tools-sys"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48e68b55a97aa6856e010a6f2477425875a97873e147bb0232160e73c45bdae7"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5334,7 +5430,7 @@ dependencies = [
  "core",
  "dlmalloc",
  "fortanix-sgx-abi",
- "hashbrown",
+ "hashbrown 0.14.3",
  "hermit-abi",
  "libc",
  "miniz_oxide",
@@ -5640,7 +5736,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4db52ee8fec06e119b692ef3dd2c4cf621a99204c1b8c47407870ed050305b9b"
 dependencies = [
  "gimli",
- "hashbrown",
+ "hashbrown 0.14.3",
  "object 0.32.2",
  "tracing",
 ]
@@ -5813,7 +5909,7 @@ version = "0.19.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b5bb770da30e5cbfde35a2d7b9b8a2c4b8ef89548a7a6aeab5c9a576e3e7421"
 dependencies = [
- "indexmap",
+ "indexmap 2.2.6",
  "serde",
  "serde_spanned",
  "toml_datetime",
@@ -6350,7 +6446,7 @@ version = "0.118.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77f1154f1ab868e2a01d9834a805faca7bf8b50d041b4ca714d005d0dab1c50c"
 dependencies = [
- "indexmap",
+ "indexmap 2.2.6",
  "semver",
 ]
 
