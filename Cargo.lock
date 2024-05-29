@@ -4212,10 +4212,29 @@ dependencies = [
  "rustc_ast",
  "rustc_codegen_ssa",
  "rustc_hir",
+ "rustc_kernel_codegen",
  "rustc_middle",
  "rustc_mir_build",
  "rustc_session",
  "rustc_span",
+ "tracing",
+]
+
+[[package]]
+name = "rustc_kernel_codegen"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "rustc_ast",
+ "rustc_codegen_llvm",
+ "rustc_codegen_ssa",
+ "rustc_data_structures",
+ "rustc_hir",
+ "rustc_middle",
+ "rustc_mir_build",
+ "rustc_session",
+ "rustc_span",
+ "rustc_target",
  "tracing",
 ]
 

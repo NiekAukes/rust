@@ -1,5 +1,5 @@
 [package]
-name = "rustc_kernel"
+name = "rustc_kernel_codegen"
 version = "0.0.0"
 edition = "2021"
 
@@ -11,7 +11,9 @@ rustc_codegen_ssa = { path = "../rustc_codegen_ssa" }
 rustc_hir = { path = "../rustc_hir" }
 rustc_mir_build = { path = "../rustc_mir_build" }
 rustc_ast = { path = "../rustc_ast" }
-
-rustc_kernel_codegen = { path = "../rustc_kernel_codegen" }
+rustc_target = { path = "../rustc_target" }
+rustc_codegen_llvm = { path = "../rustc_codegen_llvm" }
+rustc_data_structures = { path = "../rustc_data_structures" }
 
 tracing = "0.1"
+libc = "0.2"
