@@ -1662,3 +1662,42 @@ pub fn collect_crate_mono_items(
 
     (state.visited.into_inner(), state.usage_map.into_inner())
 }
+
+//=-----------------------------------------------------------------------------
+// Kernel entry point
+//=-----------------------------------------------------------------------------
+
+pub fn collect_kernel_mono_items(
+    tcx: TyCtxt<'_>,
+    def_id: DefId,
+) -> (FxHashSet<MonoItem<'_>>, UsageMap<'_>) {
+    // only the kernel is a root
+    let root = MonoItem::Fn(Instance::mono(tcx, def_id));
+
+    // below we use the same code as in `collect_crate_mono_items`, but with a single root
+    let mut state = SharedState {
+        visited: MTLock::new(FxHashSet::default()),
+        mentioned: MTLock::new(FxHashSet::default()),
+        usage_map: MTLock::new(UsageMap::new()),
+    };
+
+    let recursion_limit = tcx.recursion_limit();
+
+    {
+        let state: LRef<'_, _> = &mut state;
+
+        tcx.sess.time("monomorphization_collector_graph_walk", || {
+            let mut recursion_depths = DefIdMap::default();
+            collect_items_rec(
+                tcx,
+                dummy_spanned(root),
+                state,
+                &mut recursion_depths,
+                recursion_limit,
+                CollectionMode::UsedItems,
+            );
+        });
+    }
+
+    (state.visited.into_inner(), state.usage_map.into_inner())
+}

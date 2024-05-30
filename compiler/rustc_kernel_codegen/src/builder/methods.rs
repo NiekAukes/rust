@@ -3,7 +3,7 @@ use rustc_codegen_ssa::traits::BuilderMethods;
 use rustc_target::abi::{call::FnAbi, Align, Scalar, Size, WrappingRange};
 use super::Builder;
 
-impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
+impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     fn build(cx: &'a Self::CodegenCx, llbb: Self::BasicBlock) -> Self {
         todo!()
     }

@@ -1906,6 +1906,10 @@ rustc_queries! {
         desc { "collect_and_partition_mono_items" }
     }
 
+    query collect_mono_items_for_def(def_id: DefId) -> &'tcx CodegenUnit<'tcx> {
+        desc { |tcx| "collecting mono items for `{}`", tcx.def_path_str(def_id) }
+    }
+
     query is_codegened_item(def_id: DefId) -> bool {
         desc { |tcx| "determining whether `{}` needs codegen", tcx.def_path_str(def_id) }
     }

@@ -11,9 +11,18 @@ rustc_codegen_ssa = { path = "../rustc_codegen_ssa" }
 rustc_hir = { path = "../rustc_hir" }
 rustc_mir_build = { path = "../rustc_mir_build" }
 rustc_ast = { path = "../rustc_ast" }
+rustc_arena = { path = "../rustc_arena" }
 rustc_target = { path = "../rustc_target" }
 rustc_codegen_llvm = { path = "../rustc_codegen_llvm" }
 rustc_data_structures = { path = "../rustc_data_structures" }
 
 tracing = "0.1"
 libc = "0.2"
+llvm-ir = { version = "0.11.1", features = ["llvm-8"] }
+
+[build-dependencies]
+build-helper = "0.1.1"
+cc = { version = "1.0", features = ["parallel"] }
+xz = "0.1.0"
+tar = "0.4.37"
+curl = "0.4.40"

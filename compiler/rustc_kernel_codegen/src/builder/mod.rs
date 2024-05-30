@@ -8,12 +8,12 @@ mod asm;
 mod abi;
 mod intrinsic;
 mod debug_info;
-pub struct Builder<'a, 'll, 'tcx> {
-    codegen_cx: &'a mut CodegenCx<'ll, 'tcx>,
+pub struct Builder<'a, 'm, 'tcx> {
+    codegen_cx: &'a mut CodegenCx<'m, 'tcx>,
     tcx: TyCtxt<'tcx>,
 }
 
-impl<'a, 'll, 'tcx> HasTargetSpec for Builder<'a, 'll, 'tcx> {
+impl<'a, 'm, 'tcx> HasTargetSpec for Builder<'a, 'm, 'tcx> {
     fn target_spec(&self) -> &Target {
         todo!()
     }
@@ -25,20 +25,20 @@ impl StaticBuilderMethods for Builder<'_, '_, '_> {
     }
 }
 
-impl<'ll, 'tcx> BackendTypes for Builder<'_, 'll, 'tcx> {
-    type Value = <CodegenCx<'ll, 'tcx> as BackendTypes>::Value;
-    type Function = <CodegenCx<'ll, 'tcx> as BackendTypes>::Function;
-    type BasicBlock = <CodegenCx<'ll, 'tcx> as BackendTypes>::BasicBlock;
-    type Type = <CodegenCx<'ll, 'tcx> as BackendTypes>::Type;
-    type Funclet = <CodegenCx<'ll, 'tcx> as BackendTypes>::Funclet;
+impl<'m, 'tcx> BackendTypes for Builder<'_, 'm, 'tcx> {
+    type Value = <CodegenCx<'m, 'tcx> as BackendTypes>::Value;
+    type Function = <CodegenCx<'m, 'tcx> as BackendTypes>::Function;
+    type BasicBlock = <CodegenCx<'m, 'tcx> as BackendTypes>::BasicBlock;
+    type Type = <CodegenCx<'m, 'tcx> as BackendTypes>::Type;
+    type Funclet = <CodegenCx<'m, 'tcx> as BackendTypes>::Funclet;
 
-    type DIScope = <CodegenCx<'ll, 'tcx> as BackendTypes>::DIScope;
-    type DILocation = <CodegenCx<'ll, 'tcx> as BackendTypes>::DILocation;
-    type DIVariable = <CodegenCx<'ll, 'tcx> as BackendTypes>::DIVariable;
+    type DIScope = <CodegenCx<'m, 'tcx> as BackendTypes>::DIScope;
+    type DILocation = <CodegenCx<'m, 'tcx> as BackendTypes>::DILocation;
+    type DIVariable = <CodegenCx<'m, 'tcx> as BackendTypes>::DIVariable;
 }
 
-impl<'ll, 'tcx> HasCodegen<'tcx> for Builder<'_, 'll, 'tcx> {
-    type CodegenCx = CodegenCx<'ll, 'tcx>;
+impl<'m, 'tcx> HasCodegen<'tcx> for Builder<'_, 'm, 'tcx> {
+    type CodegenCx = CodegenCx<'m, 'tcx>;
 }
 
 impl<'tcx> HasParamEnv<'tcx> for Builder<'_, '_, 'tcx> {
@@ -60,8 +60,8 @@ impl HasDataLayout for Builder<'_, '_, '_> {
 }
 
 
-impl<'ll, 'tcx> std::ops::Deref for Builder<'_, 'll, 'tcx> {
-    type Target = CodegenCx<'ll, 'tcx>;
+impl<'m, 'tcx> std::ops::Deref for Builder<'_, 'm, 'tcx> {
+    type Target = CodegenCx<'m, 'tcx>;
 
     fn deref(&self) -> &Self::Target {
         self.codegen_cx

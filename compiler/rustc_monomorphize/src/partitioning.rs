@@ -1293,6 +1293,31 @@ fn dump_mono_items_stats<'tcx>(
 
     Ok(())
 }
+/// Collect all mono items that this DefId needs, the DefId needs to be a function.
+/// The result is a codegen unit that contains the function and all of its transitive dependencies.
+/// 
+/// This is used by kernels to collect all the functions that are needed by the kernel.
+pub fn collect_mono_items_for_def<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> &'tcx CodegenUnit<'tcx> {
+    // collect all mono items that this DefId needs
+    let (mono_items, _) = collector::collect_kernel_mono_items(tcx, def_id);
+
+    // build the codegen unit
+    let cgu_name = compute_codegen_unit_name(
+        tcx,
+        &mut CodegenUnitNameBuilder::new(tcx),
+        def_id,
+        false,
+        &mut FxHashMap::default(),);
+    let mut cgu = CodegenUnit::new(cgu_name);
+    cgu.items_mut().extend(mono_items.iter().map(|item| {
+        let linkage = Linkage::External;
+        let visibility = Visibility::Default;
+        let size_estimate = item.size_estimate(tcx);
+        (*item, MonoItemData { linkage, visibility, size_estimate, inlined: false })
+    }));
+    cgu.compute_size_estimate();
+    tcx.arena.alloc(cgu)
+}
 
 pub fn provide(providers: &mut Providers) {
     providers.collect_and_partition_mono_items = collect_and_partition_mono_items;
@@ -1308,4 +1333,6 @@ pub fn provide(providers: &mut Providers) {
             .find(|cgu| cgu.name() == name)
             .unwrap_or_else(|| panic!("failed to find cgu with name {name:?}"))
     };
+
+    providers.collect_mono_items_for_def = collect_mono_items_for_def;
 }

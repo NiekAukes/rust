@@ -1,3 +1,5 @@
+use std::cell::UnsafeCell;
+
 use rustc_codegen_ssa::traits::AsmMethods;
 use rustc_codegen_ssa::traits::BackendTypes;
 use rustc_codegen_ssa::traits::CodegenMethods;
@@ -6,9 +8,11 @@ use rustc_middle::ty::layout::HasParamEnv;
 use rustc_middle::ty::layout::HasTyCtxt;
 use rustc_middle::ty::TyCtxt;
 use rustc_target::spec::HasTargetSpec;
-use crate::llvm::Type;
-use crate::llvm::Value;
-use crate::llvm::BasicBlock;
+use crate::FunctionNVVM;
+use crate::ModuleNVVM;
+use crate::TypeNVVM;
+use crate::Value;
+use crate::BasicBlock;
 
 mod declare;
 mod consts;
@@ -17,19 +21,20 @@ mod debug;
 mod misc;
 mod abi;
 
-pub struct CodegenCx<'ll, 'tcx> {
+pub struct CodegenCx<'m, 'tcx> {
     // ...
-    dummy: &'ll Value,
     tcx: TyCtxt<'tcx>,
+    // unsafe cell to allow mutation of the module
+    module: UnsafeCell<ModuleNVVM<'m>>,
 }
 
-impl<'ll> BackendTypes for CodegenCx<'ll, '_> {
-    type Value = &'ll Value;
+impl<'m> BackendTypes for CodegenCx<'m, '_> {
+    type Value = &'m Value;
     // FIXME(eddyb) replace this with a `Function` "subclass" of `Value`.
-    type Function = &'ll Value;
+    type Function = &'m FunctionNVVM;
 
-    type BasicBlock = &'ll BasicBlock;
-    type Type = &'ll Type;
+    type BasicBlock = &'m BasicBlock;
+    type Type = &'m TypeNVVM;
     type Funclet = ();
 
     type DIScope = ();
@@ -67,5 +72,20 @@ impl<'tcx> HasParamEnv<'tcx> for CodegenCx<'_, 'tcx> {
 impl<'tcx> HasTyCtxt<'tcx> for CodegenCx<'_, 'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
+    }
+}
+
+
+impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
+    pub fn new(tcx: TyCtxt<'tcx>, module: ModuleNVVM<'m>) -> Self {
+        Self {
+            // ...
+            tcx,
+            module: UnsafeCell::new(module),
+        }
+    }
+
+    pub fn finalize(self) -> ModuleNVVM<'m> {
+        self.module.into_inner()
     }
 }
