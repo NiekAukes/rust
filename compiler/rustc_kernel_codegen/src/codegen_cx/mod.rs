@@ -29,12 +29,12 @@ pub struct CodegenCx<'m, 'tcx> {
 }
 
 impl<'m> BackendTypes for CodegenCx<'m, '_> {
-    type Value = &'m Value;
+    type Value = ();//&'m Value;
     // FIXME(eddyb) replace this with a `Function` "subclass" of `Value`.
-    type Function = &'m FunctionNVVM;
+    type Function = ();//&'m FunctionNVVM;
 
     type BasicBlock = &'m BasicBlock;
-    type Type = &'m TypeNVVM;
+    type Type = ();//&'m TypeNVVM;
     type Funclet = ();
 
     type DIScope = ();

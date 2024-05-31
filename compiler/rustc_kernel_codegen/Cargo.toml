@@ -18,7 +18,6 @@ rustc_data_structures = { path = "../rustc_data_structures" }
 
 tracing = "0.1"
 libc = "0.2"
-llvm-ir = { version = "0.11.1", features = ["llvm-8"] }
 
 [build-dependencies]
 build-helper = "0.1.1"

@@ -117,7 +117,7 @@ macro_rules! arena_types {
             [] nvvm_type: crate::TypeNVVM,
             [] nvvm_basic_block: crate::BasicBlock,
             [] nvvm_value: crate::Value,
-            [] nvvm_type: crate::TypeNVVM,
+            [] codegen_unit: rustc_middle::mir::mono::CodegenUnit<'tcx>, // for using the lifetime
 
 
         ]);

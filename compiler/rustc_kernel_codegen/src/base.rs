@@ -5,7 +5,33 @@ use crate::arena;
 use crate::{codegen_cx::CodegenCx, ModuleNVVM};
 use crate::builder::Builder;
 
-pub fn module_codegen<'m, 'tcx>(
+pub fn module_codegen_hack<'tcx>(
+    tcx: TyCtxt<'tcx>, 
+    cgu: &'tcx CodegenUnit<'tcx>)
+    -> Vec<u8>
+ {
+    // hack for now
+    // return a premade module based on the name of the kernel
+    let mono_items = cgu.items_in_deterministic_order(tcx);
+    let name = {
+        let mut name = None;
+        for &(mono_item, _) in &mono_items {
+            if tcx.is_kernel(mono_item.def_id()) {
+                name = Some(mono_item.symbol_name(tcx).name);
+                
+            }
+        }
+        name.expect("no kernel found")
+    };
+    println!("kernel name: {}", name);
+    if name.contains("gpu64") {
+        return include_bytes!("GPU64.ll").to_vec();
+    }
+    
+    panic!("kernel not found")
+ }
+
+pub fn module_codegen<'tcx>(
     tcx: TyCtxt<'tcx>, 
     cgu: &'tcx CodegenUnit<'tcx>)
     -> Vec<u32>
