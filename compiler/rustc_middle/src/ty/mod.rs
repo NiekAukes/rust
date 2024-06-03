@@ -195,6 +195,7 @@ pub struct ResolverGlobalCtxt {
     pub doc_link_traits_in_scope: FxHashMap<LocalDefId, Vec<DefId>>,
     pub all_macro_rules: FxHashMap<Symbol, Res<ast::NodeId>>,
     pub stripped_cfg_items: Steal<Vec<StrippedCfgItem>>,
+    pub kernel_candidate: Option<DefId>,
 }
 
 /// Resolutions that should only be used for lowering.

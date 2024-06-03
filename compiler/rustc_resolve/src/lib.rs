@@ -1601,6 +1601,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             doc_link_traits_in_scope: self.doc_link_traits_in_scope,
             all_macro_rules: self.all_macro_rules,
             stripped_cfg_items,
+            kernel_candidate: None,
         };
         let ast_lowering = ty::ResolverAstLowering {
             legacy_const_generic_args: self.legacy_const_generic_args,

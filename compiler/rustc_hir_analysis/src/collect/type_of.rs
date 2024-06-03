@@ -1,12 +1,14 @@
 use core::ops::ControlFlow;
+use rustc_ast::{AttrKind, Attribute, PathSegment};
 use rustc_errors::{Applicability, StashKey};
-use rustc_hir as hir;
+use rustc_hir::{self as hir, ExprKind, Path};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::HirId;
 use rustc_middle::query::plumbing::CyclePlaceholder;
-use rustc_middle::ty::print::with_forced_trimmed_paths;
+use rustc_middle::ty::print::{self, with_forced_trimmed_paths};
 use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::util::bug;
 use rustc_span::symbol::Ident;
 use rustc_span::{sym, Span, DUMMY_SP};
 
@@ -436,6 +438,16 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
                 // check if the `#[kernel]` attribute is present,
                 // if it is, the final type of this function will be a const &'static [u8]
                 if tcx.has_attr(def_id, sym::kernel) {
+                    // get the path of the kernel type
+                    //let path = get_kernel_type_path(tcx, def_id);
+                    //rustc_hir::Path
+                    // create a hir Ty from the path
+                    
+                    let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
+                        return Ty::new_error(tcx, guar);
+                    };
+                    let ty = tcx.type_of(kernel_def_id);
+
                     let innerkind = ty::Slice(tcx.types.u8);
                     let a = 1;
                     let tykind = ty::Ref(
@@ -665,4 +677,73 @@ pub fn type_alias_is_lazy<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> bool {
         }
     }
     HasTait.visit_ty(tcx.hir().expect_item(def_id).expect_ty_alias().0).is_break()
+}
+
+/*
+fn get_test_runner(krate: &ast::Crate) -> Option<ast::Path> {
+    let test_attr = attr::find_by_name(&krate.attrs, sym::test_runner)?;
+    let meta_list = test_attr.meta_item_list()?;
+    let span = test_attr.span;
+    match &*meta_list {
+        [single] => match single.meta_item() {
+            Some(meta_item) if meta_item.is_word() => return Some(meta_item.path.clone()),
+            _ => {
+                dcx.emit_err(errors::TestRunnerInvalid { span });
+            }
+        },
+        _ => {
+            dcx.emit_err(errors::TestRunnerNargs { span });
+        }
+    }
+    None
+}
+ */
+
+// get_kernel_type should be based on the method above
+
+pub fn get_kernel_type_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Option<rustc_ast::ast::Path> {
+    // get the kernel type of the current crate.
+    // the kernel type is defined by a crate level attribute #[engine(Path)]
+    // where the path is the crate where the kernel type is defined.
+    // the kernel type itself is always Kernel<Dim, Args, Ret>
+
+    let attr = rustc_ast::attr::find_by_name(tcx.hir().krate_attrs(), sym::engine)?;
+
+    let meta_list = attr.meta_item_list()?;
+    let span = attr.span;
+    match &*meta_list {
+        [single] => match single.meta_item() {
+            Some(meta_item) if meta_item.is_word() => {
+                let mut path = meta_item.path.clone();
+                let kernel_segment = PathSegment::from_ident(Ident::from_str("Kernel"));
+                path.segments.push(kernel_segment);
+                return Some(path);
+            },
+            _ => {
+                //dcx.emit_err(errors::TestRunnerInvalid { span });
+                bug!("expected a word for #[engine] attribute");
+            }
+        },
+        _ => {
+            //dcx.emit_err(errors::TestRunnerNargs { span });
+            bug!("expected one argument for #[engine] attribute");
+        }
+    }
+    None
+
+    // get the kernel type of the current crate.
+    /*for attr in tcx.hir().krate_attrs() {
+        if let AttrKind::Normal(norm_attr) = &attr.kind {
+            if norm_attr.item.path.segments.first().unwrap().ident.name == sym::engine {
+                let path = norm_attr.item.args.inner_tokens();
+                // create a path to the kernel type
+                for t in path.trees() {
+                    println!("{:?}", t);
+                }
+                todo!()
+
+            }
+        }
+    }*/
+
 }

@@ -362,6 +362,11 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         EncodeCrossCrate::No,
     ),
 
+    // engine
+    ungated!(
+        engine, CrateLevel, template!(List: "path"), ErrorFollowing, EncodeCrossCrate::Yes,
+    ),
+
     // ABI, linking, symbols, and FFI
     ungated!(
         link, Normal,
