@@ -8,7 +8,7 @@ use crate::builder::Builder;
 pub fn module_codegen_hack<'tcx>(
     tcx: TyCtxt<'tcx>, 
     cgu: &'tcx CodegenUnit<'tcx>)
-    -> Vec<u8>
+    -> (&'tcx str, Vec<u8>)
  {
     // hack for now
     // return a premade module based on the name of the kernel
@@ -25,7 +25,7 @@ pub fn module_codegen_hack<'tcx>(
     };
     println!("kernel name: {}", name);
     if name.contains("gpu64") {
-        return include_bytes!("GPU64.ll").to_vec();
+        return ("simple", include_bytes!("GPU64.ll").to_vec());
     }
     
     panic!("kernel not found")

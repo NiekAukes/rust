@@ -2132,7 +2132,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     #[inline(always)]
-    pub(crate) fn check_and_mk_args(
+    pub fn check_and_mk_args(
         self,
         def_id: DefId,
         args: impl IntoIterator<Item: Into<GenericArg<'tcx>>>,

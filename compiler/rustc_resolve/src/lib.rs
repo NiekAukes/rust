@@ -31,7 +31,7 @@ use errors::{
 use rustc_arena::{DroplessArena, TypedArena};
 use rustc_ast::expand::StrippedCfgItem;
 use rustc_ast::node_id::NodeMap;
-use rustc_ast::{self as ast, attr, NodeId, CRATE_NODE_ID};
+use rustc_ast::{self as ast, attr, NodeId, PathSegment, CRATE_NODE_ID};
 use rustc_ast::{AngleBracketedArg, Crate, Expr, ExprKind, GenericArg, GenericArgs, LitKind, Path};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::intern::Interned;
@@ -51,8 +51,8 @@ use rustc_metadata::creader::{CStore, CrateLoader};
 use rustc_middle::metadata::ModChild;
 use rustc_middle::middle::privacy::EffectiveVisibilities;
 use rustc_middle::query::Providers;
-use rustc_middle::span_bug;
-use rustc_middle::ty::{self, DelegationFnSig, Feed, MainDefinition, RegisteredTools};
+use rustc_middle::{bug, span_bug};
+use rustc_middle::ty::{self, print, DelegationFnSig, Feed, MainDefinition, RegisteredTools};
 use rustc_middle::ty::{ResolverGlobalCtxt, ResolverOutputs, TyCtxt, TyCtxtFeed};
 use rustc_query_system::ich::StableHashingContext;
 use rustc_session::lint::builtin::PRIVATE_MACRO_USE;
@@ -1166,6 +1166,8 @@ pub struct Resolver<'a, 'tcx> {
     doc_link_resolutions: FxHashMap<LocalDefId, DocLinkResMap>,
     doc_link_traits_in_scope: FxHashMap<LocalDefId, Vec<DefId>>,
     all_macro_rules: FxHashMap<Symbol, Res>,
+
+    kernel_def_id: Option<DefId>,
 }
 
 /// Nothing really interesting here; it just provides memory for the rest of the crate.
@@ -1506,6 +1508,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             doc_link_traits_in_scope: Default::default(),
             all_macro_rules: Default::default(),
             delegation_fn_sigs: Default::default(),
+            kernel_def_id: None,
         };
 
         let root_parent_scope = ParentScope::module(graph_root, &resolver);
@@ -1585,6 +1588,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 .collect(),
         );
 
+        //kernel
         let global_ctxt = ResolverGlobalCtxt {
             expn_that_defined,
             visibilities_for_hashing: self.visibilities_for_hashing,
@@ -1601,7 +1605,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             doc_link_traits_in_scope: self.doc_link_traits_in_scope,
             all_macro_rules: self.all_macro_rules,
             stripped_cfg_items,
-            kernel_candidate: None,
+            kernel_candidate: self.kernel_def_id,
         };
         let ast_lowering = ty::ResolverAstLowering {
             legacy_const_generic_args: self.legacy_const_generic_args,
@@ -1683,6 +1687,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 .time("finalize_macro_resolutions", || self.finalize_macro_resolutions(krate));
             self.tcx.sess.time("late_resolve_crate", || self.late_resolve_crate(krate));
             self.tcx.sess.time("resolve_main", || self.resolve_main());
+            self.tcx.sess.time("resolve_engine", || self.resolve_engine(krate));
             self.tcx.sess.time("resolve_check_unused", || self.check_unused(krate));
             self.tcx.sess.time("resolve_report_errors", || self.report_errors(krate));
             self.tcx
@@ -2171,6 +2176,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         ) else {
             return;
         };
+        
 
         let res = name_binding.res();
         let is_import = name_binding.is_import();
@@ -2180,6 +2186,66 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
         self.main_def = Some(MainDefinition { res, is_import, span });
     }
+
+    fn resolve_engine(&mut self, krate: &Crate) {
+        let attributes = krate.attrs.as_slice();
+        let Some(engine) = attr::find_by_name(attributes, sym::engine) else {
+            return;
+        };
+        // kernel intermission :)
+        let parent_scope = &ParentScope::module(self.graph_root, self);
+        if let Some(path) = get_kernel_type_path(engine) {
+            let a = Segment::from_path(&path);
+            let path_result = self.resolve_path(
+                a.as_slice(), 
+                Some(Namespace::TypeNS),
+                parent_scope, 
+                None, 
+                None);
+            match path_result {
+                PathResult::NonModule(path_res) => {
+                    let res = path_res.full_res();
+                    if let Some(Res::Def(DefKind::Struct, def_id)) = res {
+                        self.kernel_def_id = Some(def_id);
+                    }
+                },
+                _ => {
+                    //dcx.emit_err(errors::TestRunnerInvalid { span: path.span });
+                    bug!("expected a struct path for #[engine]");
+                }
+            }
+        };
+    }
+}
+
+pub fn get_kernel_type_path<'tcx>(attribute: &rustc_ast::Attribute) -> Option<rustc_ast::Path> {
+    // get the kernel type of the current crate.
+    // the kernel type is defined by a crate level attribute #[engine(Path)]
+    // where the path is the crate where the kernel type is defined.
+    // the kernel type itself is always Kernel<Dim, Args, Ret>
+
+    let meta_list = attribute.meta_item_list()?;
+    let span = attribute.span;
+    match &*meta_list {
+        [single] => match single.meta_item() {
+            Some(meta_item) if meta_item.is_word() => {
+                let mut path = meta_item.path.clone();
+                let kernel_segment = rustc_ast::PathSegment::from_ident(Ident::from_str("Kernel"));
+                path.segments.push(kernel_segment);
+                return Some(path);
+            },
+            _ => {
+                //dcx.emit_err(errors::TestRunnerInvalid { span });
+                bug!("expected a word for #[engine] attribute");
+            }
+        },
+        _ => {
+            //dcx.emit_err(errors::TestRunnerNargs { span });
+            bug!("expected one argument for #[engine] attribute");
+        }
+    }
+    None
+
 }
 
 fn names_to_string(names: &[Symbol]) -> String {

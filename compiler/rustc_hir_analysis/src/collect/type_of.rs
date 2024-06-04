@@ -434,7 +434,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
                 }
                 _ => icx.lower_ty(*self_ty),
             },
-            ItemKind::Fn(..) => {
+            ItemKind::Fn(fn_sig, ..) => {
                 // check if the `#[kernel]` attribute is present,
                 // if it is, the final type of this function will be a const &'static [u8]
                 if tcx.has_attr(def_id, sym::kernel) {
@@ -444,22 +444,47 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
                     // create a hir Ty from the path
                     
                     let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
-                        return Ty::new_error(tcx, guar);
+                        //let guar = tcx
+                        //    .dcx()
+                        //    .emit_err(crate::errors::);
+                        bug!("kernel attribute present but no kernel type found")
+                        //return Ty::new_error(tcx, guar);
                     };
-                    let ty = tcx.type_of(kernel_def_id);
+                    let kernel_type = tcx.type_of(kernel_def_id);
+                    // we now have the kernel type, but we still need populate the generic args
+                    // they are: the dimension (for now just usize)
+                    // and the arguments of the function wrapped inside a tuple
+                    let mut types = vec![];
+                    for arg in fn_sig.decl.inputs.iter() {
+                        // it is important to strip some lifetimes here,
+                        // when the function has a reference parameter, 
+                        // the lifetime of that reference will break the compiler
+                        // for kernels, we supply the lifetime 'static
+                        // todo
+                        types.push(icx.lower_ty(arg));
+                    }
+                    
+                    /*let args_ty = hir::Ty {
+                        hir_id: hir::CRATE_HIR_ID,
+                        kind: types,
+                        span: DUMMY_SP,
+                    };
+                    let dim_arg = GenericArg::Type(fn_sig.decl.inputs.first().unwrap());
+                    let fn_args = GenericArg::Type(&args_ty);
+                    tcx.arg*/
+                    println!("types: {:?}", types);
+                    let types = tcx.mk_type_list(&types);
+                    let args_ty = tcx.mk_ty_from_kind(ty::Tuple(types));
+                    let dim_arg = ty::GenericArg::from(tcx.types.usize);
+                    let fn_args = ty::GenericArg::from(args_ty);
+                    println!("fn_args: {:?}", fn_args);
 
-                    let innerkind = ty::Slice(tcx.types.u8);
-                    let a = 1;
-                    let tykind = ty::Ref(
-                        tcx.lifetimes.re_static,
-                        tcx.mk_ty_from_kind(innerkind),
-                        ty::Mutability::Not,
-                    );
-                    let ty = tcx.mk_ty_from_kind(tykind);
-                    return ty::EarlyBinder::bind(ty);
+                    kernel_type.instantiate(tcx, &[dim_arg, fn_args])
+
+                } else {
+                    let args = ty::GenericArgs::identity_for_item(tcx, def_id);
+                    Ty::new_fn_def(tcx, def_id.to_def_id(), args)
                 }
-                let args = ty::GenericArgs::identity_for_item(tcx, def_id);
-                Ty::new_fn_def(tcx, def_id.to_def_id(), args)
             }
             ItemKind::Enum(..) | ItemKind::Struct(..) | ItemKind::Union(..) => {
                 let def = tcx.adt_def(def_id);
@@ -679,71 +704,4 @@ pub fn type_alias_is_lazy<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> bool {
     HasTait.visit_ty(tcx.hir().expect_item(def_id).expect_ty_alias().0).is_break()
 }
 
-/*
-fn get_test_runner(krate: &ast::Crate) -> Option<ast::Path> {
-    let test_attr = attr::find_by_name(&krate.attrs, sym::test_runner)?;
-    let meta_list = test_attr.meta_item_list()?;
-    let span = test_attr.span;
-    match &*meta_list {
-        [single] => match single.meta_item() {
-            Some(meta_item) if meta_item.is_word() => return Some(meta_item.path.clone()),
-            _ => {
-                dcx.emit_err(errors::TestRunnerInvalid { span });
-            }
-        },
-        _ => {
-            dcx.emit_err(errors::TestRunnerNargs { span });
-        }
-    }
-    None
-}
- */
 
-// get_kernel_type should be based on the method above
-
-pub fn get_kernel_type_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Option<rustc_ast::ast::Path> {
-    // get the kernel type of the current crate.
-    // the kernel type is defined by a crate level attribute #[engine(Path)]
-    // where the path is the crate where the kernel type is defined.
-    // the kernel type itself is always Kernel<Dim, Args, Ret>
-
-    let attr = rustc_ast::attr::find_by_name(tcx.hir().krate_attrs(), sym::engine)?;
-
-    let meta_list = attr.meta_item_list()?;
-    let span = attr.span;
-    match &*meta_list {
-        [single] => match single.meta_item() {
-            Some(meta_item) if meta_item.is_word() => {
-                let mut path = meta_item.path.clone();
-                let kernel_segment = PathSegment::from_ident(Ident::from_str("Kernel"));
-                path.segments.push(kernel_segment);
-                return Some(path);
-            },
-            _ => {
-                //dcx.emit_err(errors::TestRunnerInvalid { span });
-                bug!("expected a word for #[engine] attribute");
-            }
-        },
-        _ => {
-            //dcx.emit_err(errors::TestRunnerNargs { span });
-            bug!("expected one argument for #[engine] attribute");
-        }
-    }
-    None
-
-    // get the kernel type of the current crate.
-    /*for attr in tcx.hir().krate_attrs() {
-        if let AttrKind::Normal(norm_attr) = &attr.kind {
-            if norm_attr.item.path.segments.first().unwrap().ident.name == sym::engine {
-                let path = norm_attr.item.args.inner_tokens();
-                // create a path to the kernel type
-                for t in path.trees() {
-                    println!("{:?}", t);
-                }
-                todo!()
-
-            }
-        }
-    }*/
-
-}
