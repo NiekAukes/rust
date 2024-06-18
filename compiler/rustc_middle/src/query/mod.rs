@@ -238,6 +238,24 @@ rustc_queries! {
         feedable
     }
 
+    query type_of_kernel(key: DefId) -> ty::EarlyBinder<Ty<'tcx>> {
+        desc { |tcx|
+            "{action} `{path}`",
+            action = {
+                use rustc_hir::def::DefKind;
+                match tcx.def_kind(key) {
+                    DefKind::TyAlias => "expanding type alias",
+                    DefKind::TraitAlias => "expanding trait alias",
+                    _ => "computing type of",
+                }
+            },
+            path = tcx.def_path_str(key),
+        }
+        cache_on_disk_if { key.is_local() }
+        separate_provide_extern
+        feedable
+    }
+
     /// Specialized instance of `type_of` that detects cycles that are due to
     /// revealing opaque because of an auto trait bound. Unless `CyclePlaceholder` needs
     /// to be handled separately, call `type_of` instead.

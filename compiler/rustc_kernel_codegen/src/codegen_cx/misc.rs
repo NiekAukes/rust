@@ -4,7 +4,7 @@ use rustc_codegen_ssa::traits::{MiscMethods, TypeMembershipMethods};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::{layout::HasTyCtxt, Ty};
 
-use crate::FunctionNVVM;
+use crate::function::FunctionNVVM;
 
 use super::CodegenCx;
 
@@ -22,10 +22,10 @@ impl<'tcx> MiscMethods<'tcx> for CodegenCx<'_, 'tcx> {
     fn get_fn(&self, instance: rustc_middle::ty::Instance<'tcx>) -> Self::Function {
         let module = unsafe { &mut *self.module.get() };
         // very first thing to do: check if this is a kernel function
-        if (self.tcx().is_kernel(instance.def_id())) {
+        //if (self.tcx().is_kernel(instance.def_id())) {
             // pass the instance to the kernel fn generator
-        }
-        todo!()
+        //}
+        module.functions.get(&instance.def_id()).unwrap()
     }
 
     fn get_fn_addr(&self, instance: rustc_middle::ty::Instance<'tcx>) -> Self::Value {

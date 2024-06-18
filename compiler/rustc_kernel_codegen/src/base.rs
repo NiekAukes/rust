@@ -2,7 +2,7 @@ use rustc_codegen_ssa::mono_item::MonoItemExt;
 use rustc_middle::{mir::mono::CodegenUnit, ty::TyCtxt};
 
 use crate::arena;
-use crate::{codegen_cx::CodegenCx, ModuleNVVM};
+use crate::{codegen_cx::CodegenCx, module::ModuleNVVM};
 use crate::builder::Builder;
 
 pub fn module_codegen_hack<'tcx>(
@@ -34,7 +34,7 @@ pub fn module_codegen_hack<'tcx>(
 pub fn module_codegen<'tcx>(
     tcx: TyCtxt<'tcx>, 
     cgu: &'tcx CodegenUnit<'tcx>)
-    -> Vec<u32>
+    -> (String, Vec<u32>)
  {
     let arena = arena::Arena::default();
     let mut module = ModuleNVVM::new(&arena);
@@ -61,6 +61,21 @@ pub fn module_codegen<'tcx>(
         }
     }*/
 
+
     let m = cx.finalize();
-    m.assemble()
+
+    let name = {
+        let mut name = None;
+        for &(mono_item, _) in &mono_items {
+            if tcx.is_kernel(mono_item.def_id()) {
+                name = Some(mono_item.symbol_name(tcx).name);
+                
+            }
+        }
+        name.expect("no kernel found")
+    };
+
+
+
+    (name.to_string(), m.assemble())
 }

@@ -182,7 +182,16 @@ impl<'tcx> Instance<'tcx> {
     /// Returns the `Ty` corresponding to this `Instance`, with generic instantiations applied and
     /// lifetimes erased, allowing a `ParamEnv` to be specified for use during normalization.
     pub fn ty(&self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> Ty<'tcx> {
-        let ty = tcx.type_of(self.def.def_id());
+        let ty = if tcx.is_kernel(self.def.def_id()) {
+            tcx.type_of_kernel(self.def.def_id())
+        } else {
+            tcx.type_of(self.def.def_id())
+        };
+        tcx.instantiate_and_normalize_erasing_regions(self.args, param_env, ty)
+    }
+
+    pub fn kernel_ty(&self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> Ty<'tcx> {
+        let ty = tcx.type_of_kernel(self.def.def_id());
         tcx.instantiate_and_normalize_erasing_regions(self.args, param_env, ty)
     }
 

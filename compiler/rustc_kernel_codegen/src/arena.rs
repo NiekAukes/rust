@@ -112,9 +112,9 @@ macro_rules! arena_types {
             [decode] specialization_graph: rustc_middle::traits::specialization_graph::Graph,
             [] crate_inherent_impls: rustc_middle::ty::CrateInherentImpls,
             [] hir_owner_nodes: rustc_hir::OwnerNodes<'tcx>,*/
-            [] nvvm_function: crate::FunctionNVVM,
+            [] nvvm_function: crate::function::FunctionNVVM<'tcx>,
             [] nvvm_global: crate::GlobalNVVM,
-            [] nvvm_type: crate::TypeNVVM,
+            [] nvvm_type: crate::ty::TypeNVVM<'tcx>,
             [] nvvm_basic_block: crate::BasicBlock,
             [] nvvm_value: crate::Value,
             [] codegen_unit: rustc_middle::mir::mono::CodegenUnit<'tcx>, // for using the lifetime

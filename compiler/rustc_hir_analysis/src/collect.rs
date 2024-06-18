@@ -26,6 +26,7 @@ use rustc_hir::{GenericParamKind, Node};
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_infer::traits::ObligationCause;
 use rustc_middle::hir::nested_filter;
+use rustc_middle::mir::tcx;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::util::{Discr, IntTypeExt};
 use rustc_middle::ty::{self, AdtKind, Const, IsSuggestable, ToPredicate, Ty, TyCtxt};
@@ -56,7 +57,8 @@ mod type_of;
 pub fn provide(providers: &mut Providers) {
     resolve_bound_vars::provide(providers);
     *providers = Providers {
-        type_of: type_of::type_of,
+        type_of: |tcx, def_id| type_of::type_of_inner(tcx, def_id, false),
+        type_of_kernel: |tcx, def_id| type_of::type_of_inner(tcx, def_id, true),
         type_of_opaque: type_of::type_of_opaque,
         type_alias_is_lazy: type_of::type_alias_is_lazy,
         item_bounds: item_bounds::item_bounds,

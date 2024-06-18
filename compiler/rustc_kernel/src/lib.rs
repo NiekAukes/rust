@@ -27,7 +27,7 @@ pub fn is_kernel<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
 pub fn compile_kernel<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> &'tcx Body<'tcx> {
     // TODO! compile the kernel module
     let (name, code) = codegen::generate(tcx, def_id);
-    let constant = kernel_embedder::embed_kernel(tcx, def_id, name, code.as_slice());
+    let constant = kernel_embedder::embed_kernel(tcx, def_id, &name, code.as_slice());
     tcx.arena.alloc(constant)
 }
 

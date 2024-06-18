@@ -13,7 +13,6 @@ impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
         trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>,
         vtable: Self::Value,
     ) {
-        todo!()
     }
 
     fn create_function_debug_context(
@@ -23,7 +22,7 @@ impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
         llfn: Self::Function,
         mir: &rustc_middle::mir::Body<'tcx>,
     ) -> Option<rustc_codegen_ssa::mir::debuginfo::FunctionDebugContext<'tcx, Self::DIScope, Self::DILocation>> {
-        todo!()
+        None
     }
 
     fn dbg_scope_fn(
@@ -32,7 +31,6 @@ impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         maybe_definition_llfn: Option<Self::Function>,
     ) -> Self::DIScope {
-        todo!()
     }
 
     fn dbg_loc(
@@ -41,7 +39,6 @@ impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
         inlined_at: Option<Self::DILocation>,
         span: rustc_span::Span,
     ) -> Self::DILocation {
-        todo!()
     }
 
     fn extend_scope_to_file(
@@ -49,11 +46,9 @@ impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
         scope_metadata: Self::DIScope,
         file: &rustc_span::SourceFile,
     ) -> Self::DIScope {
-        todo!()
     }
 
     fn debuginfo_finalize(&self) {
-        todo!()
     }
 
     fn create_dbg_var(
@@ -64,6 +59,5 @@ impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
         variable_kind: rustc_codegen_ssa::mir::debuginfo::VariableKind,
         span: rustc_span::Span,
     ) -> Self::DIVariable {
-        todo!()
     }
 }

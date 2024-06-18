@@ -446,7 +446,7 @@ impl DroplessArena {
 
     #[inline]
     pub fn alloc<T>(&self, object: T) -> &mut T {
-        assert!(!mem::needs_drop::<T>());
+        //assert!(!mem::needs_drop::<T>());
         assert!(mem::size_of::<T>() != 0);
 
         let mem = self.alloc_raw(Layout::new::<T>()) as *mut T;

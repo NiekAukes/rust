@@ -310,7 +310,7 @@ fn get_path_containing_arg_in_pat<'hir>(
     arg_path
 }
 
-pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty<'_>> {
+pub(super) fn type_of_inner(tcx: TyCtxt<'_>, def_id: LocalDefId, original: bool) -> ty::EarlyBinder<Ty<'_>> {
     use rustc_hir::*;
     use rustc_middle::ty::Ty;
 
@@ -437,7 +437,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
             ItemKind::Fn(fn_sig, ..) => {
                 // check if the `#[kernel]` attribute is present,
                 // if it is, the final type of this function will be a const &'static [u8]
-                if tcx.has_attr(def_id, sym::kernel) {
+                if tcx.has_attr(def_id, sym::kernel) && !original {
                     // get the path of the kernel type
                     //let path = get_kernel_type_path(tcx, def_id);
                     //rustc_hir::Path

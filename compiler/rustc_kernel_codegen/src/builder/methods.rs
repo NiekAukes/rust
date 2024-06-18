@@ -21,6 +21,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn append_block(cx: &'a Self::CodegenCx, llfn: Self::Function, name: &str) -> Self::BasicBlock {
+        println!("append_block, name: {}", name);
         todo!()
     }
 
