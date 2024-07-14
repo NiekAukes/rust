@@ -1,4 +1,8 @@
-use rustc_codegen_ssa::traits::ConstMethods;
+use rustc_codegen_ssa::traits::{BaseTypeMethods, ConstMethods};
+use rustc_middle::mir::interpret::{AllocId, AllocRange, ConstAllocation, GlobalAlloc, Scalar};
+use rustc_target::abi::{self, Size};
+
+use crate::{ty::TyNVVM, value::{Const, Val, ValueNVVM}, GlobalNVVM};
 
 use super::CodegenCx;
 
@@ -28,7 +32,8 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn const_bool(&self, val: bool) -> Self::Value {
-        todo!()
+        let value = ValueNVVM::Constant(Const::Bool(val));
+        self.get_module_mut().create_val(value, Some(self.type_i1()))
     }
 
     fn const_i16(&self, i: i16) -> Self::Value {
@@ -36,19 +41,19 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn const_i32(&self, i: i32) -> Self::Value {
-        todo!()
+        self.const_i(i as i64, self.type_i32())
     }
 
     fn const_i8(&self, i: i8) -> Self::Value {
-        todo!()
+        self.const_i(i as i64, self.type_i8())
     }
 
     fn const_u32(&self, i: u32) -> Self::Value {
-        todo!()
+        self.const_u(i as u64, self.type_i32())
     }
 
     fn const_u64(&self, i: u64) -> Self::Value {
-        todo!()
+        self.const_u(i, self.type_i64())
     }
 
     fn const_u128(&self, i: u128) -> Self::Value {
@@ -56,7 +61,7 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn const_usize(&self, i: u64) -> Self::Value {
-        todo!()
+        self.const_u32(i as u32)
     }
 
     fn const_u8(&self, i: u8) -> Self::Value {
@@ -76,11 +81,28 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn const_to_opt_uint(&self, v: Self::Value) -> Option<u64> {
-        todo!()
+        // if the value is a constant, we can extract the value
+        // otherwise we can't
+        // this is for optimization purposes
+        match *v {
+            ValueNVVM::Constant(Const::U(u)) => Some(u),
+            ValueNVVM::Constant(Const::I(i)) => {
+                if i >= 0 {
+                    Some(i as u64)
+                } else {
+                    None
+                }
+            },
+            _ => {
+                None
+            }
+        }
     }
 
     fn const_to_opt_u128(&self, v: Self::Value, sign_ext: bool) -> Option<u128> {
-        todo!()
+        //println!("TODO: const_to_opt_u128\n\n");
+        //println!("Value: {:?} sign_ext: {}", v, sign_ext);
+        None // Not supported
     }
 
     fn const_data_from_alloc(&self, alloc: rustc_middle::mir::interpret::ConstAllocation<'tcx>) -> Self::Value {
@@ -88,14 +110,64 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn scalar_to_backend(&self, cv: rustc_middle::mir::interpret::Scalar, layout: rustc_target::abi::Scalar, llty: Self::Type) -> Self::Value {
-        todo!()
+        let value = match cv {
+            Scalar::Int(i) => {
+                let sz = i.size().bytes();
+                match sz {
+                    1 => self.const_i8(i.try_to_i8().unwrap()),
+                    2 => self.const_i16(i.try_to_i16().unwrap()),
+                    4 => self.const_i32(i.try_to_i32().unwrap()),
+                    8 => self.const_i(i.try_to_i64().unwrap(), self.type_i64()),
+                    _ => todo!(),
+                }
+            },
+            Scalar::Ptr(p, _) => {
+                let (prov, offset) = p.into_parts();
+                match self.tcx.global_alloc(prov.alloc_id()) {
+                    GlobalAlloc::Memory(alloc) => {
+                        return self.get_global(prov.alloc_id(), alloc);
+                    },
+                    GlobalAlloc::Function(instance) => todo!(),
+                    GlobalAlloc::Static(def_id) => todo!(),
+                    GlobalAlloc::VTable(_, _) => todo!(),
+                }
+                todo!()
+            }
+        };
+
+        value
     }
 
     fn const_bitcast(&self, val: Self::Value, ty: Self::Type) -> Self::Value {
+        //self.
         todo!()
     }
 
     fn const_ptr_byte_offset(&self, val: Self::Value, offset: rustc_target::abi::Size) -> Self::Value {
         todo!()
+    }
+}
+
+impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
+    fn const_u(&self, u: u64, ty: TyNVVM<'m>) -> Val<'m> {
+        let value = ValueNVVM::Constant(Const::U(u));
+        self.get_module_mut().create_val(value, Some(ty))
+    }
+
+    fn const_i(&self, i: i64, ty: TyNVVM<'m>) -> Val<'m> {
+        let value = ValueNVVM::Constant(Const::I(i));
+        self.get_module_mut().create_val(value, Some(ty))
+    }
+
+    fn get_global(&self, id: AllocId, alloc: ConstAllocation<'tcx>) -> Val<'m> {
+        let module = self.get_module_mut();
+        let bytes = alloc.inner().get_bytes_unchecked(
+            AllocRange { 
+                start: Size::from_bytes(0), 
+                size: Size::from_bytes(alloc.inner().len())
+            });
+        let allocation = GlobalNVVM::new(bytes.to_vec());
+        let value = module.add_allocation(allocation);
+        value
     }
 }

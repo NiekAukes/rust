@@ -2,6 +2,7 @@ use rustc_codegen_ssa::mono_item::MonoItemExt;
 use rustc_middle::{mir::mono::CodegenUnit, ty::TyCtxt};
 
 use crate::arena;
+use crate::module::assemble;
 use crate::{codegen_cx::CodegenCx, module::ModuleNVVM};
 use crate::builder::Builder;
 
@@ -34,7 +35,7 @@ pub fn module_codegen_hack<'tcx>(
 pub fn module_codegen<'tcx>(
     tcx: TyCtxt<'tcx>, 
     cgu: &'tcx CodegenUnit<'tcx>)
-    -> (String, Vec<u32>)
+    -> (String, String)
  {
     let arena = arena::Arena::default();
     let mut module = ModuleNVVM::new(&arena);
@@ -62,7 +63,7 @@ pub fn module_codegen<'tcx>(
     }*/
 
 
-    let m = cx.finalize();
+    let mut m = cx.finalize();
 
     let name = {
         let mut name = None;
@@ -77,5 +78,6 @@ pub fn module_codegen<'tcx>(
 
 
 
-    (name.to_string(), m.assemble())
+    (name.to_string(), assemble(&mut m))
 }
+

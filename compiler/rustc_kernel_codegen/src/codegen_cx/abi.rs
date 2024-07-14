@@ -2,9 +2,9 @@ use std::marker::Tuple;
 
 use rustc_codegen_ssa::traits::{BaseTypeMethods, LayoutTypeMethods, TypeMembershipMethods};
 use rustc_middle::{bug, ty::{self, layout::{FnAbiOfHelpers, LayoutOfHelpers}, Ty}};
-use rustc_target::abi::{Abi, HasDataLayout, PointeeInfo, Scalar, Size, TyAndLayout, Variants};
+use rustc_target::abi::{call::PassMode, Abi, HasDataLayout, PointeeInfo, Primitive, Scalar, Size, TyAndLayout, Variants};
 
-use crate::ty::{TyNVVM, TypeNVVM};
+use crate::{ty::{TyNVVM, TypeNVVM}, value::ValueNVVM};
 
 use super::CodegenCx;
 
@@ -56,6 +56,9 @@ impl HasDataLayout for CodegenCx<'_, '_> {
 
 impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
     fn backend_type(&self, layout_ty: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> Self::Type {
+        if layout_ty.is_zst() {
+            return self.type_void();
+        }
         self.lower_ty(&layout_ty.ty)
     }
 
@@ -64,7 +67,34 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn fn_decl_backend_type(&self, fn_abi: &rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>) -> Self::Type {
-        todo!()
+        let mut args = vec![];// = abi.args.iter().enumerate().map(|(idx, arg)| {
+            for (idx, arg) in fn_abi.args.iter().enumerate() {
+                // lower the type to the NVVM type
+                println!("Arg: {:?}", arg);
+                match arg.mode {
+                    PassMode::Ignore => continue,
+                    PassMode::Pair(_, _) => {
+                        // add 2 arguments to the list
+                        let ty1 = self.backend_type(arg.layout.field(self, 0));
+                        let ty2 = self.backend_type(arg.layout.field(self, 1));
+                        args.push(ty1);
+                        args.push(ty2);
+                    }
+                    PassMode::Indirect { .. } => todo!(),
+                    PassMode::Cast { .. } => todo!(),
+                    PassMode::Direct(_) => {
+                        // basic case, lower the type and add it to the list
+                        let ty = self.backend_type(arg.layout);
+                        args.push(ty);
+                    }
+                }
+                
+            }
+            let ret = self.backend_type(fn_abi.ret.layout);
+    
+            // build the type
+            let mut module = self.get_module_mut();
+            module.ty_from_type(TypeNVVM::Fn(args, ret))
     }
 
     fn fn_ptr_backend_type(&self, fn_abi: &rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>) -> Self::Type {
@@ -76,15 +106,23 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn immediate_backend_type(&self, layout: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> Self::Type {
-        todo!()
+        self.backend_type(layout)
     }
 
     fn is_backend_immediate(&self, layout: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> bool {
-        todo!()
+        //println!("is_backend_immediate, abi: {:?}", layout.abi);
+        match layout.abi {
+            Abi::Scalar(_) | Abi::Vector { .. } => true,
+            Abi::ScalarPair(..) | Abi::Uninhabited | Abi::Aggregate { .. } => false,
+        }
     }
 
     fn is_backend_scalar_pair(&self, layout: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> bool {
-        todo!()
+        //println!("is_backend_scalar_pair, abi: {:?}", layout.abi);
+        match layout.abi {
+            Abi::ScalarPair(..) => true,
+            Abi::Uninhabited | Abi::Scalar(_) | Abi::Vector { .. } | Abi::Aggregate { .. } => false,
+        }
     }
 
     fn scalar_pair_element_backend_type(
@@ -93,7 +131,25 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         index: usize,
         immediate: bool,
     ) -> Self::Type {
-        todo!()
+        // This must produce the same result for `repr(transparent)` wrappers as for the inner type!
+        // In other words, this should generally not look at the type at all, but only at the
+        // layout.
+        let Abi::ScalarPair(a, b) = layout.abi else {
+            bug!("scalarpair not applicable: {:?}", layout);
+        };
+        let scalar = [a, b][index];
+
+        // Make sure to return the same type `immediate_llvm_type` would when
+        // dealing with an immediate pair. This means that `(bool, bool)` is
+        // effectively represented as `{i8, i8}` in memory and two `i1`s as an
+        // immediate, just like `bool` is typically `i8` in memory and only `i1`
+        // when immediate. We need to load/store `bool` as `i8` to avoid
+        // crippling LLVM optimizations or triggering other LLVM bugs with `i1`.
+        if immediate && scalar.is_bool() {
+            return self.type_i1();
+        }
+
+        self.scalar_type_at(scalar)
     }
 }
 
@@ -197,7 +253,12 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn val_ty(&self, v: Self::Value) -> Self::Type {
-        todo!()
+        match self.get_module().valtypes.get(&v) {
+            Some(ty) => *ty,
+            None => {
+                bug!("val_ty, value not found in valtypes: {:?}", v)
+            }
+        }
     }
 }
 
@@ -269,15 +330,72 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                     let ty = self.lower_ty(&ty);
                     tylist.push(ty);
                 }
-                module.ty_from_type(crate::ty::TypeNVVM::Struct(tylist))
+                if tylist.len() == 0 {
+                    module.ty_from_type(crate::ty::TypeNVVM::Zst)
+                } else {
+                    module.ty_from_type(crate::ty::TypeNVVM::Struct(tylist))
+                }
             },
 
 
-
+            ty::Str => {
+                let i8 = module.ty_from_type(crate::ty::TypeNVVM::I(8));
+                module.ty_from_type(crate::ty::TypeNVVM::Pointer(i8))
+            },
 
             _ => {
                 bug!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
             }
+        }
+    }
+
+    pub fn type_void(&self) -> TyNVVM<'m> {
+        let module = unsafe { &mut *self.module.get() };
+        module.ty_from_type(crate::ty::TypeNVVM::Zst)
+    }
+
+    pub fn type_pointer(&self, ty: TyNVVM<'m>) -> TyNVVM<'m> {
+        let module = unsafe { &mut *self.module.get() };
+        module.ty_from_type(crate::ty::TypeNVVM::Pointer(ty))
+    }
+
+    pub fn type_voidptr(&self) -> TyNVVM<'m> {
+        let module = unsafe { &mut *self.module.get() };
+        let void = self.type_void();
+        module.ty_from_type(crate::ty::TypeNVVM::Pointer(void))
+    }
+
+    pub fn scalar_type_at(&self, scalar: Scalar) -> TyNVVM<'m> {
+        match scalar.primitive() {
+            Primitive::Int(i, _) => self.type_from_integer(i),
+            Primitive::F16 => self.type_f16(),
+            Primitive::F32 => self.type_f32(),
+            Primitive::F64 => self.type_f64(),
+            Primitive::F128 => self.type_f128(),
+            Primitive::Pointer(address_space) => self.type_ptr_ext(address_space),
+        }
+    }
+
+    pub fn type_from_integer(&self, int: rustc_target::abi::Integer) -> TyNVVM<'m> {
+        match int {
+            rustc_target::abi::Integer::I8 => self.type_i8(),
+            rustc_target::abi::Integer::I16 => self.type_i16(),
+            rustc_target::abi::Integer::I32 => self.type_i32(),
+            rustc_target::abi::Integer::I64 => self.type_i64(),
+            rustc_target::abi::Integer::I128 => self.type_i128(),
+        }
+    }
+}
+
+pub trait LayoutExt {
+    fn is_immediate(&self) -> bool;
+}
+
+impl<'tcx> LayoutExt for TyAndLayout<'tcx, Ty<'tcx>> {
+    fn is_immediate(&self) -> bool {
+        match self.abi {
+            Abi::Scalar(_) | Abi::Vector { .. } => true,
+            Abi::ScalarPair(..) | Abi::Uninhabited | Abi::Aggregate { .. } => false,
         }
     }
 }

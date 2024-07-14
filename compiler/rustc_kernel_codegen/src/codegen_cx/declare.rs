@@ -1,7 +1,8 @@
 use rustc_codegen_ssa::traits::{LayoutTypeMethods, PreDefineMethods};
 use rustc_middle::ty;
+use rustc_target::abi::call::PassMode;
 
-use crate::{function::FunctionNVVM, ty::TyNVVM};
+use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeNVVM}, value::ValueNVVM};
 
 use super::CodegenCx;
 
@@ -13,8 +14,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
         visibility: rustc_middle::mir::mono::Visibility,
         symbol_name: &str,
     ) {
-        //todo!()
-        // we can't do stuff here because we can't modify the codegen_cx
+        todo!()
     }
 
     fn predefine_fn(
@@ -31,7 +31,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
         // and wether it is a kernel function or not
         let is_kernel = self.tcx.is_kernel(instance.def_id());
         let param_env = self.tcx.param_env(instance.def_id());
-        let ty = instance.kernel_ty(self.tcx, param_env);
+        let ty = instance.ty(self.tcx, param_env);
 
         let pea = param_env.and((instance, ty::List::empty()));
 
@@ -43,16 +43,52 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
             },
         };
         
-        let args: Vec<TyNVVM<'m>> = abi.args.iter().map(|arg| {
+        let mut args = vec![];// = abi.args.iter().enumerate().map(|(idx, arg)| {
+        for (idx, arg) in abi.args.iter().enumerate() {
             // lower the type to the NVVM type
-            self.backend_type(arg.layout)
-        }).collect();
+            println!("Arg: {:?}", arg);
+            match arg.mode {
+                PassMode::Ignore => continue,
+                PassMode::Pair(_, _) => {
+                    // add 2 arguments to the list
+                    let ty1 = self.backend_type(arg.layout.field(self, 0));
+                    let ty2 = self.backend_type(arg.layout.field(self, 1));
+                    let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx, ty: ty1};
+                    let value2 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: idx + 1, ty: ty2};
+                    let val1 = module.create_val(value1, Some(ty1));
+                    let val2 = module.create_val(value2, Some(ty2));
+                    args.push(val1);
+                    args.push(val2);
+                }
+                PassMode::Indirect { .. } => todo!(),
+                PassMode::Cast { .. } => todo!(),
+                PassMode::Direct(_) => {
+                    // basic case, lower the type and add it to the list
+                    let ty = self.backend_type(arg.layout);
+                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx, ty};
+                    let val = module.create_val(value, Some(ty));
+                    args.push(val);
+                }
+            }
+            
+        }
         let ret = self.backend_type(abi.ret.layout);
-        let ret = if (abi.ret.layout.is_zst()) {None} else {Some(ret)};
 
-        let mut f = FunctionNVVM::new(symbol_name.to_string(), is_kernel, ret, args);
+        // build the type
+        let ty = module.ty_from_type(TypeNVVM::Fn(args.iter().map(|a| {
+            // all values should be params
+            if let ValueNVVM::Param { ty, .. } = a.0 {
+                *ty
+            } else {
+                panic!("Function arguments should be params");
+            }
+        }).collect(), ret));
+
+        let mut f = FunctionNVVM::new(symbol_name.to_string(), is_kernel, ret, args, ty);
 
         // we need to add the function to the module
         module.add_function(instance.def_id(), f);
+        let val = module.create_val(ValueNVVM::FnRef(symbol_name.to_string()), Some(ty));
+        module.defrefs.insert(instance.def_id(), val);
     }
 }

@@ -9,8 +9,8 @@ mod abi;
 mod intrinsic;
 mod debug_info;
 pub struct Builder<'a, 'm, 'tcx> {
-    codegen_cx: &'a mut CodegenCx<'m, 'tcx>,
-    tcx: TyCtxt<'tcx>,
+    codegen_cx: &'a CodegenCx<'m, 'tcx>,
+    basic_block: &'m crate::basic_block::BasicBlock<'m>,
 }
 
 impl<'a, 'm, 'tcx> HasTargetSpec for Builder<'a, 'm, 'tcx> {
@@ -43,19 +43,19 @@ impl<'m, 'tcx> HasCodegen<'tcx> for Builder<'_, 'm, 'tcx> {
 
 impl<'tcx> HasParamEnv<'tcx> for Builder<'_, '_, 'tcx> {
     fn param_env(&self) -> rustc_middle::ty::ParamEnv<'tcx> {
-        todo!()
+        self.cx().param_env()
     }
 }
 
 impl<'tcx> HasTyCtxt<'tcx> for Builder<'_, '_, 'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
-        self.tcx
+        self.codegen_cx.tcx()
     }
 }
 
 impl HasDataLayout for Builder<'_, '_, '_> {
     fn data_layout(&self) -> &rustc_target::abi::TargetDataLayout {
-        todo!()
+        self.codegen_cx.data_layout()
     }
 }
 

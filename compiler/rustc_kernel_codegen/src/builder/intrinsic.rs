@@ -1,6 +1,8 @@
 use rustc_codegen_ssa::traits::IntrinsicCallMethods;
 use rustc_middle::ty::Ty;
 
+use crate::function::FunctionNVVM;
+
 use super::Builder;
 
 
@@ -49,3 +51,4 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
         todo!()
     }
 }
+

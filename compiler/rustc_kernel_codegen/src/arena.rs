@@ -113,10 +113,10 @@ macro_rules! arena_types {
             [] crate_inherent_impls: rustc_middle::ty::CrateInherentImpls,
             [] hir_owner_nodes: rustc_hir::OwnerNodes<'tcx>,*/
             [] nvvm_function: crate::function::FunctionNVVM<'tcx>,
-            [] nvvm_global: crate::GlobalNVVM,
+            [] nvvm_global: crate::GlobalNVVM<'tcx>,
             [] nvvm_type: crate::ty::TypeNVVM<'tcx>,
-            [] nvvm_basic_block: crate::BasicBlock,
-            [] nvvm_value: crate::Value,
+            [] nvvm_basic_block: crate::basic_block::BasicBlock<'tcx>,
+            [] nvvm_value: crate::value::ValueNVVM<'tcx>,
             [] codegen_unit: rustc_middle::mir::mono::CodegenUnit<'tcx>, // for using the lifetime
 
 

@@ -1,11 +1,19 @@
-use crate::ty::TyNVVM;
+use std::cell::UnsafeCell;
+
+use crate::module::{Assemble, ModuleNVVM};
+use crate::ty::TypeNVVM;
+use crate::{ty::TyNVVM, basic_block::BasicBlock};
+use crate::value::{Val, ValueNVVM};
 
 #[derive(Debug)]
 pub struct FunctionNVVM<'m> {
     pub is_kernel: bool,
     pub name: String,
-    pub ret: Option<TyNVVM<'m>>,
-    pub args: Vec<TyNVVM<'m>>,
+    pub ret: TyNVVM<'m>,
+    pub args: Vec<Val<'m>>,
+    pub ty: TyNVVM<'m>,
+    pub fnval: Option<Val<'m>>,
+    basic_blocks: UnsafeCell<Vec<&'m BasicBlock<'m>>>,
 }
 
 
@@ -18,13 +26,80 @@ impl PartialEq for FunctionNVVM<'_> {
 impl<'m> FunctionNVVM<'m> {
     pub fn new(name: String, 
         is_kernel: bool, 
-        ret: Option<TyNVVM<'m>>,
-        args: Vec<TyNVVM<'m>>) -> Self {
+        ret: TyNVVM<'m>,
+        args: Vec<Val<'m>>,
+        ty: TyNVVM<'m>) -> Self 
+    {
         Self {
             is_kernel,
             name,
             ret,
             args,
+            ty,
+            fnval: None,
+            basic_blocks: UnsafeCell::new(Vec::new()),
         }
     }
+
+    pub fn new_inferred(
+        name: String,
+        ret: TyNVVM<'m>,
+        args: Vec<Val<'m>>,
+        module: &mut ModuleNVVM<'m>) -> Self
+    {
+        let ty = module.ty_from_type(TypeNVVM::Fn(args.iter().map(|a| {
+            // all values should be params
+            if let ValueNVVM::Param { ty, .. } = a.0 {
+                *ty
+            } else {
+                panic!("Function arguments should be params");
+            }
+        }).collect(), ret));
+        Self {
+            is_kernel: false,
+            name,
+            ret,
+            args,
+            ty,
+            fnval: None,
+            basic_blocks: UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    pub fn add_basic_block(&self, bb: &'m BasicBlock<'m>) {
+        unsafe {
+            (*self.basic_blocks.get()).push(bb);
+        }
+    }
+
+    pub fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String {
+        let mut s = format!("define ");
+        // return type
+        s.push_str(&format!("{} ", self.ret.assemble(module)));
+        // function name
+        s.push_str(&format!("@{}(", self.name));
+
+        // arguments
+        for (i, arg) in self.args.iter().enumerate() {
+            let arg_inner = arg.0;
+            if let ValueNVVM::Param { .. } = arg_inner {
+                if i != 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&format!("{}", arg_inner.assemble(module, arg)));
+            }
+        }
+        s.push_str(") {\n");
+
+        // basic blocks
+        for bb in unsafe { &*self.basic_blocks.get() } {
+            s.push_str(&format!("{}:\n", bb.name));
+            for instr in bb.instrs() {
+                let instr_inner = instr.0;
+                s.push_str(&format!("  {}\n", instr_inner.assemble(module, &instr)));
+            }
+        }
+        s.push_str("}\n");
+        s
+    } 
 }
