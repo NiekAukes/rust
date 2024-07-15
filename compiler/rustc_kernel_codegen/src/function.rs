@@ -72,6 +72,10 @@ impl<'m> FunctionNVVM<'m> {
         }
     }
 
+    pub fn is_defined(&self) -> bool {
+        unsafe { !(*self.basic_blocks.get()).is_empty() }
+    }
+
     pub fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String {
         let mut s = format!("define ");
         // return type
@@ -102,4 +106,25 @@ impl<'m> FunctionNVVM<'m> {
         s.push_str("}\n");
         s
     } 
+
+    pub fn define(&self, module: &mut ModuleNVVM<'m>) -> String {
+        let mut s = format!("declare ");
+        // return type
+        s.push_str(&format!("{} ", self.ret.assemble(module)));
+        // function name
+        s.push_str(&format!("@{}(", self.name));
+
+        // arguments
+        for (i, arg) in self.args.iter().enumerate() {
+            let arg_inner = arg.0;
+            if let ValueNVVM::Param { .. } = arg_inner {
+                if i != 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&format!("{}", arg_inner.assemble(module, arg)));
+            }
+        }
+        s.push_str(");\n");
+        s
+    }
 }

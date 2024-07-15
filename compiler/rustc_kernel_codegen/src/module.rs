@@ -180,7 +180,7 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
 
     // define the types used in the module
     let tys = module.types.clone();
-    for ty in tys {
+    /*for ty in tys {
         // if the type is not a struct, skip
         if let TypeNVVM::Struct(_) = *ty {
             let ty_str = ty.assemble(module);
@@ -188,13 +188,18 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
             s.push_str(&format!("{} = type {}\n", label, ty_str));
         }
     }
-    s.push_str("\n");
+    s.push_str("\n");*/
 
     // define the globals used in the module
     let globals = module.globals.clone();
     for (_, global) in globals.iter() {
         todo!()
     }
+    let allocs = module.allocs.clone();
+    for (global, val) in allocs.iter() {
+        s.push_str(&global.0.assemble(module));
+    }
+    s.push_str("\n");
 
     // define the intrinsics used in the module
     let declared_intrinsics = module.declared_intrinsics.clone();
@@ -205,13 +210,20 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
         let label = module.label_of_val(val);
         s.push_str(&format!("declare {} @{}\n", ty_str, name));
     }
+    s.push_str("\n");
 
     let fns = module.functions.clone();
+    // define or declare the functions used in the module
     for (def_id, function) in fns.iter() {
-        s.push_str(&function.assemble(module));
-        s.push_str("\n\n");
-        if function.is_kernel {
-            kernel = Some(function);
+        if !function.is_defined() {
+            s.push_str(&function.define(module));
+            s.push_str("\n\n");
+        } else {
+            s.push_str(&function.assemble(module));
+            s.push_str("\n\n");
+            if function.is_kernel {
+                kernel = Some(function);
+            }
         }
     }
 

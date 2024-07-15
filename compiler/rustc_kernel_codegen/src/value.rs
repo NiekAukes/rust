@@ -44,10 +44,10 @@ impl Display for Comp {
         match self {
             Comp::Eq => write!(f, "eq"),
             Comp::Ne => write!(f, "ne"),
-            Comp::Lt => write!(f, "lt"),
-            Comp::Le => write!(f, "le"),
-            Comp::Gt => write!(f, "gt"),
-            Comp::Ge => write!(f, "ge"),
+            Comp::Lt => write!(f, "ult"),
+            Comp::Le => write!(f, "ule"),
+            Comp::Gt => write!(f, "ugt"),
+            Comp::Ge => write!(f, "uge"),
             Comp::Sgt => write!(f, "sgt"),
             Comp::Sge => write!(f, "sge"),
             Comp::Slt => write!(f, "slt"),
@@ -288,26 +288,36 @@ impl<'m> Instruction<'m> {
             }
             
             Instruction::Sub(a, b) => {
-                format!("sub {}, {}", a.assemble(module), b.assemble(module))
+                let ty = *module.valtypes.get(a).unwrap();
+                let ty_label = ty.assemble(module);
+                format!("sub {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
             }
             Instruction::Add(a, b) => {
-                format!("add {}, {}", a.assemble(module), b.assemble(module))
+                let ty = *module.valtypes.get(a).unwrap();
+                let ty_label = ty.assemble(module);
+                format!("add {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
             }
-
             Instruction::And(a, b) => {
-                format!("and {}, {}", a.assemble(module), b.assemble(module))
+                let ty = *module.valtypes.get(a).unwrap();
+                let ty_label = ty.assemble(module);
+                format!("and {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
             }
-
             Instruction::Or(a, b) => {
-                format!("or {}, {}", a.assemble(module), b.assemble(module))
+                let ty = *module.valtypes.get(a).unwrap();
+                let ty_label = ty.assemble(module);
+                format!("or {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
+            }
+            Instruction::Xor(a, b) => {
+                let ty = *module.valtypes.get(a).unwrap();
+                let ty_label = ty.assemble(module);
+                format!("xor {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
             }
 
-            Instruction::Xor(a, b) => {
-                format!("xor {}, {}", a.assemble(module), b.assemble(module))
-            }
 
             Instruction::ICmp(comp, a, b) => {
-                format!("icmp {} {}, {}", comp, a.assemble(module), b.assemble(module))
+                let ty = *module.valtypes.get(a).unwrap();
+                let ty_label = ty.assemble(module);
+                format!("icmp {} {} {}, {}", comp, ty_label, a.assemble(module), b.assemble(module))
             }
 
             Instruction::BitCast { ty, val, to } => {

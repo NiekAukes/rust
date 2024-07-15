@@ -559,14 +559,30 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     ) -> Self::Value {
         println!("Inbounds GEP, ty: {:?}, ptr: {:?}, indices: {:?}", ty, ptr, indices);
 
-        // build an opaque pointer
-        let i8t = self.cx().type_i8();
-        let ptr_ty = self.cx().type_pointer(i8t);
+        // infer the return type 
+        // we don't need to check the first index, because it is always a pointer
+        let mut rty = ty.clone(); 
+        for i in indices[1..indices.len()].iter() {
+            match rty.0 {
+                TypeNVVM::Pointer(t) => rty = t.clone(),
+                TypeNVVM::Array(t, _) => rty = t.clone(),
+                TypeNVVM::Struct(types) => {
+                    let ValueNVVM::Constant(crate::value::Const::I(idx)) = i.0 else {
+                        bug!("Invalid index for GEP");
+                    };
+                    rty = types[*idx as usize].clone();
+                }
+                _ => panic!("Invalid type for GEP"),
+            }
+        }
+
+        // add a pointer type to the return type
+        rty = self.cx().type_pointer(rty);
 
         // build an inbounds getelementptr instruction
         let instr = Instruction::InBoundsGep { ty, ptr, indices: indices.to_vec() };
         let v = self.cx().get_module_mut().
-            create_val(ValueNVVM::Instr(instr), Some(ptr_ty));
+            create_val(ValueNVVM::Instr(instr), Some(rty));
 
         // add the instruction to the current basic block
         self.basic_block.add_instr(v);

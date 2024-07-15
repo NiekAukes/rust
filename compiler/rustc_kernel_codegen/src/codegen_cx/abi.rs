@@ -304,7 +304,8 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
             ty::Slice(ty) => {
                 let ty = self.lower_ty(ty);
-                module.ty_from_type(crate::ty::TypeNVVM::Pointer(ty))
+                //module.ty_from_type(crate::ty::TypeNVVM::Pointer(ty))
+                module.ty_from_type(crate::ty::TypeNVVM::Array(ty, 0))
             },
             ty::RawPtr(ty, _) => {
                 let ty = self.lower_ty(ty);
