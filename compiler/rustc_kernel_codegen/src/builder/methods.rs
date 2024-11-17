@@ -518,9 +518,13 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         // if not bitcast the value to the type of the pointer
         let target_ty = self.cx().type_pointer(self.cx().val_ty(val));
         let org_ptr_ty = self.cx().val_ty(ptr);
+
+        // if the types are not the same, cast the value to the type of the pointer
         let ptr = if target_ty != org_ptr_ty {
             let cast = Instruction::BitCast { ty: org_ptr_ty, val: ptr, to: target_ty };
-            self.cx().get_module_mut().create_val(ValueNVVM::Instr(cast), Some(target_ty))
+            let castval = self.cx().get_module_mut().create_val(ValueNVVM::Instr(cast), Some(target_ty));
+            self.basic_block.add_instr(castval);
+            castval
         } else { ptr };
 
         // build a store instruction
@@ -532,7 +536,6 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         
 
         // add the store instruction to the current basic block
-        self.basic_block.add_instr(ptr);
         self.basic_block.add_instr(v);
         v
     }
@@ -872,11 +875,29 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         let TypeNVVM::Fn(_, ret) = llty.0 else {
             bug!("Expected function type, found {:?}", llty);
         };
+
+        let mut args_vec = Vec::new();
+        // check if all function parameters have the correct type
+        for (i, (arg, expected_ty)) in args.iter().zip(fn_abi.unwrap().args.iter()).enumerate() {
+            let ty = self.cx().backend_type(expected_ty.layout);
+            if self.cx().val_ty(*arg) != ty {
+                // perfrom a bitcast if the types do not match
+                let cast = Instruction::BitCast { ty: self.cx().val_ty(*arg), val: *arg, to: ty };
+                let v = self.cx().get_module_mut().
+                    create_val(ValueNVVM::Instr(cast), Some(ty));
+                self.basic_block.add_instr(v);
+                args_vec.push(v);
+            } else {
+                args_vec.push(*arg);
+            }
+        }
+
+
         let instr = Instruction::Call { 
             ret_ty: *ret,
             fn_val: llfn, 
             fn_ty: llty,
-            args: args.to_vec() 
+            args: args_vec,
         };
         let v = self.cx().get_module_mut().
             create_val(ValueNVVM::Instr(instr), Some(*ret));

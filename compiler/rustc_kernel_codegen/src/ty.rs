@@ -26,7 +26,17 @@ pub type TyNVVM<'m> = Interned<'m, TypeNVVM<'m>>;
 
 impl<'m> PartialEq for TypeNVVM<'m> {
     fn eq(&self, other: &Self) -> bool {
-        ptr::eq(self, other)
+        match (self, other) {
+            (TypeNVVM::Zst, TypeNVVM::Zst) => true,
+            (TypeNVVM::I(a), TypeNVVM::I(b)) => a == b,
+            (TypeNVVM::F32, TypeNVVM::F32) => true,
+            (TypeNVVM::F64, TypeNVVM::F64) => true,
+            (TypeNVVM::Pointer(a), TypeNVVM::Pointer(b)) => a == b,
+            (TypeNVVM::Array(a, s1), TypeNVVM::Array(b, s2)) => a == b && s1 == s2,
+            (TypeNVVM::Struct(a), TypeNVVM::Struct(b)) => a == b,
+            (TypeNVVM::Fn(a1, b1), TypeNVVM::Fn(a2, b2)) => a1 == a2 && b1 == b2,
+            _ => false,
+        }
     }
 }
 

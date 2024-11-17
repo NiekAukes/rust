@@ -1,8 +1,8 @@
 use rustc_codegen_ssa::traits::{LayoutTypeMethods, PreDefineMethods};
-use rustc_middle::ty;
-use rustc_target::abi::call::PassMode;
+use rustc_middle::ty::{self, Ty};
+use rustc_target::abi::call::{ArgAbi, PassMode};
 
-use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeNVVM}, value::ValueNVVM};
+use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeNVVM}, value::{Val, ValueNVVM}};
 
 use super::CodegenCx;
 
@@ -61,7 +61,11 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
                     args.push(val2);
                 }
                 PassMode::Indirect { .. } => todo!(),
-                PassMode::Cast { .. } => todo!(),
+                PassMode::Cast { pad_i32, ref cast } => {
+                    println!("Cast: {:?}", cast.clone());
+                    println!("Pad: {:?}", pad_i32);
+                    todo!()
+                }
                 PassMode::Direct(_) => {
                     // basic case, lower the type and add it to the list
                     let ty = self.backend_type(arg.layout);
@@ -90,5 +94,44 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
         module.add_function(instance.def_id(), f);
         let val = module.create_val(ValueNVVM::FnRef(symbol_name.to_string()), Some(ty));
         module.defrefs.insert(instance.def_id(), val);
+
+        // if the function is a kernel, add a kernel interface
+    }
+}
+
+impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
+    fn define_kernel_interface(
+        &self,
+        abi_args: Box<[ArgAbi<'tcx, Ty<'tcx>>]>,
+        fnref: Val<'m>,
+        fndef: &FunctionNVVM,
+        symbol_name: &str,
+    ) -> FunctionNVVM{
+        // define an interface that casts the arguments to the correct types
+        // and calls the function
+        let mut module = unsafe { &mut *self.module.get() };
+        let mut args = vec![];
+        for (idx, arg) in abi_args.iter().enumerate() {
+            match arg.mode {
+                PassMode::Ignore => continue,
+                PassMode::Pair(_, _) => {
+                    // the actual function has 2 arguments for this one
+                    // 
+                }
+                PassMode::Indirect { .. } => todo!(),
+                PassMode::Cast { pad_i32, ref cast } => {
+                    println!("Cast: {:?}", cast.clone());
+                    println!("Pad: {:?}", pad_i32);
+                    todo!()
+                }
+                PassMode::Direct(_) => {
+                    // basic case, lower the type and add it to the list
+                    let ty = self.backend_type(arg.layout);
+                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx, ty};
+                    let val = module.create_val(value, Some(ty));
+                    args.push(val);
+                }
+            }
+        }
     }
 }
