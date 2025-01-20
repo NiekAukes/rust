@@ -379,7 +379,10 @@ impl<'m> Instruction<'m> {
                     if i != 0 {
                         s.push_str(", ");
                     }
-                    s.push_str(&arg.assemble(module));
+                    // add the type of the argument as well for calls
+                    let ty = *module.valtypes.get(arg).unwrap();
+                    let ty_label = ty.assemble(module);
+                    s.push_str(&format!("{} {}", ty_label, arg.assemble(module)));
                 }
                 s.push_str(")");
                 s

@@ -32,7 +32,7 @@ impl<'tcx> MiscMethods<'tcx> for CodegenCx<'_, 'tcx> {
     fn get_fn_addr(&self, instance: rustc_middle::ty::Instance<'tcx>) -> Self::Value {
         //should return @function_name
         let module = unsafe { &mut *self.module.get() };
-        println!("get_fn_addr: {:?}", instance);
+        //println!("get_fn_addr: {:?}", instance);
         match module.defrefs.get(&instance.def_id()) {
             Some(val) => *val,
             None => {

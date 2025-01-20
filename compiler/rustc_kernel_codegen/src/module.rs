@@ -4,7 +4,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::DefId;
 use rustc_middle::{mir::interpret::AllocId, ty::Ty};
 
-use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeHints, TypeNVVM}, value::{Val, ValueNVVM}, Arena, Global, GlobalNVVM};
+use crate::{function::FunctionNVVM, intrinsics::declare_intrinsics, ty::{TyNVVM, TypeHints, TypeNVVM}, value::{Val, ValueNVVM}, Arena, Global, GlobalNVVM};
 
 pub trait Assemble<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String;
@@ -34,11 +34,12 @@ pub struct ModuleNVVM<'m> {
     counter: usize,
 }
 
+
 impl<'m> ModuleNVVM<'m> {
     pub fn new(
         arena: &'m Arena<'m>,
     ) -> Self {
-        Self {
+        let mut s = Self {
             functions: FxHashMap::default(),
             defrefs: FxHashMap::default(),
             declared_intrinsics: FxHashSet::default(),
@@ -58,7 +59,9 @@ impl<'m> ModuleNVVM<'m> {
             vallabels: FxHashMap::default(),
             tylabels: FxHashMap::default(),
             counter: 0,
-        }
+        };
+
+        declare_intrinsics(s)
     }
 
     pub fn add_allocation(&mut self, alloc: GlobalNVVM<'m>) -> Val<'m> {
@@ -70,8 +73,13 @@ impl<'m> ModuleNVVM<'m> {
         
         // create a value for the allocation
         let ty_u8 = self.ty_from_type(TypeNVVM::I(8));
-        let ty = self.ty_from_type(TypeNVVM::Pointer(ty_u8));
-        let value = self.create_val(ValueNVVM::Global(alloc), Some(ty));
+        let ty = if let Some(ref d) = alloc.data {
+             self.ty_from_type(TypeNVVM::Array(ty_u8, d.len()))
+        } else {
+            self.ty_from_type(TypeNVVM::Pointer(ty_u8))
+        };
+        let ty_ptr = self.ty_from_type(TypeNVVM::Pointer(ty));
+        let value = self.create_val(ValueNVVM::Global(alloc), Some(ty_ptr));
 
         let global = Global::new_unchecked(alloc);
         
@@ -175,6 +183,9 @@ impl<'m> ModuleNVVM<'m> {
 
 pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     let mut s = format!("; NVVM IR version {}\n", module.metadata.version.0);
+    s.push_str("target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n");
+    s.push_str("target triple = \"nvptx64-nvidia-cuda\"\n\n");
+    
     let mut kernel = None;
 
 
@@ -201,17 +212,6 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     }
     s.push_str("\n");
 
-    // define the intrinsics used in the module
-    let declared_intrinsics = module.declared_intrinsics.clone();
-    for name in declared_intrinsics {
-        let val = module.get_intrinsic(&name).unwrap();
-        let ty = *module.valtypes.get(&val).unwrap();
-        let ty_str = ty.assemble(module);
-        let label = module.label_of_val(val);
-        s.push_str(&format!("declare {} @{}\n", ty_str, name));
-    }
-    s.push_str("\n");
-
     let fns = module.functions.clone();
     // define or declare the functions used in the module
     for (def_id, function) in fns.iter() {
@@ -227,6 +227,24 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
         }
     }
 
+
+    //define the intrinsics used in the module
+    let declared_intrinsics = module.declared_intrinsics.clone();
+    for name in declared_intrinsics {
+        let val = module.get_intrinsic(&name).unwrap();
+        let ty = *module.valtypes.get(&val).unwrap();
+        let (args, ret) = match ty.0 {
+            TypeNVVM::Fn(args, ty) => (args, ty),
+            _ => panic!("Intrinsic should have function type"),
+        };
+        let ret_str = ret.assemble(module);
+        let label = module.label_of_val(val);
+
+        // TODO: add the arguments
+        s.push_str(&format!("declare {} @{}()\n", ret_str, name));
+    }
+    s.push_str("\n");
+
     /*
     !nvvm.annotations = !{!1}
     !1 = !{void (i32*)* @simple, !"kernel", i32 1}
@@ -241,7 +259,7 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
         s.push_str(&format!("!1 = !{{{}* @{}, !\"kernel\", i32 1}}\n", kernel.ty.assemble(module), kernel_name));
         
         s.push_str(&format!("!nvvmir.version = !{{!2}}\n"));
-        s.push_str(&format!("!2 = !{{i32 {}, i32 {}, i32 {}, i32 {}}}\n", 2, 0, 3, 1));
+        s.push_str(&format!("!2 = !{{i32 {}, i32 {}}}\n", 2, 0));
     }
     s.push_str("\n");
 

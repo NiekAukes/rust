@@ -46,11 +46,10 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
         let mut args = vec![];// = abi.args.iter().enumerate().map(|(idx, arg)| {
         for (idx, arg) in abi.args.iter().enumerate() {
             // lower the type to the NVVM type
-            println!("Arg: {:?}", arg);
+            //println!("Arg: {:?}", arg);
             match arg.mode {
                 PassMode::Ignore => continue,
                 PassMode::Pair(_, _) => {
-                    // add 2 arguments to the list
                     let ty1 = self.backend_type(arg.layout.field(self, 0));
                     let ty2 = self.backend_type(arg.layout.field(self, 1));
                     let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx, ty: ty1};
@@ -104,9 +103,9 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         &self,
         abi_args: Box<[ArgAbi<'tcx, Ty<'tcx>>]>,
         fnref: Val<'m>,
-        fndef: &FunctionNVVM,
+        fndef: &FunctionNVVM<'m>,
         symbol_name: &str,
-    ) -> FunctionNVVM{
+    ) -> FunctionNVVM<'m>{
         // define an interface that casts the arguments to the correct types
         // and calls the function
         let mut module = unsafe { &mut *self.module.get() };
@@ -117,6 +116,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                 PassMode::Pair(_, _) => {
                     // the actual function has 2 arguments for this one
                     // 
+                    todo!()
                 }
                 PassMode::Indirect { .. } => todo!(),
                 PassMode::Cast { pad_i32, ref cast } => {
@@ -133,5 +133,6 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                 }
             }
         }
+        todo!();
     }
 }

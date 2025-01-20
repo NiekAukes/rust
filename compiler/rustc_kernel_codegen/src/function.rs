@@ -98,6 +98,20 @@ impl<'m> FunctionNVVM<'m> {
         // basic blocks
         for bb in unsafe { &*self.basic_blocks.get() } {
             s.push_str(&format!("{}:\n", bb.name));
+            if bb.name == "panic" {
+                // custom handle panic blocks, we need to do this due to some
+                // limitations in the current implementation
+                // the normal panic handler expects panic functions to be defined
+                // but they aren't in the kernel, and we don't want to define them
+
+                // so, we just skip the panic block skip the entire function
+                // we do this by calling the llvm.trap intrinsic
+                s.push_str("  call void @llvm.trap()\n");
+                module.use_intrinsic("llvm.trap");
+                //println!("using intrinsic llvm.trap");
+                s.push_str("  unreachable\n");
+                continue;
+            }
             for instr in bb.instrs() {
                 let instr_inner = instr.0;
                 s.push_str(&format!("  {}\n", instr_inner.assemble(module, &instr)));

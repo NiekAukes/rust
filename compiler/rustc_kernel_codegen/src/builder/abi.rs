@@ -159,9 +159,9 @@ impl<'m, 'tcx> ArgAbiExt<'m, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
         };
         match self.mode {
             PassMode::Ignore => {}
-            /*PassMode::Pair(..) => {
+            PassMode::Pair(..) => {
                 OperandValue::Pair(next(), next()).store(bx, dst);
-            }*/
+            }
             PassMode::Indirect { attrs: _, meta_attrs: Some(_), on_stack: _ } => {
                 let place_val = PlaceValue {
                     llval: next(),
@@ -171,7 +171,6 @@ impl<'m, 'tcx> ArgAbiExt<'m, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                 OperandValue::Ref(place_val).store(bx, dst);
             }
             PassMode::Direct(_)
-            | PassMode::Pair(..)
             | PassMode::Indirect { attrs: _, meta_attrs: None, on_stack: _ }
             | PassMode::Cast { .. } => {
                 let next_arg = next();

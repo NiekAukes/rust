@@ -8,6 +8,7 @@ use rustc_data_structures::{intern::Interned, sync::WorkerLocal};
 use rustc_middle::query::Providers;
 mod builder;
 mod codegen_cx;
+mod intrinsics;
 
 use rustc_arena::declare_arena;
 use ty::{TyNVVM, TypeNVVM};
@@ -59,11 +60,18 @@ impl<'m> Assemble<'m> for GlobalNVVM<'m> {
                     module.ty_from_type(TypeNVVM::Array(ty_i8, data.len()))
                 });
                 let ty_str = ty.assemble(module);
-                format!("@{} = constant {} {:?}", self.name, ty_str, data)
+                let data_str = assemble_array_decl(module, data);
+                format!("@{} = constant {} {}", self.name, ty_str, data_str)
             }
             None => {
                 todo!()
             }
         }
     }
+}
+
+fn assemble_array_decl<'m>(module: &mut module::ModuleNVVM<'m>, data: &[u8]) -> String {
+    // should be [i8 0, i8 1, i8 2, i8 3, i8 4, i8 5, i8 6, i8 7, i8 8, i8 9] etc.
+    let data_str = data.iter().map(|d| format!("i8 {}", d)).collect::<Vec<_>>().join(", ");
+    format!("[{}]", data_str)
 }

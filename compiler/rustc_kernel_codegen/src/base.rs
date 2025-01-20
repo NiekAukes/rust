@@ -24,10 +24,6 @@ pub fn module_codegen_hack<'tcx>(
         }
         name.expect("no kernel found")
     };
-    println!("kernel name: {}", name);
-    if name.contains("gpu64") {
-        return ("simple", include_bytes!("GPU64.ll").to_vec());
-    }
     
     panic!("kernel not found")
  }
@@ -42,13 +38,13 @@ pub fn module_codegen<'tcx>(
     let cx = CodegenCx::new(tcx, module);
     let mono_items = cgu.items_in_deterministic_order(tcx);
     for &(mono_item, data) in &mono_items {
-        println!("predefining {:?}", mono_item);
+        //println!("predefining {:?}", mono_item);
         mono_item.predefine::<Builder<'_, '_, '_>>(&cx, data.linkage, data.visibility);
     }
 
     // ... and now that we have everything pre-defined, fill out those definitions.
     for &(mono_item, _) in &mono_items {
-        println!("defining {:?}", mono_item);
+        //println!("defining {:?}", mono_item);
         mono_item.define::<Builder<'_, '_, '_>>(&cx);
     }
 

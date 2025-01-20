@@ -304,12 +304,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         rhs: Self::Value,
     ) -> (Self::Value, Self::Value) {
         //TODO make this a checked operation
-        println!(
-            "Checked binop `{:?}`, lhs: `{:?}`, rhs: `{:?}`",
-            ty,
-            lhs,
-            rhs
-        );
+        // println!(
+        //     "Checked binop `{:?}`, lhs: `{:?}`, rhs: `{:?}`",
+        //     ty,
+        //     lhs,
+        //     rhs
+        // );
         use rustc_middle::ty::IntTy::*;
         use rustc_middle::ty::UintTy::*;
         use rustc_middle::ty::{Int, Uint};
@@ -560,7 +560,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         ptr: Self::Value,
         indices: &[Self::Value],
     ) -> Self::Value {
-        println!("Inbounds GEP, ty: {:?}, ptr: {:?}, indices: {:?}", ty, ptr, indices);
+        //println!("Inbounds GEP, ty: {:?}, ptr: {:?}, indices: {:?}", ty, ptr, indices);
 
         // infer the return type 
         // we don't need to check the first index, because it is always a pointer

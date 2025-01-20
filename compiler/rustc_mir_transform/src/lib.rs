@@ -639,6 +639,7 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
 /// specifically for kernel code
 fn optimized_kernel_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     assert!(tcx.is_kernel(did));
+    
     tcx.arena.alloc(inner_optimized_mir(tcx, did))
 }
 
