@@ -35,8 +35,11 @@ pub fn module_codegen<'tcx>(
  {
     let arena = arena::Arena::default();
     let mut module = ModuleNVVM::new(&arena);
-    let cx = CodegenCx::new(tcx, module);
+    let mut cx = CodegenCx::new(tcx, module);
     let mono_items = cgu.items_in_deterministic_order(tcx);
+
+    cx.build_intrinsics();
+    
     for &(mono_item, data) in &mono_items {
         //println!("predefining {:?}", mono_item);
         mono_item.predefine::<Builder<'_, '_, '_>>(&cx, data.linkage, data.visibility);
@@ -47,6 +50,7 @@ pub fn module_codegen<'tcx>(
         //println!("defining {:?}", mono_item);
         mono_item.define::<Builder<'_, '_, '_>>(&cx);
     }
+
 
     // Run replace-all-uses-with for statics that need it. This must
     // happen after the llvm.used variables are created.

@@ -520,15 +520,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
             "__nv_ynf",
             fn(t_i32, t_f32) -> t_f32
         );
+    
 
     }
 }
-
-/*
-ifn!("llvm.trap" | "llvm.sideeffect", fn() -> void);
-        ifn!("llvm.assume", fn(i1) -> void);
-        ifn!("llvm.prefetch", fn(i8p, t_i32, t_i32, t_i32) -> void);
-
-        
-    }
-*/

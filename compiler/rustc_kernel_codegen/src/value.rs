@@ -7,6 +7,10 @@ pub trait ToVal<'m> {
     fn to_val(self, module: &mut ModuleNVVM<'m>) -> Val<'m>;
 }
 
+pub trait AssembleVal<'m> {
+    fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String;
+}
+
 #[derive(Debug)]
 pub enum Comp {
     Eq,
@@ -120,6 +124,15 @@ pub enum Instruction<'m> {
         fn_val: Val<'m>,
         fn_ty: TyNVVM<'m>,
         args: Vec<Val<'m>>,
+    },
+
+    MemCpy {
+        dst: Val<'m>,
+        dst_align: u64,
+        src: Val<'m>,
+        src_align: u64,
+        size: Val<'m>,
+        is_volatile: bool,
     }
 }
 
@@ -162,33 +175,33 @@ impl<'m> PartialEq for ValueNVVM<'m> {
 const PARAM_LABELS: [&str; 26] = ["%a", "%b", "%c", "%d", "%e", "%f", "%g", "%h", "%i", "%j", "%k", "%l", 
                       "%m", "%n", "%o", "%p", "%q", "%r", "%s", "%t", "%u", "%v", "%w", "%x", "%y", "%z"];
 
-impl<'m> Assemble<'m> for Val<'m> {
-    fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String {
+impl<'m> AssembleVal<'m> for Val<'m> {
+    fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String {
         match self.0 {
             ValueNVVM::Param { .. }
             | ValueNVVM::Instr(_) => {
-                module.label_of_val(*self).to_string()
+                func.label_of_val(*self).to_string()
             }
 
-            _ => self.0.assemble(module, self)
+            _ => self.0.assemble(module, func, self)
         }
     }
 }
 
 impl<'m> ValueNVVM<'m> {
-    pub fn assemble(&self, module: &mut ModuleNVVM<'m>, value: &Val<'m>) -> String {
+    pub fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>, value: &Val<'m>) -> String {
         match self {
             ValueNVVM::Param { func_name, idx, ty } => {
-                module.create_val_label(*value, PARAM_LABELS[*idx].to_string());
+                func.create_val_label(*value, PARAM_LABELS[*idx].to_string());
                 format!("{} {}", ty.assemble(module), PARAM_LABELS[*idx])
             }
             ValueNVVM::Instr(instr) => {
                 if instr.has_ret() {
-                    let instr = instr.assemble(module, value);
-                    let label = module.label_of_val(*value);
+                    let label = func.assign_label_to_val(*value);
+                    let instr = instr.assemble(module, func, value);
                     format!("{} = {}", label, instr)
                 } else {
-                    instr.assemble(module, value)
+                    instr.assemble(module, func, value)
                 }
             }
             ValueNVVM::Constant(c) => {
@@ -244,6 +257,7 @@ impl<'m> Instruction<'m> {
             | Instruction::Branch(_)
             | Instruction::ConditionalBranch { .. }
             | Instruction::Unreachable
+            | Instruction::MemCpy { .. }
             | Instruction::Store { .. } => false,
 
             Instruction::Call { ret_ty, .. } => ret_ty.size() != 0,
@@ -252,36 +266,36 @@ impl<'m> Instruction<'m> {
 }
 
 impl<'m> Instruction<'m> {
-    pub fn assemble(&self, module: &mut ModuleNVVM<'m>, val: &Val<'m>) -> String {
+    pub fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>, val: &Val<'m>) -> String {
         match self {
             Instruction::Alloca(ty, size) => {
                 format!("alloca {}, i64 {}", ty.assemble(module), size)
             }
             Instruction::ExtractValue(ty, val, idx) => {
-                format!("extractvalue {} {}, {}", ty.assemble(module), val.assemble(module), idx)
+                format!("extractvalue {} {}, {}", ty.assemble(module), val.assemble(module, func), idx)
             }
             Instruction::Store { val, ptr, align } => {
                 // get the labels
                 let val_ty = *module.valtypes.get(val).unwrap();
                 let val_ty_str = val_ty.assemble(module);
                 let ptr_ty_str = module.ty_from_type(TypeNVVM::Pointer(val_ty)).assemble(module);
-                let val_label = val.assemble(module);
-                let ptr_label = ptr.assemble(module);
+                let val_label = val.assemble(module, func);
+                let ptr_label = ptr.assemble(module, func);
                 format!("store {} {}, {} {}, align {}", val_ty_str, val_label, ptr_ty_str, ptr_label, align)
             }
             Instruction::Load { ty, ptr, align } => {
-                format!("load {} {}, align {}", ty.assemble(module), ptr.assemble(module), align)
+                format!("load {} {}, align {}", ty.assemble(module), ptr.assemble(module, func), align)
             }
             Instruction::InBoundsGep { ty, ptr, indices } => {
                 let ty_str = ty.assemble(module);
                 let ptr_ty = *module.valtypes.get(ptr).unwrap();
                 let ptr_ty_str = ptr_ty.assemble(module);
-                let ptr_label = ptr.assemble(module);
+                let ptr_label = ptr.assemble(module, func);
                 let mut s = format!("getelementptr inbounds {}, {} {}", ty_str, ptr_ty_str, ptr_label);
                 for (i, idx) in indices.iter().enumerate() {
                     let ty = *module.valtypes.get(idx).unwrap();
                     let ty_str = ty.assemble(module);
-                    let label = idx.assemble(module);
+                    let label = idx.assemble(module, func);
                     s.push_str(&format!(",{} {}", ty_str, label));
                 }
                 s
@@ -290,38 +304,38 @@ impl<'m> Instruction<'m> {
             Instruction::Sub(a, b) => {
                 let ty = *module.valtypes.get(a).unwrap();
                 let ty_label = ty.assemble(module);
-                format!("sub {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
+                format!("sub {} {}, {}", ty_label, a.assemble(module, func), b.assemble(module, func))
             }
             Instruction::Add(a, b) => {
                 let ty = *module.valtypes.get(a).unwrap();
                 let ty_label = ty.assemble(module);
-                format!("add {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
+                format!("add {} {}, {}", ty_label, a.assemble(module, func), b.assemble(module, func))
             }
             Instruction::And(a, b) => {
                 let ty = *module.valtypes.get(a).unwrap();
                 let ty_label = ty.assemble(module);
-                format!("and {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
+                format!("and {} {}, {}", ty_label, a.assemble(module, func), b.assemble(module, func))
             }
             Instruction::Or(a, b) => {
                 let ty = *module.valtypes.get(a).unwrap();
                 let ty_label = ty.assemble(module);
-                format!("or {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
+                format!("or {} {}, {}", ty_label, a.assemble(module, func), b.assemble(module, func))
             }
             Instruction::Xor(a, b) => {
                 let ty = *module.valtypes.get(a).unwrap();
                 let ty_label = ty.assemble(module);
-                format!("xor {} {}, {}", ty_label, a.assemble(module), b.assemble(module))
+                format!("xor {} {}, {}", ty_label, a.assemble(module, func), b.assemble(module, func))
             }
 
 
             Instruction::ICmp(comp, a, b) => {
                 let ty = *module.valtypes.get(a).unwrap();
                 let ty_label = ty.assemble(module);
-                format!("icmp {} {} {}, {}", comp, ty_label, a.assemble(module), b.assemble(module))
+                format!("icmp {} {} {}, {}", comp, ty_label, a.assemble(module, func), b.assemble(module, func))
             }
 
             Instruction::BitCast { ty, val, to } => {
-                let val_label = val.assemble(module);
+                let val_label = val.assemble(module, func);
                 let ty_label = ty.assemble(module);
                 let to_label = to.assemble(module);
                 format!("bitcast {} {} to {}", ty_label, val_label, to_label)
@@ -330,7 +344,7 @@ impl<'m> Instruction<'m> {
             Instruction::Trunc { val, to } => {
                 let ty = *module.valtypes.get(val).unwrap();
                 let ty_label = ty.assemble(module);
-                let val_label = val.assemble(module);
+                let val_label = val.assemble(module, func);
                 let to_label = to.assemble(module);
                 format!("trunc {} {} to {}", ty_label, val_label, to_label)
             }
@@ -338,7 +352,7 @@ impl<'m> Instruction<'m> {
             Instruction::SExt { val, to } => {
                 let ty = *module.valtypes.get(val).unwrap();
                 let ty_label = ty.assemble(module);
-                let val_label = val.assemble(module);
+                let val_label = val.assemble(module, func);
                 let to_label = to.assemble(module);
                 format!("sext {} {} to {}", ty_label, val_label, to_label)
             }
@@ -346,7 +360,7 @@ impl<'m> Instruction<'m> {
             Instruction::ZExt { val, to } => {
                 let ty = *module.valtypes.get(val).unwrap();
                 let ty_label = ty.assemble(module);
-                let val_label = val.assemble(module);
+                let val_label = val.assemble(module, func);
                 let to_label = to.assemble(module);
                 format!("zext {} {} to {}", ty_label, val_label, to_label)
             }
@@ -355,7 +369,7 @@ impl<'m> Instruction<'m> {
                 format!("ret void")
             }
             Instruction::Ret(val) => {
-                format!("ret {}", val.assemble(module))
+                format!("ret {}", val.assemble(module, func))
             }
 
             Instruction::Branch(bb) => {
@@ -363,7 +377,7 @@ impl<'m> Instruction<'m> {
             }
 
             Instruction::ConditionalBranch { cond, true_block, false_block } => {
-                format!("br i1 {}, label %{}, label %{}", cond.assemble(module), true_block.name, false_block.name)
+                format!("br i1 {}, label %{}, label %{}", cond.assemble(module, func), true_block.name, false_block.name)
             }
 
             Instruction::Unreachable => {
@@ -372,7 +386,7 @@ impl<'m> Instruction<'m> {
 
             Instruction::Call { ret_ty, fn_val, fn_ty, args } => {
                 let ret_ty_label = ret_ty.assemble(module);
-                let fn_val_label = fn_val.assemble(module);
+                let fn_val_label = fn_val.assemble(module, func);
                 let fn_ty_label = fn_ty.assemble(module);
                 let mut s = format!("call {} {}(", ret_ty_label, fn_val_label);
                 for (i, arg) in args.iter().enumerate() {
@@ -382,11 +396,58 @@ impl<'m> Instruction<'m> {
                     // add the type of the argument as well for calls
                     let ty = *module.valtypes.get(arg).unwrap();
                     let ty_label = ty.assemble(module);
-                    s.push_str(&format!("{} {}", ty_label, arg.assemble(module)));
+                    s.push_str(&format!("{} {}", ty_label, arg.assemble(module, func)));
                 }
                 s.push_str(")");
                 s
             }
+
+            Instruction::MemCpy { 
+                dst, 
+                dst_align, 
+                src, 
+                src_align, 
+                size, 
+                is_volatile } => {
+                    // build the correct intrinsic call
+                    let dst_ty = *module.valtypes.get(dst).unwrap();
+                    let src_ty = *module.valtypes.get(src).unwrap();
+                    let size_ty = *module.valtypes.get(size).unwrap();
+
+                    let dst_label = dst.assemble(module, func);
+                    let src_label = src.assemble(module, func);
+
+
+                    let dst_ty_str = dst_ty.assemble(module);
+                    let src_ty_str = src_ty.assemble(module);
+                    let size_ty_str = size_ty.assemble(module);
+
+                    let intrinsic_name = format!("llvm.memcpy.p0{}.p0{}.{}",
+                        dst_ty_str, src_ty_str, size_ty_str
+                    );
+
+                    println!("Intrinsic name: {}", intrinsic_name);
+                    if module.get_intrinsic(&intrinsic_name) == None {
+                        // declare the intrinsic
+                        let mut args = vec![];
+                        let dst_ty_ptr = module.ty_from_type(TypeNVVM::Pointer(dst_ty));
+                        let src_ty_ptr = module.ty_from_type(TypeNVVM::Pointer(src_ty));
+                        args.push(dst_ty_ptr);
+                        args.push(src_ty_ptr);
+                        args.push(size_ty);
+
+                        let zst = module.ty_from_type(TypeNVVM::Zst);
+                        
+                        module.declare_intrinsic(&intrinsic_name, args, zst);
+                    } 
+                    format!("call void @{}({} {}, {} {}, {} {}, i1 {})",
+                        intrinsic_name,
+                        dst_ty_str, dst_label,
+                        src_ty_str, src_label,
+                        size_ty_str, size.assemble(module, func),
+                        if *is_volatile { "true" } else { "false" }
+                    )
+                }
         }
     }
 }

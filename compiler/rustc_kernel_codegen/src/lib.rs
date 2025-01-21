@@ -8,7 +8,6 @@ use rustc_data_structures::{intern::Interned, sync::WorkerLocal};
 use rustc_middle::query::Providers;
 mod builder;
 mod codegen_cx;
-mod intrinsics;
 
 use rustc_arena::declare_arena;
 use ty::{TyNVVM, TypeNVVM};

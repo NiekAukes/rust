@@ -1,6 +1,6 @@
-use rustc_codegen_ssa::traits::{LayoutTypeMethods, PreDefineMethods};
+use rustc_codegen_ssa::traits::{BaseTypeMethods, LayoutTypeMethods, PreDefineMethods};
 use rustc_middle::ty::{self, Ty};
-use rustc_target::abi::call::{ArgAbi, PassMode};
+use rustc_target::abi::{call::{ArgAbi, CastTarget, PassMode, Reg, RegKind}, Size};
 
 use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeNVVM}, value::{Val, ValueNVVM}};
 
@@ -42,6 +42,8 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
                 todo!()
             },
         };
+
+        let mut arg_count = 0;
         
         let mut args = vec![];// = abi.args.iter().enumerate().map(|(idx, arg)| {
         for (idx, arg) in abi.args.iter().enumerate() {
@@ -52,25 +54,29 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
                 PassMode::Pair(_, _) => {
                     let ty1 = self.backend_type(arg.layout.field(self, 0));
                     let ty2 = self.backend_type(arg.layout.field(self, 1));
-                    let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx, ty: ty1};
-                    let value2 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: idx + 1, ty: ty2};
+                    let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty: ty1};
+                    let value2 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count + 1, ty: ty2};
                     let val1 = module.create_val(value1, Some(ty1));
                     let val2 = module.create_val(value2, Some(ty2));
                     args.push(val1);
                     args.push(val2);
+                    arg_count += 2;
                 }
                 PassMode::Indirect { .. } => todo!(),
                 PassMode::Cast { pad_i32, ref cast } => {
-                    println!("Cast: {:?}", cast.clone());
-                    println!("Pad: {:?}", pad_i32);
-                    todo!()
+                    let ty = cast.nvvm_type(self);
+                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty};
+                    let val = module.create_val(value, Some(ty));
+                    args.push(val);
+                    arg_count += 1;
                 }
                 PassMode::Direct(_) => {
                     // basic case, lower the type and add it to the list
                     let ty = self.backend_type(arg.layout);
-                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx, ty};
+                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty};
                     let val = module.create_val(value, Some(ty));
                     args.push(val);
+                    arg_count += 1;
                 }
             }
             
@@ -98,41 +104,70 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
     }
 }
 
-impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
-    fn define_kernel_interface(
-        &self,
-        abi_args: Box<[ArgAbi<'tcx, Ty<'tcx>>]>,
-        fnref: Val<'m>,
-        fndef: &FunctionNVVM<'m>,
-        symbol_name: &str,
-    ) -> FunctionNVVM<'m>{
-        // define an interface that casts the arguments to the correct types
-        // and calls the function
-        let mut module = unsafe { &mut *self.module.get() };
-        let mut args = vec![];
-        for (idx, arg) in abi_args.iter().enumerate() {
-            match arg.mode {
-                PassMode::Ignore => continue,
-                PassMode::Pair(_, _) => {
-                    // the actual function has 2 arguments for this one
-                    // 
-                    todo!()
-                }
-                PassMode::Indirect { .. } => todo!(),
-                PassMode::Cast { pad_i32, ref cast } => {
-                    println!("Cast: {:?}", cast.clone());
-                    println!("Pad: {:?}", pad_i32);
-                    todo!()
-                }
-                PassMode::Direct(_) => {
-                    // basic case, lower the type and add it to the list
-                    let ty = self.backend_type(arg.layout);
-                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx, ty};
-                    let val = module.create_val(value, Some(ty));
-                    args.push(val);
+
+trait NVVMType<'m, 'tcx> {
+    fn nvvm_type(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m>;
+}
+
+impl<'m, 'tcx> NVVMType<'m, 'tcx> for CastTarget {
+    fn nvvm_type(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m> {
+        let unit_type = self.rest.unit.nvvm_type(cx);
+        let rest_count = if self.rest.total == Size::ZERO {
+            0
+        } else {
+            assert_ne!(
+                self.rest.unit.size,
+                Size::ZERO,
+                "total size {:?} cannot be divided into units of zero size",
+                self.rest.total
+            );
+            if self.rest.total.bytes() % self.rest.unit.size.bytes() != 0 {
+                assert_eq!(self.rest.unit.kind, RegKind::Integer, "only int regs can be split");
+            }
+            self.rest.total.bytes().div_ceil(self.rest.unit.size.bytes())
+        };
+
+        // Simplify to a single unit or an array if there's no prefix.
+        // This produces the same layout, but using a simpler type.
+        if self.prefix.iter().all(|x| x.is_none()) {
+            // We can't do this if is_consecutive is set and the unit would get
+            // split on the target. Currently, this is only relevant for i128
+            // registers.
+            if rest_count == 1 && (!self.rest.is_consecutive || self.rest.unit != Reg::i128()) {
+                return unit_type;
+            }
+
+            return cx.type_array(unit_type, rest_count);
+        }
+
+        // Generate a struct type with the prefix and the "rest" arguments.
+        let prefix_args =
+            self.prefix.iter().flat_map(|option_reg| option_reg.map(|reg| reg.nvvm_type(cx)));
+        let rest_args = (0..rest_count).map(|_| unit_type);
+        let args: Vec<_> = prefix_args.chain(rest_args).collect();
+        cx.type_struct(&args, false)
+    }
+}
+
+impl <'m, 'tcx> NVVMType<'m, 'tcx> for Reg {
+    fn nvvm_type(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m> {
+        match self.kind {
+            RegKind::Integer => {
+                match self.size.bytes() {
+                    1 => cx.type_i8(),
+                    4 => cx.type_i32(),
+                    8 => cx.type_i64(),
+                    _ => panic!("Unsupported integer size"),
                 }
             }
+            RegKind::Float => {
+                match self.size.bytes() {
+                    4 => cx.type_f32(),
+                    8 => cx.type_f64(),
+                    _ => panic!("Unsupported float size"),
+                }
+            }
+            _ => panic!("Unsupported register kind"),
         }
-        todo!();
     }
 }

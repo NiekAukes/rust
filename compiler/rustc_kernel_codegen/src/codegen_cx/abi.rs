@@ -2,7 +2,7 @@ use std::marker::Tuple;
 
 use rustc_codegen_ssa::traits::{BaseTypeMethods, LayoutTypeMethods, TypeMembershipMethods};
 use rustc_middle::{bug, ty::{self, layout::{FnAbiOfHelpers, LayoutOfHelpers}, Ty}};
-use rustc_target::abi::{call::PassMode, Abi, HasDataLayout, PointeeInfo, Primitive, Scalar, Size, TyAndLayout, Variants};
+use rustc_target::abi::{call::PassMode, Abi, AddressSpace, HasDataLayout, PointeeInfo, Primitive, Scalar, Size, TyAndLayout, Variants};
 
 use crate::{ty::{TyNVVM, TypeNVVM}, value::ValueNVVM};
 
@@ -213,7 +213,9 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn type_func(&self, args: &[Self::Type], ret: Self::Type) -> Self::Type {
-        todo!()
+        let mut module = unsafe { &mut *self.module.get() };
+        let typ = TypeNVVM::Fn(Vec::from(args), ret);
+        module.ty_from_type(typ)
     }
 
     fn type_struct(&self, els: &[Self::Type], packed: bool) -> Self::Type {
@@ -227,13 +229,16 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn type_ptr(&self) -> Self::Type {
+        self.type_ptr_ext(AddressSpace::DATA)
+    }
+
+    fn type_ptr_ext(&self, address_space: AddressSpace) -> Self::Type {
+        if (address_space != AddressSpace::DATA) {
+            println!("type_ptr_ext, address_space: {:?}", address_space);
+        }
         let mut module = unsafe { &mut *self.module.get() };
         let i8 = module.ty_from_type(crate::ty::TypeNVVM::I(8));
         module.ty_from_type(crate::ty::TypeNVVM::Pointer(i8))
-    }
-
-    fn type_ptr_ext(&self, address_space: rustc_target::abi::AddressSpace) -> Self::Type {
-        todo!()
     }
 
     fn element_type(&self, ty: Self::Type) -> Self::Type {

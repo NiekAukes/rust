@@ -1,5 +1,8 @@
 use std::cell::UnsafeCell;
 
+use rustc_data_structures::fx::FxHashMap;
+use rustc_middle::bug;
+
 use crate::module::{Assemble, ModuleNVVM};
 use crate::ty::TypeNVVM;
 use crate::{ty::TyNVVM, basic_block::BasicBlock};
@@ -14,6 +17,8 @@ pub struct FunctionNVVM<'m> {
     pub ty: TyNVVM<'m>,
     pub fnval: Option<Val<'m>>,
     basic_blocks: UnsafeCell<Vec<&'m BasicBlock<'m>>>,
+    val_labels: UnsafeCell<FxHashMap<Val<'m>, String>>,
+    counter: UnsafeCell<usize>,
 }
 
 
@@ -38,6 +43,8 @@ impl<'m> FunctionNVVM<'m> {
             ty,
             fnval: None,
             basic_blocks: UnsafeCell::new(Vec::new()),
+            val_labels: UnsafeCell::new(FxHashMap::default()),
+            counter: UnsafeCell::new(0),
         }
     }
 
@@ -63,6 +70,8 @@ impl<'m> FunctionNVVM<'m> {
             ty,
             fnval: None,
             basic_blocks: UnsafeCell::new(Vec::new()),
+            val_labels: UnsafeCell::new(FxHashMap::default()),
+            counter: UnsafeCell::new(0),
         }
     }
 
@@ -74,6 +83,35 @@ impl<'m> FunctionNVVM<'m> {
 
     pub fn is_defined(&self) -> bool {
         unsafe { !(*self.basic_blocks.get()).is_empty() }
+    }
+
+    pub fn label_of_val(&self, val: Val<'m>) -> String {
+        unsafe {
+            if let Some(label) = (*self.val_labels.get()).get(&val) {
+                label.clone()
+            } else {
+                bug!("No label for value: {:?}", val);
+            }
+        }
+    }
+
+    pub fn assign_label_to_val(&self, val: Val<'m>) -> String {
+        unsafe {
+            if let Some(label) = (*self.val_labels.get()).get(&val) {
+                bug!("Value already has label: {:?}", label);
+            } else {
+                let label = format!("%{}", *self.counter.get());
+                (*self.val_labels.get()).insert(val, label.clone());
+                *self.counter.get() += 1;
+                label
+            }
+        }
+    }
+
+    pub fn create_val_label(&self, val: Val<'m>, name: String) {
+        unsafe {
+            (*self.val_labels.get()).insert(val, name);
+        }
     }
 
     pub fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String {
@@ -90,7 +128,7 @@ impl<'m> FunctionNVVM<'m> {
                 if i != 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&format!("{}", arg_inner.assemble(module, arg)));
+                s.push_str(&format!("{}", arg_inner.assemble(module, &self, arg)));
             }
         }
         s.push_str(") {\n");
@@ -114,7 +152,7 @@ impl<'m> FunctionNVVM<'m> {
             }
             for instr in bb.instrs() {
                 let instr_inner = instr.0;
-                s.push_str(&format!("  {}\n", instr_inner.assemble(module, &instr)));
+                s.push_str(&format!("  {}\n", instr_inner.assemble(module, &self, &instr)));
             }
         }
         s.push_str("}\n");
@@ -135,7 +173,7 @@ impl<'m> FunctionNVVM<'m> {
                 if i != 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&format!("{}", arg_inner.assemble(module, arg)));
+                s.push_str(&format!("{}", arg_inner.assemble(module, &self, arg)));
             }
         }
         s.push_str(");\n");

@@ -4,7 +4,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::DefId;
 use rustc_middle::{mir::interpret::AllocId, ty::Ty};
 
-use crate::{function::FunctionNVVM, intrinsics::declare_intrinsics, ty::{TyNVVM, TypeHints, TypeNVVM}, value::{Val, ValueNVVM}, Arena, Global, GlobalNVVM};
+use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeHints, TypeNVVM}, value::{Val, ValueNVVM}, Arena, Global, GlobalNVVM};
 
 pub trait Assemble<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String;
@@ -29,7 +29,6 @@ pub struct ModuleNVVM<'m> {
 
 
     // internal state for assembling the module
-    pub vallabels: FxHashMap<Val<'m>, String>,
     pub tylabels: FxHashMap<TyNVVM<'m>, String>,
     counter: usize,
 }
@@ -56,12 +55,10 @@ impl<'m> ModuleNVVM<'m> {
 
             arena,
 
-            vallabels: FxHashMap::default(),
             tylabels: FxHashMap::default(),
             counter: 0,
         };
-
-        declare_intrinsics(s)
+        s
     }
 
     pub fn add_allocation(&mut self, alloc: GlobalNVVM<'m>) -> Val<'m> {
@@ -137,14 +134,14 @@ impl<'m> ModuleNVVM<'m> {
         self.valtypes.insert(value, ty);
     }
 
-    pub fn label_of_val(&mut self, value: Val<'m>) -> &str {
-        let l = self.counter;
-        self.vallabels.entry(value).or_insert_with(|| { self.counter += 1; format!("%{}", l) })
-    }
+    // pub fn label_of_val(&mut self, value: Val<'m>) -> &str {
+    //     let l = self.counter;
+    //     self.vallabels.entry(value).or_insert_with(|| { self.counter += 1; format!("%{}", l) })
+    // }
 
-    pub fn create_val_label(&mut self, value: Val<'m>, name: String) {
-        self.vallabels.insert(value, name);
-    }
+    // pub fn create_val_label(&mut self, value: Val<'m>, name: String) {
+    //     self.vallabels.insert(value, name);
+    // }
 
     pub fn create_ty_label(&mut self, ty: TyNVVM<'m>) -> &str {
         let l = self.counter;
@@ -177,6 +174,12 @@ impl<'m> ModuleNVVM<'m> {
 
     pub fn use_intrinsic(&mut self, name: &str) {
         self.declared_intrinsics.insert(name.to_string());
+    }
+
+    pub fn declare_intrinsic(&mut self, name: &str, args: Vec<TyNVVM<'m>>, ret: TyNVVM<'m>) {
+        let ty = self.ty_from_type(TypeNVVM::Fn(args, ret));
+        let val = self.create_val(ValueNVVM::FnRef(name.to_string()), Some(ty));
+        self.intrinsics.insert(name.to_string(), val);
     }
 }
 
@@ -231,17 +234,28 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     //define the intrinsics used in the module
     let declared_intrinsics = module.declared_intrinsics.clone();
     for name in declared_intrinsics {
-        let val = module.get_intrinsic(&name).unwrap();
+        let val = match module.get_intrinsic(&name) {
+            Some(val) => val,
+            None => panic!("Intrinsic not found {}", name),
+        };
         let ty = *module.valtypes.get(&val).unwrap();
         let (args, ret) = match ty.0 {
             TypeNVVM::Fn(args, ty) => (args, ty),
             _ => panic!("Intrinsic should have function type"),
         };
         let ret_str = ret.assemble(module);
-        let label = module.label_of_val(val);
+        //let label = module.label_of_val(val);
 
         // TODO: add the arguments
-        s.push_str(&format!("declare {} @{}()\n", ret_str, name));
+        s.push_str(&format!("declare {} @{}(", ret_str, name));
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let arg_str = arg.assemble(module);
+            s.push_str(&arg_str);
+        }
+        s.push_str(")\n");
     }
     s.push_str("\n");
 

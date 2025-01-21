@@ -20,7 +20,6 @@ pub fn generate<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> (String, Vec<u8>) {
     
     // encode to u8
     let mod_u8 = module.as_bytes().to_vec();
-    println!("Generated kernel: {}", module);
     (name, mod_u8)
     //todo!()
 }

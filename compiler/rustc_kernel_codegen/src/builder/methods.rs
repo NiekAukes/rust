@@ -1,8 +1,8 @@
 use rustc_middle::{bug, ty::{layout::HasTyCtxt, Ty, TyCtxt}};
-use rustc_codegen_ssa::{mir::{operand::{OperandRef, OperandValue}, place::PlaceRef}, traits::{BaseTypeMethods, BuilderMethods, ConstMethods, LayoutTypeMethods, OverflowOp}};
+use rustc_codegen_ssa::{mir::{operand::{OperandRef, OperandValue}, place::PlaceRef}, traits::{BaseTypeMethods, BuilderMethods, ConstMethods, LayoutTypeMethods, MiscMethods, OverflowOp}, MemFlags};
 use rustc_span::symbol::kw::In;
 use rustc_target::abi::{call::FnAbi, Abi, Align, Scalar, Size, WrappingRange};
-use crate::{basic_block::BasicBlock, ty::TypeNVVM, value::{Comp, Instruction, Val, ValueNVVM}};
+use crate::{basic_block::BasicBlock, ty::{TyNVVM, TypeNVVM}, value::{Comp, Instruction, Val, ValueNVVM}};
 use crate::codegen_cx::abi::LayoutExt;
 
 use super::Builder;
@@ -63,7 +63,13 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn br(&mut self, dest: Self::BasicBlock) {
-        todo!()
+        // build a branch instruction
+        let instr = Instruction::Branch(dest);
+        let v = self.cx().get_module_mut().
+            create_val(ValueNVVM::Instr(instr), None);
+        
+        // add the instruction to the current basic block
+        self.basic_block.add_instr(v);
     }
 
     fn cond_br(
@@ -382,6 +388,9 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 
     fn to_immediate_scalar(&mut self, val: Self::Value, scalar: Scalar) -> Self::Value {
         if scalar.is_bool() {
+            if self.cx().val_ty(val) == self.cx().type_i1() {
+                return val;
+            }
             return self.trunc(val, self.cx().type_i1());
         }
         val
@@ -685,6 +694,19 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn icmp(&mut self, op: rustc_codegen_ssa::common::IntPredicate, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+
+        // check if the types of the operands are the same
+        let (lhs, rhs) = if self.cx().val_ty(lhs) != self.cx().val_ty(rhs) {
+            // if not, pick the larger type and cast the other operand to it
+            if self.cx().val_ty(lhs).size() > self.cx().val_ty(rhs).size() {
+                (lhs, self.intcast(rhs, self.cx().val_ty(lhs), false))
+            } else {
+                (self.intcast(lhs, self.cx().val_ty(rhs), false), rhs)
+            }
+        } else {
+            (lhs, rhs)
+        };
+
         let instr = Instruction::ICmp(Comp::from(op), lhs, rhs);
         let v = self.cx().get_module_mut().
             create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i1()));
@@ -703,9 +725,19 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         src: Self::Value,
         src_align: Align,
         size: Self::Value,
-        flags: rustc_codegen_ssa::MemFlags,
+        flags: MemFlags,
     ) {
-        todo!()
+        assert!(!flags.contains(MemFlags::NONTEMPORAL), "non-temporal memcpy not supported");
+        let size = self.intcast(size, self.type_isize(), false);
+        let is_volatile = flags.contains(MemFlags::VOLATILE);
+        let instr = Instruction::MemCpy { 
+            dst, 
+            dst_align: dst_align.bytes(),
+            src, 
+            src_align: src_align.bytes(),
+            size, 
+            is_volatile 
+        };
     }
 
     fn memmove(
@@ -844,11 +876,11 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn lifetime_start(&mut self, ptr: Self::Value, size: Size) {
-        todo!()
+        self.call_lifetime_intrinsic("llvm.lifetime.start.p0i8", ptr, size)
     }
 
     fn lifetime_end(&mut self, ptr: Self::Value, size: Size) {
-        todo!()
+        self.call_lifetime_intrinsic("llvm.lifetime.end.p0i8", ptr, size)
     }
 
     fn instrprof_increment(
@@ -877,19 +909,20 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         };
 
         let mut args_vec = Vec::new();
-        // check if all function parameters have the correct type
-        for (i, (arg, expected_ty)) in args.iter().zip(fn_abi.unwrap().args.iter()).enumerate() {
-            let ty = self.cx().backend_type(expected_ty.layout);
-            if self.cx().val_ty(*arg) != ty {
-                // perfrom a bitcast if the types do not match
-                let cast = Instruction::BitCast { ty: self.cx().val_ty(*arg), val: *arg, to: ty };
-                let v = self.cx().get_module_mut().
-                    create_val(ValueNVVM::Instr(cast), Some(ty));
-                self.basic_block.add_instr(v);
-                args_vec.push(v);
-            } else {
-                args_vec.push(*arg);
+        let mut unpacked_fn_abi = Vec::new();
+        for arg in fn_abi.unwrap().args.iter() {
+            match arg.layout.abi {
+                Abi::ScalarPair(..) => {
+                    unpacked_fn_abi.push(arg.layout.field(self.cx(), 0));
+                    unpacked_fn_abi.push(arg.layout.field(self.cx(), 1));
+                }
+                _ => unpacked_fn_abi.push(arg.layout),
             }
+        }
+        // check if all function parameters have the correct type
+        for (i, (arg, expected_ty)) in args.iter().zip(unpacked_fn_abi.iter()).enumerate() {
+            let ty = self.cx().backend_type(*expected_ty);
+            args_vec.push(self.convert_argument(*arg, ty));
         }
 
 
@@ -920,8 +953,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 }
 
 impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
-    fn call_intrinsic(&self, name: &str, args: &[Val<'m>]) -> Val<'m> {
-        let module = self.cx().get_module_mut();
+    fn call_intrinsic(&mut self, name: &str, args: &[Val<'m>]) -> Val<'m> {
+        let module = self.codegen_cx.get_module_mut();
         module.use_intrinsic(name);
         let fn_val = if let Some(intr) = module.get_intrinsic(name) {
             intr
@@ -929,28 +962,84 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
             bug!("Unknown intrinsic '{}'", name)
         };
         let fn_ty = *module.valtypes.get(&fn_val).unwrap();
-        let TypeNVVM::Fn(args, ret) = fn_ty.0 else {
+        let TypeNVVM::Fn(fn_args, fn_ret) = fn_ty.0 else {
             bug!("Expected function type, found {:?}", fn_ty);
         };
-        
-        let args = args.iter().enumerate().map(|(i, ty)| {
-            module.create_val(ValueNVVM::Param { 
-                    func_name: name.to_string(), 
-                    idx: i, 
-                    ty: *ty 
-                }, 
-            Some(*ty))
-        }).collect::<Vec<_>>();
+        assert_eq!(args.len(), fn_args.len());
+
+        let mut args_vec = Vec::new();
+        for (arg, expected_ty) in args.iter().zip(fn_args.iter()) {
+            let arg = self.convert_argument(*arg, *expected_ty);
+            args_vec.push(arg);
+        }
 
         let instr = Instruction::Call { 
-            ret_ty: *ret,
+            ret_ty: *fn_ret,
             fn_val,
             fn_ty, 
-            args,
+            args: args_vec,
         };
-        let v = module.create_val(ValueNVVM::Instr(instr), Some(*ret));
+        let v = module.create_val(ValueNVVM::Instr(instr), Some(*fn_ret));
         self.basic_block.add_instr(v);
         v
     }
+
+
+    fn call_lifetime_intrinsic(&mut self, intrinsic: &str, ptr: Val<'m>, size: Size) {
+        let size = size.bytes();
+        if size == 0 {
+            return;
+        }
+
+        if !self.cx().sess().emit_lifetime_markers() {
+            return;
+        }
+
+        self.call_intrinsic(intrinsic, &[self.cx().const_u64(size), ptr]);
+    }
+
+
+    fn convert_argument(&mut self, arg: Val<'m>, to_ty: TyNVVM<'m>) -> Val<'m> {
+        let from_ty = self.cx().val_ty(arg);
+        if from_ty == to_ty {
+            return arg;
+        } else if *from_ty == *to_ty {
+            bug!("convert_argument: types are equal but not the same");
+        }
+
+        // if the target type has the same amount of bits as the source type
+        // then a bitcast is sufficient
+        let from_size = from_ty.size();
+        let to_size = to_ty.size();
+        if from_size == to_size {
+            return self.bitcast(arg, to_ty);
+        }
+
+        // if the target type is larger than the source type, we need to extend
+        if from_size < to_size {
+            if let TypeNVVM::I(_) = from_ty.0 {
+                return self.zext(arg, to_ty);
+            } else if *from_ty.0 == TypeNVVM::F32 || *from_ty.0 == TypeNVVM::F64 {
+                return self.fpext(arg, to_ty);
+            } else {
+                bug!("convert_argument: unsupported conversion from {:?} to {:?}", from_ty, to_ty);
+            }
+        }
+
+        // if the target type is smaller than the source type, we need to truncate
+        if from_size > to_size {
+            if let TypeNVVM::I(_) = to_ty.0 {
+                return self.trunc(arg, to_ty);
+            } else if *to_ty.0 == TypeNVVM::F32 || *to_ty.0 == TypeNVVM::F64 {
+                return self.fptrunc(arg, to_ty);
+            } else {
+                bug!("convert_argument: unsupported conversion from {:?} to {:?}", from_ty, to_ty);
+            }
+        }
+
+        todo!("convert_argument: unsupported conversion from {:?} to {:?}", from_ty, to_ty);
+
+    }
 }
+
 
