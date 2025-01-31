@@ -263,6 +263,10 @@ impl Step for Std {
             for krate in &*self.crates {
                 cargo.arg("-p").arg(krate);
             }
+
+            // This is only a flag for kernel specific builds,
+            // and should be made optional in the future.
+            cargo.rustflag("-Zalways-encode-mir");
             cargo
         };
 

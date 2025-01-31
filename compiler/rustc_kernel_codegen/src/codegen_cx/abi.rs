@@ -1,8 +1,9 @@
 use std::marker::Tuple;
+use tracing::debug;
 
 use rustc_codegen_ssa::traits::{BaseTypeMethods, LayoutTypeMethods, TypeMembershipMethods};
-use rustc_middle::{bug, ty::{self, layout::{FnAbiOfHelpers, LayoutOfHelpers}, Ty}};
-use rustc_target::abi::{call::PassMode, Abi, AddressSpace, HasDataLayout, PointeeInfo, Primitive, Scalar, Size, TyAndLayout, Variants};
+use rustc_middle::{bug, ty::{self, layout::{FnAbiOf, FnAbiOfHelpers, LayoutOfHelpers}, DynKind, Ty}};
+use rustc_target::abi::{call::{FnAbi, PassMode}, Abi, AddressSpace, FieldIdx, FieldsShape, HasDataLayout, PointeeInfo, Primitive, Scalar, Size, TyAndLayout, Variants};
 
 use crate::{ty::{TyNVVM, TypeNVVM}, value::ValueNVVM};
 
@@ -59,7 +60,7 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         if layout_ty.is_zst() {
             return self.type_void();
         }
-        self.lower_ty(&layout_ty.ty)
+        self.lower_layout(layout_ty)
     }
 
     fn cast_backend_type(&self, ty: &rustc_target::abi::call::CastTarget) -> Self::Type {
@@ -70,7 +71,6 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         let mut args = vec![];// = abi.args.iter().enumerate().map(|(idx, arg)| {
             for (idx, arg) in fn_abi.args.iter().enumerate() {
                 // lower the type to the NVVM type
-                println!("Arg: {:?}", arg);
                 match arg.mode {
                     PassMode::Ignore => continue,
                     PassMode::Pair(_, _) => {
@@ -270,9 +270,59 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
 
 
 impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
+
+    pub fn lower_layout(&self, layout: TyAndLayout<'tcx, Ty<'tcx>>) -> TyNVVM<'m> {
+        let module = unsafe { &mut *self.module.get() };
+
+        match layout.abi {
+            Abi::Scalar(_) | Abi::Vector { .. } => {
+                return self.lower_ty(&layout.ty)
+            },
+            Abi::ScalarPair(s1, s2) => {
+                return self.lower_ty(&layout.ty)
+            }
+            Abi::Uninhabited | Abi::Aggregate { .. } => {
+                match layout.fields {
+                    FieldsShape::Primitive => {
+                        return self.lower_ty(&layout.ty)
+                    },
+                    FieldsShape::Union(_) => {
+                        return self.lower_ty(&layout.ty)
+                    },
+                    FieldsShape::Array { .. } => {
+                        return self.lower_ty(&layout.ty)
+                    },
+                    FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
+                        let (llfields, packed) = struct_llfields(self, layout);
+                        return self.type_struct(&llfields, packed)
+                    }
+                }
+            }
+        }
+
+
+        match layout.fields {
+            FieldsShape::Primitive | FieldsShape::Union(_) | FieldsShape::Array { .. } => {
+                self.lower_ty(&layout.ty)
+            },
+            FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
+                let (llfields, packed) = struct_llfields(self, layout);
+                self.type_struct(&llfields, packed)
+            }
+        }
+    }
+
     pub fn lower_ty(&self, ty: &Ty<'tcx>) -> TyNVVM<'m> {
         let module = unsafe { &mut *self.module.get() };
-        match ty.kind() {
+
+        // check if the type is already in the cache
+        let tc = unsafe { &mut *self.typecache.get() };
+        if let Some(t) = tc.get(ty) {
+            return *t;
+        }
+
+
+        let lowered_ty = match ty.kind() {
             ty::Int(n) => {
                 let bitwidth = match n.bit_width() {
                     Some(w) => w,
@@ -317,13 +367,61 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                 module.ty_from_type(crate::ty::TypeNVVM::Pointer(ty))
             },
             ty::Adt(adtdef, gargs) if !adtdef.is_enum() => {
+                // forward declare this type, we need to do this because some types
+                // may be recursive
+                let name = match module.declare_adt(adtdef.did()) {
+                    Err(name) => name,
+                    Ok(name) => {
+                        let mut tys = Vec::new();
+                        for field in adtdef.non_enum_variant().fields.iter() {
+                            let ty = self.lower_ty(&field.ty(self.tcx, gargs));
+                            tys.push(ty);
+                        }
+                        let ty = module.ty_from_type(crate::ty::TypeNVVM::Struct(tys));
+                        module.define_adt(adtdef.did(), ty);
+                        name
+                    }
+                };
+                
+                module.ty_from_type(TypeNVVM::AdtDefForwardDecl(adtdef.did(), name))
+            },
+
+            ty::Adt(adtdef, gargs) if adtdef.is_enum() => {
+                // enums are represented as a struct with an index, and a union over the different variants
+                let mut tys = Vec::new();
+                let index = module.ty_from_type(crate::ty::TypeNVVM::I(8));
+                for variant in adtdef.variants().iter() {
+                    let mut variant_tys = Vec::new();
+                    variant_tys.push(index);
+                    for field in variant.fields.iter() {
+                        let ty = self.lower_ty(&field.ty(self.tcx, gargs));
+                        variant_tys.push(ty);
+                    }
+                    let struc = module.ty_from_type(crate::ty::TypeNVVM::Struct(variant_tys));
+                    tys.push(struc);
+                }
+
+                module.ty_from_type(crate::ty::TypeNVVM::Union(tys))
+            },
+
+            ty::Adt(adtdef, gargs) if adtdef.is_box() => {
+                let first = adtdef.non_enum_variant().single_field();
+                let ty = self.lower_ty(&first.ty(self.tcx, gargs));
+                module.ty_from_type(crate::ty::TypeNVVM::Pointer(ty))
+            },
+
+            ty::Adt(adtdef, gargs) if adtdef.is_union() => {
                 let mut tys = Vec::new();
                 for field in adtdef.non_enum_variant().fields.iter() {
                     let ty = self.lower_ty(&field.ty(self.tcx, gargs));
                     tys.push(ty);
                 }
-                module.ty_from_type(crate::ty::TypeNVVM::Struct(tys))
+                module.ty_from_type(crate::ty::TypeNVVM::Union(tys))
             },
+
+            ty::Adt(_, _) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            }
 
             ty::Ref(_, ty, _) => {
                 let ty = self.lower_ty(ty);
@@ -349,10 +447,121 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                 module.ty_from_type(crate::ty::TypeNVVM::Pointer(i8))
             },
 
-            _ => {
-                bug!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
-            }
-        }
+            ty::Bool => {
+                module.ty_from_type(crate::ty::TypeNVVM::I(1))
+            },
+
+            ty::Char => {
+                module.ty_from_type(crate::ty::TypeNVVM::I(32))
+            },
+
+            ty::FnPtr(sig) => {
+                //todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+                //this should be a function pointer
+                //to the (instantiated) function signature
+                //let inputs_tys = sig.skip_binder().inputs().iter().map(|ty| self.lower_ty(ty)).collect::<Vec<_>>();
+                let inputs = sig.skip_binder().inputs();
+                let mut inputs_tys = Vec::new();
+                for ty in inputs.iter() {
+                    let ty = self.lower_ty(ty);
+                    inputs_tys.push(ty);
+                }
+                let output_ty = self.lower_ty(&sig.skip_binder().output());
+
+                let fn_ty = module.ty_from_type(crate::ty::TypeNVVM::Fn(inputs_tys, output_ty));
+                module.ty_from_type(crate::ty::TypeNVVM::Pointer(fn_ty))
+            },
+            
+            ty::Foreign(did) => {
+                //todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+                // oof this is quite hard, I think this should just be a ZST
+                self.type_void()
+            },
+
+            ty::Pat(ty, pat) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::FnDef(did, substs) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::Dynamic(bounds, region, dkind) => {
+                //todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+                match dkind {
+                    DynKind::Dyn => {
+                        let i8 = module.ty_from_type(crate::ty::TypeNVVM::I(8));
+                        module.ty_from_type(crate::ty::TypeNVVM::Pointer(i8))
+                    },
+
+                    DynKind::DynStar => todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind()),
+                }
+            },
+
+            ty::Closure(did, substs) => {
+                //todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+                // this should be just a function pointer
+
+                // BE CAREFUL WITH skip_binder
+                // let sig = self.tcx.
+                // let inputs_tys = sig.inputs().iter().map(|ty| self.lower_ty(ty)).collect::<Vec<_>>();
+                // let output_ty = self.lower_ty(&sig.output());
+                
+                // let fn_ty = module.ty_from_type(crate::ty::TypeNVVM::Fn(inputs_tys, output_ty));
+                // module.ty_from_type(crate::ty::TypeNVVM::Pointer(fn_ty))
+                self.type_voidptr()
+            },
+
+            ty::Coroutine(did, substs) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::CoroutineClosure(did, substs) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::Never => {
+                module.ty_from_type(crate::ty::TypeNVVM::Zst)
+            },
+
+            ty::CoroutineWitness(did, substs) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::Alias(akind, aty) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::Bound(dbidx, boundty) => {
+                todo!("unimplemented type: {:#?} with kind: {:?}", ty, ty.kind())
+                // bounds checking has already happened, so lower this to the inner type
+                //boundty.kind.
+            },
+
+            ty::Param(param) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::Infer(infer) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::Placeholder(placeholder) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            ty::Error(err) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            },
+
+            // _ => {
+            //     bug!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+            // }
+        };
+
+        // put the lowered type in the cache
+        tc.insert(*ty, lowered_ty);
+        lowered_ty
     }
 
     pub fn type_void(&self) -> TyNVVM<'m> {
@@ -403,5 +612,92 @@ impl<'tcx> LayoutExt for TyAndLayout<'tcx, Ty<'tcx>> {
             Abi::Scalar(_) | Abi::Vector { .. } => true,
             Abi::ScalarPair(..) | Abi::Uninhabited | Abi::Aggregate { .. } => false,
         }
+    }
+}
+
+
+fn struct_llfields<'m, 'tcx>(
+    cx: &CodegenCx<'m, 'tcx>,
+    layout: TyAndLayout<'tcx, Ty<'tcx>>,
+) -> (Vec<TyNVVM<'m>>, bool) {
+    debug!("struct_llfields: {:#?}", layout);
+    let field_count = layout.fields.count();
+
+    let mut packed = false;
+    let mut offset = Size::ZERO;
+    let mut prev_effective_align = layout.align.abi;
+    let mut result: Vec<_> = Vec::with_capacity(1 + field_count * 2);
+    for i in layout.fields.index_by_increasing_offset() {
+        let target_offset = layout.fields.offset(i as usize);
+        let field = layout.field(cx, i);
+        let effective_field_align =
+            layout.align.abi.min(field.align.abi).restrict_for_offset(target_offset);
+        packed |= effective_field_align < field.align.abi;
+
+        debug!(
+            "struct_llfields: {}: {:?} offset: {:?} target_offset: {:?} \
+                effective_field_align: {}",
+            i,
+            field,
+            offset,
+            target_offset,
+            effective_field_align.bytes()
+        );
+        assert!(target_offset >= offset);
+        let padding = target_offset - offset;
+        if padding != Size::ZERO {
+            // let padding_align = prev_effective_align.min(effective_field_align);
+            // assert_eq!(offset.align_to(padding_align) + padding, target_offset);
+            // result.push(cx.type_padding_filler(padding, padding_align));
+            // debug!("    padding before: {:?}", padding);
+            todo!("padding in struct_llfields")
+        }
+        result.push(cx.lower_layout(field));
+        offset = target_offset + field.size;
+        prev_effective_align = effective_field_align;
+    }
+    if layout.is_sized() && field_count > 0 {
+        if offset > layout.size {
+            bug!("layout: {:#?} stride: {:?} offset: {:?}", layout, layout.size, offset);
+        }
+        let padding = layout.size - offset;
+        if padding != Size::ZERO {
+            // let padding_align = prev_effective_align;
+            // assert_eq!(offset.align_to(padding_align) + padding, layout.size);
+            // debug!(
+            //     "struct_llfields: pad_bytes: {:?} offset: {:?} stride: {:?}",
+            //     padding, offset, layout.size
+            // );
+            // result.push(cx.type_padding_filler(padding, padding_align));
+            todo!("padding in struct_llfields")
+        }
+    } else {
+        debug!("struct_llfields: offset: {:?} stride: {:?}", offset, layout.size);
+    }
+    (result, packed)
+}
+
+
+pub trait Lower<'m, 'tcx> {
+    fn lower(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m>;
+}
+
+impl <'m, 'tcx> Lower<'m, 'tcx> for Scalar {
+    fn lower(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m> {
+        cx.scalar_type_at(*self)
+    }
+}
+
+pub fn find_scalarpair_types<'m, 'tcx>(
+    cx: &CodegenCx<'m, 'tcx>,
+    layout: TyAndLayout<'tcx, Ty<'tcx>>,
+) -> Option<(TyNVVM<'m>, TyNVVM<'m>)> {
+    match layout.abi {
+        Abi::ScalarPair(a, b) => {
+            let a = cx.scalar_type_at(a);
+            let b = cx.scalar_type_at(b);
+            Some((a, b))
+        }
+        _ => None,
     }
 }

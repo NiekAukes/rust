@@ -1,10 +1,10 @@
 use rustc_codegen_ssa::traits::{BaseTypeMethods, LayoutTypeMethods, PreDefineMethods};
 use rustc_middle::ty::{self, Ty};
-use rustc_target::abi::{call::{ArgAbi, CastTarget, PassMode, Reg, RegKind}, Size};
+use rustc_target::abi::{call::{ArgAbi, ArgAttribute, CastTarget, PassMode, Reg, RegKind}, Abi, Scalar, Size};
 
 use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeNVVM}, value::{Val, ValueNVVM}};
 
-use super::CodegenCx;
+use super::{abi::{find_scalarpair_types, Lower}, CodegenCx};
 
 impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
     fn predefine_static(
@@ -46,23 +46,48 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
         let mut arg_count = 0;
         
         let mut args = vec![];// = abi.args.iter().enumerate().map(|(idx, arg)| {
+
+
         for (idx, arg) in abi.args.iter().enumerate() {
             // lower the type to the NVVM type
             //println!("Arg: {:?}", arg);
             match arg.mode {
                 PassMode::Ignore => continue,
-                PassMode::Pair(_, _) => {
-                    let ty1 = self.backend_type(arg.layout.field(self, 0));
-                    let ty2 = self.backend_type(arg.layout.field(self, 1));
-                    let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty: ty1};
-                    let value2 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count + 1, ty: ty2};
-                    let val1 = module.create_val(value1, Some(ty1));
-                    let val2 = module.create_val(value2, Some(ty2));
+                PassMode::Pair(a, b) => {
+                    // let ty1 = self.backend_type(arg.layout.field(self, 0));
+                    // let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty: ty1};
+                    // module.create_val(value1, Some(ty1))
+                    let (val1, val2) = match arg.layout.abi {
+                        Abi::ScalarPair(s1, s2) => {
+                            let (ty1, ty2) = match find_scalarpair_types(self, arg.layout) {
+                                Some(t) => t,
+                                None => panic!("Expected scalar pair"),
+                            };
+                            let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty: ty1};
+                            let value2 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count + 1, ty: ty2};
+                            (module.create_val(value1, Some(ty1)), module.create_val(value2, Some(ty2)))
+                        }
+                        _ => panic!("Expected scalar pair"),
+                    };
+
+
                     args.push(val1);
                     args.push(val2);
                     arg_count += 2;
                 }
-                PassMode::Indirect { .. } => todo!(),
+                PassMode::Indirect { 
+                    attrs,
+                    meta_attrs,
+                    on_stack,
+                } => {
+                    // we need to pass a pointer to the value
+                    // CHECK: is this correct?
+                    let ty = self.backend_type(arg.layout);
+                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty};
+                    let val = module.create_val(value, Some(ty));
+                    args.push(val);
+                    arg_count += 1;
+                }
                 PassMode::Cast { pad_i32, ref cast } => {
                     let ty = cast.nvvm_type(self);
                     let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty};

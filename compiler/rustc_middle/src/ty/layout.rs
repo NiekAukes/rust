@@ -1133,6 +1133,12 @@ pub fn fn_can_unwind(tcx: TyCtxt<'_>, fn_def_id: Option<DefId>, abi: SpecAbi) ->
             return false;
         }
 
+
+        // Kernels cannot unwind
+        if tcx.codegen_fn_attrs(did).flags.contains(CodegenFnAttrFlags::KERNEL) {
+            return false;
+        }
+
         // With `-C panic=abort`, all non-FFI functions are required to not unwind.
         //
         // Note that this is true regardless ABI specified on the function -- a `extern "C-unwind"`

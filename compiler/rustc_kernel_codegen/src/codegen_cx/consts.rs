@@ -12,7 +12,8 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn const_undef(&self, t: Self::Type) -> Self::Value {
-        todo!()
+        let value = ValueNVVM::Constant(Const::Undef);
+        self.get_module_mut().create_val(value, Some(t))
     }
 
     fn const_poison(&self, t: Self::Type) -> Self::Value {
@@ -28,7 +29,7 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn const_uint_big(&self, t: Self::Type, u: u128) -> Self::Value {
-        todo!()
+        self.const_u128(u)
     }
 
     fn const_bool(&self, val: bool) -> Self::Value {
@@ -41,27 +42,38 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn const_i32(&self, i: i32) -> Self::Value {
-        self.const_i(i as i64, self.type_i32())
+        let value = ValueNVVM::Constant(Const::I32(i));
+        let ty = self.type_i32();
+        self.get_module_mut().create_val(value, Some(ty))
     }
 
     fn const_i8(&self, i: i8) -> Self::Value {
-        self.const_i(i as i64, self.type_i8())
+        let value = ValueNVVM::Constant(Const::I8(i));
+        let ty = self.type_i8();
+        self.get_module_mut().create_val(value, Some(ty))
     }
 
     fn const_u32(&self, i: u32) -> Self::Value {
-        self.const_u(i as u64, self.type_i32())
+        let value = ValueNVVM::Constant(Const::U32(i));
+        let ty = self.type_i32();
+        self.get_module_mut().create_val(value, Some(ty))
     }
 
     fn const_u64(&self, i: u64) -> Self::Value {
-        self.const_u(i, self.type_i64())
+        let value = ValueNVVM::Constant(Const::U64(i));
+        let ty = self.type_i64();
+        self.get_module_mut().create_val(value, Some(ty))
     }
 
     fn const_u128(&self, i: u128) -> Self::Value {
-        todo!()
+        // TODO: Implement
+        let value = ValueNVVM::Constant(Const::U64(i as u64));
+        let ty = self.type_i64();
+        self.get_module_mut().create_val(value, Some(ty))
     }
 
     fn const_usize(&self, i: u64) -> Self::Value {
-        self.const_u32(i as u32)
+        self.const_u64(i as u64)
     }
 
     fn const_u8(&self, i: u8) -> Self::Value {
@@ -85,14 +97,40 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
         // otherwise we can't
         // this is for optimization purposes
         match *v {
-            ValueNVVM::Constant(Const::U(u)) => Some(u),
-            ValueNVVM::Constant(Const::I(i)) => {
+            ValueNVVM::Constant(Const::U8(u)) => Some(u as u64),
+            ValueNVVM::Constant(Const::U16(u)) => Some(u as u64),
+            ValueNVVM::Constant(Const::U32(u)) => Some(u as u64),
+            ValueNVVM::Constant(Const::U64(u)) => Some(u),
+            ValueNVVM::Constant(Const::U128(u)) => None,
+            ValueNVVM::Constant(Const::I8(i)) => {
                 if i >= 0 {
                     Some(i as u64)
                 } else {
                     None
                 }
             },
+            ValueNVVM::Constant(Const::I16(i)) => {
+                if i >= 0 {
+                    Some(i as u64)
+                } else {
+                    None
+                }
+            },
+            ValueNVVM::Constant(Const::I32(i)) => {
+                if i >= 0 {
+                    Some(i as u64)
+                } else {
+                    None
+                }
+            },
+            ValueNVVM::Constant(Const::I64(i)) => {
+                if i >= 0 {
+                    Some(i as u64)
+                } else {
+                    None
+                }
+            },
+            
             _ => {
                 None
             }
@@ -117,7 +155,7 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
                     1 => self.const_i8(i.try_to_i8().unwrap()),
                     2 => self.const_i16(i.try_to_i16().unwrap()),
                     4 => self.const_i32(i.try_to_i32().unwrap()),
-                    8 => self.const_i(i.try_to_i64().unwrap(), self.type_i64()),
+                    8 => self.const_i64(i.try_to_i64().unwrap()),
                     _ => todo!(),
                 }
             },
@@ -149,15 +187,6 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
 }
 
 impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
-    fn const_u(&self, u: u64, ty: TyNVVM<'m>) -> Val<'m> {
-        let value = ValueNVVM::Constant(Const::U(u));
-        self.get_module_mut().create_val(value, Some(ty))
-    }
-
-    fn const_i(&self, i: i64, ty: TyNVVM<'m>) -> Val<'m> {
-        let value = ValueNVVM::Constant(Const::I(i));
-        self.get_module_mut().create_val(value, Some(ty))
-    }
 
     fn get_global(&self, id: AllocId, alloc: ConstAllocation<'tcx>) -> Val<'m> {
         let module = self.get_module_mut();
@@ -169,5 +198,11 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         let allocation = GlobalNVVM::new(bytes.to_vec());
         let value = module.add_allocation(allocation);
         value
+    }
+
+    pub fn const_i64(&self, i: i64) -> Val<'m> {
+        let value = ValueNVVM::Constant(Const::I64(i));
+        let ty = self.type_i64();
+        self.get_module_mut().create_val(value, Some(ty))
     }
 }

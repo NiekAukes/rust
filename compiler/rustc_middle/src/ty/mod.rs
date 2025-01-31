@@ -1783,7 +1783,6 @@ impl<'tcx> TyCtxt<'tcx> {
                 debug!("calling def_kind on def: {:?}", def);
                 let def_kind = self.def_kind(def);
                 debug!("returned from def_kind: {:?}", def_kind);
-                let a = 1;
                 match def_kind {
                     DefKind::Const
                     | DefKind::Static { .. }
@@ -1812,6 +1811,42 @@ impl<'tcx> TyCtxt<'tcx> {
             | ty::InstanceDef::AsyncDropGlueCtorShim(..) => self.mir_shims(instance),
         }
     }
+
+    pub fn instance_device_mir(self, instance: ty::InstanceDef<'tcx>) -> &'tcx Body<'tcx> {
+        match instance {
+            ty::InstanceDef::Item(def) => {
+                debug!("calling def_kind on def: {:?}", def);
+                let def_kind = self.def_kind(def);
+                debug!("returned from def_kind: {:?}", def_kind);
+                match def_kind {
+                    DefKind::Const
+                    | DefKind::Static { .. }
+                    | DefKind::AssocConst
+                    | DefKind::Ctor(..)
+                    | DefKind::AnonConst
+                    | DefKind::InlineConst => self.mir_for_ctfe(def),
+                    _ if self.is_kernel(def) => todo!("kernel called from kernel!"),
+                    // If the caller wants `mir_for_ctfe` of a function they should not be using
+                    // `instance_mir`, so we'll assume const fn also wants the optimized version.
+                    _ => self.optimized_kernel_mir(def),
+                }
+            }
+            ty::InstanceDef::VTableShim(..)
+            | ty::InstanceDef::ReifyShim(..)
+            | ty::InstanceDef::Intrinsic(..)
+            | ty::InstanceDef::FnPtrShim(..)
+            | ty::InstanceDef::Virtual(..)
+            | ty::InstanceDef::ClosureOnceShim { .. }
+            | ty::InstanceDef::ConstructCoroutineInClosureShim { .. }
+            | ty::InstanceDef::CoroutineKindShim { .. }
+            | ty::InstanceDef::DropGlue(..)
+            | ty::InstanceDef::CloneShim(..)
+            | ty::InstanceDef::ThreadLocalShim(..)
+            | ty::InstanceDef::FnPtrAddrShim(..)
+            | ty::InstanceDef::AsyncDropGlueCtorShim(..) => self.mir_shims(instance),
+        }
+    }
+
 
     // FIXME(@lcnr): Remove this function.
     pub fn get_attrs_unchecked(self, did: DefId) -> &'tcx [ast::Attribute] {

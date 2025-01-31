@@ -1,5 +1,6 @@
 #![feature(extern_types)]
 #![allow(unused)]
+#![feature(map_try_insert)]
 
 use arena::Arena;
 use function::FunctionNVVM;

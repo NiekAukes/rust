@@ -19,6 +19,8 @@ pub struct FunctionNVVM<'m> {
     basic_blocks: UnsafeCell<Vec<&'m BasicBlock<'m>>>,
     val_labels: UnsafeCell<FxHashMap<Val<'m>, String>>,
     counter: UnsafeCell<usize>,
+    has_panic_block: UnsafeCell<bool>,
+    eh_personality: UnsafeCell<Option<Val<'m>>>,
 }
 
 
@@ -45,6 +47,8 @@ impl<'m> FunctionNVVM<'m> {
             basic_blocks: UnsafeCell::new(Vec::new()),
             val_labels: UnsafeCell::new(FxHashMap::default()),
             counter: UnsafeCell::new(0),
+            has_panic_block: UnsafeCell::new(false),
+            eh_personality: UnsafeCell::new(None),
         }
     }
 
@@ -72,12 +76,18 @@ impl<'m> FunctionNVVM<'m> {
             basic_blocks: UnsafeCell::new(Vec::new()),
             val_labels: UnsafeCell::new(FxHashMap::default()),
             counter: UnsafeCell::new(0),
+            has_panic_block: UnsafeCell::new(false),
+            eh_personality: UnsafeCell::new(None),
         }
     }
 
     pub fn add_basic_block(&self, bb: &'m BasicBlock<'m>) {
         unsafe {
-            (*self.basic_blocks.get()).push(bb);
+            if (bb.name == "panic") {
+                *self.has_panic_block.get() = true;
+            } else {
+                (*self.basic_blocks.get()).push(bb);
+            }
         }
     }
 
@@ -114,6 +124,18 @@ impl<'m> FunctionNVVM<'m> {
         }
     }
 
+    pub fn assign_eh_personality(&self, val: Val<'m>) {
+        unsafe {
+            *self.eh_personality.get() = Some(val);
+        }
+    }
+
+    pub fn get_eh_personality(&self) -> Val<'m> {
+        unsafe {
+            (*self.eh_personality.get()).unwrap()
+        }
+    }
+
     pub fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String {
         let mut s = format!("define ");
         // return type
@@ -136,7 +158,28 @@ impl<'m> FunctionNVVM<'m> {
         // basic blocks
         for bb in unsafe { &*self.basic_blocks.get() } {
             s.push_str(&format!("{}:\n", bb.name));
-            if bb.name == "panic" {
+            // if bb.name == "panic" {
+            //     // custom handle panic blocks, we need to do this due to some
+            //     // limitations in the current implementation
+            //     // the normal panic handler expects panic functions to be defined
+            //     // but they aren't in the kernel, and we don't want to define them
+
+            //     // so, we just skip the panic block skip the entire function
+            //     // we do this by calling the llvm.trap intrinsic
+            //     s.push_str("  call void @llvm.trap()\n");
+            //     module.use_intrinsic("llvm.trap");
+            //     //println!("using intrinsic llvm.trap");
+            //     s.push_str("  unreachable\n");
+            //     continue;
+            // }
+            for instr in bb.instrs() {
+                let instr_inner = instr.0;
+                s.push_str(&format!("  {}\n", instr_inner.assemble(module, &self, &instr)));
+            }
+        }
+
+        unsafe {
+            if *self.has_panic_block.get() {
                 // custom handle panic blocks, we need to do this due to some
                 // limitations in the current implementation
                 // the normal panic handler expects panic functions to be defined
@@ -144,20 +187,19 @@ impl<'m> FunctionNVVM<'m> {
 
                 // so, we just skip the panic block skip the entire function
                 // we do this by calling the llvm.trap intrinsic
+                s.push_str("panic:\n");
                 s.push_str("  call void @llvm.trap()\n");
                 module.use_intrinsic("llvm.trap");
                 //println!("using intrinsic llvm.trap");
                 s.push_str("  unreachable\n");
-                continue;
-            }
-            for instr in bb.instrs() {
-                let instr_inner = instr.0;
-                s.push_str(&format!("  {}\n", instr_inner.assemble(module, &self, &instr)));
+            
             }
         }
+
         s.push_str("}\n");
         s
     } 
+    
 
     pub fn define(&self, module: &mut ModuleNVVM<'m>) -> String {
         let mut s = format!("declare ");

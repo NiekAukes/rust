@@ -23,6 +23,7 @@ pub struct ModuleNVVM<'m> {
     pub types: Vec<TyNVVM<'m>>,
     pub values: Vec<Val<'m>>,
     pub valtypes: FxHashMap<Val<'m>, TyNVVM<'m>>,
+    forward_decls: FxHashMap<DefId, (String, Option<TyNVVM<'m>>)>,
 
     pub metadata: Metadata<'m>,
     pub arena: &'m Arena<'m>,
@@ -52,6 +53,7 @@ impl<'m> ModuleNVVM<'m> {
             types: Vec::new(),
             values: Vec::new(),
             valtypes: FxHashMap::default(),
+            forward_decls: FxHashMap::default(),
 
             arena,
 
@@ -181,6 +183,32 @@ impl<'m> ModuleNVVM<'m> {
         let val = self.create_val(ValueNVVM::FnRef(name.to_string()), Some(ty));
         self.intrinsics.insert(name.to_string(), val);
     }
+
+    pub fn declare_adt(&mut self, def_id: DefId) -> Result<String, String> {
+        let name = format!("adt{}", self.forward_decls.len());
+        match self.forward_decls.try_insert(def_id, (name.clone(), None)) {
+            Ok(_) => {
+                Ok(name)
+            },
+            Err(_) => {
+                Err(name)
+            }
+        }
+    }
+
+    pub fn define_adt(&mut self, def_id: DefId, val: TyNVVM<'m>) {
+        let (name, _) = self.forward_decls.remove(&def_id).unwrap();
+        self.forward_decls.insert(def_id, (name, Some(val)));
+    }
+
+    pub fn get_adt(&self, def_id: DefId) -> Option<(&str, TyNVVM<'m>)> {
+        let x: Option<&(String, Option<rustc_data_structures::intern::Interned<'m, TypeNVVM<'m>>>)> = self.forward_decls.get(&def_id);
+        if let Some((name, Some(val))) = x {
+            Some((name, *val))
+        } else {
+            None
+        }
+    }
 }
 
 
@@ -191,6 +219,7 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     
     let mut kernel = None;
 
+    println!("Assembling module");
 
     // define the types used in the module
     let tys = module.types.clone();

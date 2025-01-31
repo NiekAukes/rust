@@ -75,7 +75,7 @@ pub fn is_call_from_compiler_builtins_to_upstream_monomorphization<'tcx>(
     !def_id.is_local()
         && tcx.is_compiler_builtins(LOCAL_CRATE)
         && !is_llvm_intrinsic(tcx, def_id)
-        && !should_codegen_locally(tcx, instance)
+        && !should_codegen_locally(tcx, instance, false)
 }
 
 pub fn provide(providers: &mut Providers) {

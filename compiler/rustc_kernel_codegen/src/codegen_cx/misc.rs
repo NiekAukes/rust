@@ -2,7 +2,7 @@ use std::borrow::BorrowMut;
 
 use rustc_codegen_ssa::traits::{MiscMethods, PreDefineMethods, TypeMembershipMethods};
 use rustc_data_structures::fx::FxHashMap;
-use rustc_middle::ty::{layout::HasTyCtxt, Ty};
+use rustc_middle::ty::{layout::HasTyCtxt, Instance, List, ParamEnv, Ty};
 
 use crate::{function::FunctionNVVM, value::{Val, ValueNVVM}};
 
@@ -44,7 +44,37 @@ impl<'tcx> MiscMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 
     fn eh_personality(&self) -> Self::Value {
-        todo!()
+        // define the exception handling personality function
+        // this is a function that is called when an exception is thrown
+        if let Some(personality) = self.eh_personality.get() {
+            return personality;
+        }
+
+        let module = unsafe { &mut *self.module.get() };
+        let llfn = match self.tcx.lang_items().eh_personality() {
+            Some(def_id) => self.get_fn_addr(Instance::expect_resolve(
+                self.tcx,
+                ParamEnv::reveal_all(),
+                def_id,
+                List::empty(),
+            )),
+            None => {
+                // no personality function
+                // return a null pointer
+                // let ty = self.type_of(self.tcx.mk_fn_ptr(self.tcx.mk_fn_sig(
+                //     &[], 
+                //     self.tcx.mk_unit(), 
+                //     false
+                // )));
+                // let llfn = module.define_function("eh_personality", ty);
+                // module.defrefs.insert(rustc_middle::ty::Instance::mono(self.tcx, rustc_middle::ty::InstanceDefId::from_u32(0)), llfn);
+                // llfn
+                todo!()
+            }
+        };
+
+        self.eh_personality.set(Some(llfn));
+        llfn
     }
 
     fn sess(&self) -> &rustc_session::Session {

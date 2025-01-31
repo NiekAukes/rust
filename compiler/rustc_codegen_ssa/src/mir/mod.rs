@@ -10,6 +10,7 @@ use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt, TyAndLayout};
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt, TypeFoldable, TypeVisitableExt};
 use rustc_middle::{bug, span_bug};
 use rustc_target::abi::call::{FnAbi, PassMode};
+use rustc_target::spec::HasTargetSpec;
 
 use std::iter;
 
@@ -165,7 +166,11 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
     let llfn = cx.get_fn(instance);
 
-    let mir = cx.tcx().instance_mir(instance.def);
+    let mir = if cx.target_spec().arch == "nvvm" {
+        cx.tcx().instance_device_mir(instance.def)
+    }else {
+        cx.tcx().instance_mir(instance.def)
+    };
 
     let fn_abi = cx.fn_abi_of_instance(instance, ty::List::empty());
     debug!("fn_abi: {:?}", fn_abi);

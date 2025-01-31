@@ -2,7 +2,7 @@ use rustc_middle::{bug, ty::{layout::HasTyCtxt, Ty, TyCtxt}};
 use rustc_codegen_ssa::{mir::{operand::{OperandRef, OperandValue}, place::PlaceRef}, traits::{BaseTypeMethods, BuilderMethods, ConstMethods, LayoutTypeMethods, MiscMethods, OverflowOp}, MemFlags};
 use rustc_span::symbol::kw::In;
 use rustc_target::abi::{call::FnAbi, Abi, Align, Scalar, Size, WrappingRange};
-use crate::{basic_block::BasicBlock, ty::{TyNVVM, TypeNVVM}, value::{Comp, Instruction, Val, ValueNVVM}};
+use crate::{basic_block::BasicBlock, ty::{TyNVVM, TypeNVVM}, value::{Comp, Const, Instruction, Val, ValueNVVM}};
 use crate::codegen_cx::abi::LayoutExt;
 
 use super::Builder;
@@ -37,6 +37,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 
     fn append_sibling_block(&mut self, name: &str) -> Self::BasicBlock {
         // TODO: probably wrong
+        println!("append_sibling_block, name: {}", name);
         Self::append_block(self.codegen_cx, self.basic_block.func, name)
     }
 
@@ -107,7 +108,20 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         funclet: Option<&Self::Funclet>,
         instance: Option<rustc_middle::ty::Instance<'tcx>>,
     ) -> Self::Value {
-        todo!()
+
+        let fn_attrs = fn_attrs.map(|a| a.clone());
+        let instr = Instruction::Invoke {
+            ty: llty,
+            fn_attrs,
+            fn_val: llfn,
+            args: args.to_vec(),
+            then,
+            catch,
+        };
+        let v = self.cx().get_module_mut().
+            create_val(ValueNVVM::Instr(instr), Some(llty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn unreachable(&mut self) {
@@ -579,10 +593,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
                 TypeNVVM::Pointer(t) => rty = t.clone(),
                 TypeNVVM::Array(t, _) => rty = t.clone(),
                 TypeNVVM::Struct(types) => {
-                    let ValueNVVM::Constant(crate::value::Const::I(idx)) = i.0 else {
-                        bug!("Invalid index for GEP");
+                    let idx = match i.0 {
+                        ValueNVVM::Constant(c) => c.as_u64().unwrap(),
+                        
+                        _ => panic!("Invalid index for GEP"),
                     };
-                    rty = types[*idx as usize].clone();
+                    rty = types[idx as usize].clone();
                 }
                 _ => panic!("Invalid type for GEP"),
             }
@@ -790,18 +806,36 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         let ty = self.cx().val_ty(agg_val);
 
         // derive the result type of the extract value instruction
-        let subty = match ty.0 {
-            TypeNVVM::Struct(els) => els[idx as usize],
+        match ty.0 {
+            TypeNVVM::Struct(els) => {
+                let subty = els[idx as usize];
+                let instr = Instruction::ExtractValue(ty, agg_val, idx);
+                let v = self.cx().get_module_mut().
+                    create_val(ValueNVVM::Instr(instr), Some(subty));
+
+                // add the instruction to the current basic block
+                self.basic_block.add_instr(v);
+                v
+            }
+            TypeNVVM::Union(els) => {
+                // extraction in a struct is a bit different.
+                // we need to bitcast the initial value pointer to the requested type
+                // and then return that type
+                let subty = els[idx as usize];
+                let instr = Instruction::BitCast { 
+                    ty,
+                    val: agg_val,
+                    to: subty,
+                };
+                let v = self.cx().get_module_mut().
+                    create_val(ValueNVVM::Instr(instr), Some(subty));
+
+                // add the instruction to the current basic block
+                self.basic_block.add_instr(v);
+                v
+            }
             _ => panic!("Expected struct type, found {:?}", ty),
-        };
-
-        let instr = Instruction::ExtractValue(ty, agg_val, idx);
-        let v = self.cx().get_module_mut().
-            create_val(ValueNVVM::Instr(instr), Some(subty));
-
-        // add the instruction to the current basic block
-        self.basic_block.add_instr(v);
-        v
+        }
     }
 
     fn insert_value(&mut self, agg_val: Self::Value, elt: Self::Value, idx: u64) -> Self::Value {
@@ -809,11 +843,16 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn set_personality_fn(&mut self, personality: Self::Value) {
-        todo!()
+        //todo!()
+        //todo!("set_personality_fn: {:?}", personality);
+        self.basic_block.func.assign_eh_personality(personality);
     }
 
     fn cleanup_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value) {
-        todo!()
+        // let ty = self.cx().type_struct(&[self.type_ptr(), self.type_i32()], false);
+        // let landing_pad = self.landing_pad(ty, pers_fn, 0, true);
+        // (self.extract_value(landing_pad, 0), self.extract_value(landing_pad, 1))
+        panic!("cleanup_landing_pad not supported by nvvm");
     }
 
     fn filter_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value) {
@@ -821,7 +860,16 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn resume(&mut self, exn0: Self::Value, exn1: Self::Value) {
-        todo!()
+        // let ty = self.type_struct(&[self.type_ptr(), self.type_i32()], false);
+        // let mut exn = self.cx().const_undef(ty);
+        // exn = self.insert_value(exn, exn0, 0);
+        // exn = self.insert_value(exn, exn1, 1);
+        
+        // let instr = Instruction::Resume(exn);
+        // let v = self.cx().get_module_mut().
+        //     create_val(ValueNVVM::Instr(instr), None);
+        // self.basic_block.add_instr(v);
+        panic!("resume not supported by nvvm");
     }
 
     fn cleanup_pad(&mut self, parent: Option<Self::Value>, args: &[Self::Value]) -> Self::Funclet {
@@ -1039,6 +1087,21 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
 
         todo!("convert_argument: unsupported conversion from {:?} to {:?}", from_ty, to_ty);
 
+    }
+
+    pub(crate) fn landing_pad(
+        &mut self,
+        ty: TyNVVM<'m>,
+        pers_fn: Val<'m>,
+        num_clauses: usize,
+        cleanup: bool,
+    ) -> Val<'m> {
+        //self.set_personality_fn(pers_fn);
+        let instr = Instruction::LandingPad { ty, num_clauses , cleanup };
+        let v = self.cx().get_module_mut().
+            create_val(ValueNVVM::Instr(instr), Some(ty));
+        self.basic_block.add_instr(v);
+        v
     }
 }
 

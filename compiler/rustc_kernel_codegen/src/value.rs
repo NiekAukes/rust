@@ -1,6 +1,7 @@
 use std::fmt::Display;
 
 use rustc_data_structures::intern::Interned;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use crate::{basic_block::BasicBlock, function::FunctionNVVM, module::{Assemble, ModuleNVVM}, ty::{TyNVVM, TypeNVVM}, GlobalNVVM};
 
 pub trait ToVal<'m> {
@@ -133,17 +134,96 @@ pub enum Instruction<'m> {
         src_align: u64,
         size: Val<'m>,
         is_volatile: bool,
-    }
+    },
+
+    LandingPad {
+        ty: TyNVVM<'m>,
+        num_clauses: usize,
+        cleanup: bool,
+    },
+
+    Invoke {
+        ty: TyNVVM<'m>,
+        fn_val: Val<'m>,
+        args: Vec<Val<'m>>,
+        fn_attrs: Option<CodegenFnAttrs>,
+        then: &'m BasicBlock<'m>,
+        catch: &'m BasicBlock<'m>,
+    },
+
+    Resume(Val<'m>),
 }
 
 #[derive(Debug)]
 pub enum Const {
-    I(i64),
-    U(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    I128(i128),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    U128(u128),
     F32(f32),
     F64(f64),
     Bool(bool),
     Lit(String),
+    Undef,
+}
+
+
+impl Const {
+    pub fn size(&self) -> usize {
+        match self {
+            Const::I8(_) => 8,
+            Const::I16(_) => 16,
+            Const::I32(_) => 32,
+            Const::I64(_) => 64,
+            Const::I128(_) => 128,
+            Const::U8(_) => 8,
+            Const::U16(_) => 16,
+            Const::U32(_) => 32,
+            Const::U64(_) => 64,
+            Const::U128(_) => 128,
+            Const::F32(_) => 32,
+            Const::F64(_) => 64,
+            Const::Bool(_) => 1,
+            Const::Lit(_) => 0,
+            Const::Undef => 0,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Const::I8(i) => Some(*i as i64),
+            Const::I16(i) => Some(*i as i64),
+            Const::I32(i) => Some(*i as i64),
+            Const::I64(i) => Some(*i),
+            Const::I128(i) => None,
+            Const::U8(i) => Some(*i as i64),
+            Const::U16(i) => Some(*i as i64),
+            Const::U32(i) => Some(*i as i64),
+            Const::U64(i) => Some(*i as i64),
+            _ => None
+        }
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Const::U8(i) => Some(*i as u64),
+            Const::U16(i) => Some(*i as u64),
+            Const::U32(i) => Some(*i as u64),
+            Const::U64(i) => Some(*i),
+            Const::U128(i) => None,
+            Const::I8(i) => Some(*i as u64),
+            Const::I16(i) => Some(*i as u64),
+            Const::I32(i) => Some(*i as u64),
+            Const::I64(i) => Some(*i as u64),
+            _ => None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -206,12 +286,21 @@ impl<'m> ValueNVVM<'m> {
             }
             ValueNVVM::Constant(c) => {
                 match c {
-                    Const::I(i) => format!("{}", i),
-                    Const::U(u) => format!("{}", u),
+                    Const::I8(i) => format!("{}", i),
+                    Const::I16(i) => format!("{}", i),
+                    Const::I32(i) => format!("{}", i),
+                    Const::I64(i) => format!("{}", i),
+                    Const::I128(i) => format!("{}", i),
+                    Const::U8(u) => format!("{}", u),
+                    Const::U16(u) => format!("{}", u),
+                    Const::U32(u) => format!("{}", u),
+                    Const::U64(u) => format!("{}", u),
+                    Const::U128(u) => format!("{}", u),
                     Const::F32(f) => format!("{}", f),
                     Const::F64(f) => format!("{}", f),
                     Const::Bool(b) => format!("{}", b),
                     Const::Lit(s) => format!("\"{}\"", s),
+                    Const::Undef => format!("undef"),
                 }
             }
             ValueNVVM::Type(ty) => {
@@ -250,6 +339,8 @@ impl<'m> Instruction<'m> {
             | Instruction::Trunc { .. }
             | Instruction::SExt { .. }
             | Instruction::ZExt { .. }
+            | Instruction::LandingPad { .. }
+            | Instruction::Invoke { .. }
             | Instruction::InBoundsGep { .. } => true,
 
             Instruction::Retvoid
@@ -258,6 +349,7 @@ impl<'m> Instruction<'m> {
             | Instruction::ConditionalBranch { .. }
             | Instruction::Unreachable
             | Instruction::MemCpy { .. }
+            | Instruction::Resume(_) => false,
             | Instruction::Store { .. } => false,
 
             Instruction::Call { ret_ty, .. } => ret_ty.size() != 0,
@@ -284,7 +376,10 @@ impl<'m> Instruction<'m> {
                 format!("store {} {}, {} {}, align {}", val_ty_str, val_label, ptr_ty_str, ptr_label, align)
             }
             Instruction::Load { ty, ptr, align } => {
-                format!("load {} {}, align {}", ty.assemble(module), ptr.assemble(module, func), align)
+                let ptr_ty = *module.valtypes.get(ptr).unwrap();
+                let ptr_ty_str = ptr_ty.assemble(module);
+                format!("load {}, {} {}, align {}",
+                 ty.assemble(module), ptr_ty_str, ptr.assemble(module, func), align)
             }
             Instruction::InBoundsGep { ty, ptr, indices } => {
                 let ty_str = ty.assemble(module);
@@ -448,6 +543,32 @@ impl<'m> Instruction<'m> {
                         if *is_volatile { "true" } else { "false" }
                     )
                 }
+
+            Instruction::LandingPad { ty, num_clauses, cleanup } => {
+                let ty_label = ty.assemble(module);
+                format!("landingpad {} cleanup {}", ty_label, if *cleanup { "cleanup" } else { "catch" })
+            }
+
+            Instruction::Invoke { ty, fn_val, args, fn_attrs, then, catch } => {
+                let ty_label = ty.assemble(module);
+                let fn_val_label = fn_val.assemble(module, func);
+                let mut s = format!("invoke {} {}(", ty_label, fn_val_label);
+                for (i, arg) in args.iter().enumerate() {
+                    if i != 0 {
+                        s.push_str(", ");
+                    }
+                    let ty = *module.valtypes.get(arg).unwrap();
+                    let ty_label = ty.assemble(module);
+                    s.push_str(&format!("{} {}", ty_label, arg.assemble(module, func)));
+                }
+                s.push_str(")");
+                s.push_str(&format!(" to label %{} unwind label %{}", then.name, catch.name));
+                s
+            }
+
+            Instruction::Resume(val) => {
+                panic!("Resume instruction not supported in nvvm")
+            }
         }
     }
 }

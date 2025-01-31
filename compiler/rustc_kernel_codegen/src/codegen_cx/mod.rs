@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
@@ -14,6 +16,7 @@ use rustc_middle::ty::Ty;
 use rustc_middle::ty::TyCtxt;
 use rustc_target::abi::VariantIdx;
 use rustc_target::spec::HasTargetSpec;
+use rustc_target::spec::Target;
 use crate::function::FunctionNVVM;
 use crate::module::ModuleNVVM;
 use crate::ty::{TyNVVM, TypeNVVM};
@@ -34,9 +37,12 @@ pub struct CodegenCx<'m, 'tcx> {
     // unsafe cell to allow mutation of the module
     module: UnsafeCell<ModuleNVVM<'m>>,
 
-    pub(crate) typecache: UnsafeCell<FxHashMap<(Ty<'tcx>, Option<VariantIdx>), TyNVVM<'m>>>,
+    pub(crate) typecache: UnsafeCell<FxHashMap<Ty<'tcx>, TyNVVM<'m>>>,
 
     //session: &'tcx rustc_session::Session,
+    pub(crate) eh_personality: Cell<Option<Val<'m>>>,
+
+    target: &'tcx Target,
 }
 
 impl<'m> BackendTypes for CodegenCx<'m, '_> {
@@ -57,7 +63,7 @@ impl<'m> BackendTypes for CodegenCx<'m, '_> {
 
 impl HasTargetSpec for CodegenCx<'_, '_> {
     fn target_spec(&self) -> &rustc_target::spec::Target {
-        todo!()
+        self.target
     }
 }
 
@@ -89,11 +95,16 @@ impl<'tcx> HasTyCtxt<'tcx> for CodegenCx<'_, 'tcx> {
 
 impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>, module: ModuleNVVM<'m>) -> Self {
+        let mut target = tcx.sess.target.clone();
+        target.arch = Cow::from("nvvm".to_string());
+        let t = tcx.arena.dropless.alloc(target);
         Self {
             // ...
             tcx,
             module: UnsafeCell::new(module),
             typecache: UnsafeCell::new(FxHashMap::default()),
+            eh_personality: Cell::new(None),
+            target: t,
         }
     }
 

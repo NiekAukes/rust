@@ -2,6 +2,7 @@ use std::{fmt::Display, ptr};
 
 use rustc_ast::Ty;
 use rustc_data_structures::intern::Interned;
+use rustc_hir::def_id::DefId;
 use rustc_mir_build::build;
 
 use crate::module::{Assemble, ModuleNVVM};
@@ -16,7 +17,9 @@ pub enum TypeNVVM<'m> {
     Pointer(TyNVVM<'m>),
     Array(TyNVVM<'m>, usize),
     Struct(Vec<TyNVVM<'m>>),
+    Union(Vec<TyNVVM<'m>>),
     Fn(Vec<TyNVVM<'m>>, TyNVVM<'m>),
+    AdtDefForwardDecl(DefId, String),
 }
 
 /// Interned type for NVVM.
@@ -34,6 +37,7 @@ impl<'m> PartialEq for TypeNVVM<'m> {
             (TypeNVVM::Pointer(a), TypeNVVM::Pointer(b)) => a == b,
             (TypeNVVM::Array(a, s1), TypeNVVM::Array(b, s2)) => a == b && s1 == s2,
             (TypeNVVM::Struct(a), TypeNVVM::Struct(b)) => a == b,
+            (TypeNVVM::Union(a), TypeNVVM::Union(b)) => a == b,
             (TypeNVVM::Fn(a1, b1), TypeNVVM::Fn(a2, b2)) => a1 == a2 && b1 == b2,
             _ => false,
         }
@@ -64,6 +68,8 @@ impl<'m> TypeNVVM<'m> {
             TypeNVVM::Array(ty, size) => ty.size() * size,
             TypeNVVM::Struct(fields) => fields.iter().map(|f| f.size()).sum(),
             TypeNVVM::Fn(_, _) => 8, // function pointer size
+            TypeNVVM::Union(fields) => fields.iter().map(|f| f.size()).max().unwrap_or(0),
+            TypeNVVM::AdtDefForwardDecl(_, _) => panic!("AdtDefForwardDecl should not be used for size calculation"),
         }
     }
     
@@ -99,6 +105,23 @@ impl Display for TypeNVVM<'_> {
                     write!(f, "{}", arg.0)?;
                 }
                 write!(f, ")")
+            }
+
+            TypeNVVM::Union(fields) => {
+                // when generating a union, pick the type with the greatest width,
+                // and simply create an i8 array of that width
+                let mut max_size = 0;
+                for field in fields {
+                    let size = field.size();
+                    if size > max_size {
+                        max_size = size;
+                    }
+                }
+                write!(f, "[{} x i8]", max_size)
+            }
+
+            TypeNVVM::AdtDefForwardDecl(did, name) => {
+                write!(f, "%{}", name)
             }
         }
     }
