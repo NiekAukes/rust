@@ -5,7 +5,6 @@ use crate::function::FunctionNVVM;
 
 use super::Builder;
 
-
 impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
     fn codegen_intrinsic_call(
         &mut self,
@@ -19,7 +18,7 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
     }
 
     fn abort(&mut self) {
-        todo!()
+        self.call_intrinsic("llvm.trap", &[]);
     }
 
     fn assume(&mut self, val: Self::Value) {
@@ -51,4 +50,3 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
         todo!()
     }
 }
-

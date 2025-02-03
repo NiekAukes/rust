@@ -5,8 +5,8 @@ use rustc_middle::bug;
 
 use crate::module::{Assemble, ModuleNVVM};
 use crate::ty::TypeNVVM;
-use crate::{ty::TyNVVM, basic_block::BasicBlock};
 use crate::value::{Val, ValueNVVM};
+use crate::{basic_block::BasicBlock, ty::TyNVVM};
 
 #[derive(Debug)]
 pub struct FunctionNVVM<'m> {
@@ -20,9 +20,7 @@ pub struct FunctionNVVM<'m> {
     val_labels: UnsafeCell<FxHashMap<Val<'m>, String>>,
     counter: UnsafeCell<usize>,
     has_panic_block: UnsafeCell<bool>,
-    eh_personality: UnsafeCell<Option<Val<'m>>>,
 }
-
 
 impl PartialEq for FunctionNVVM<'_> {
     fn eq(&self, other: &Self) -> bool {
@@ -31,12 +29,13 @@ impl PartialEq for FunctionNVVM<'_> {
 }
 
 impl<'m> FunctionNVVM<'m> {
-    pub fn new(name: String, 
-        is_kernel: bool, 
+    pub fn new(
+        name: String,
+        is_kernel: bool,
         ret: TyNVVM<'m>,
         args: Vec<Val<'m>>,
-        ty: TyNVVM<'m>) -> Self 
-    {
+        ty: TyNVVM<'m>,
+    ) -> Self {
         Self {
             is_kernel,
             name,
@@ -48,7 +47,6 @@ impl<'m> FunctionNVVM<'m> {
             val_labels: UnsafeCell::new(FxHashMap::default()),
             counter: UnsafeCell::new(0),
             has_panic_block: UnsafeCell::new(false),
-            eh_personality: UnsafeCell::new(None),
         }
     }
 
@@ -56,16 +54,21 @@ impl<'m> FunctionNVVM<'m> {
         name: String,
         ret: TyNVVM<'m>,
         args: Vec<Val<'m>>,
-        module: &mut ModuleNVVM<'m>) -> Self
-    {
-        let ty = module.ty_from_type(TypeNVVM::Fn(args.iter().map(|a| {
-            // all values should be params
-            if let ValueNVVM::Param { ty, .. } = a.0 {
-                *ty
-            } else {
-                panic!("Function arguments should be params");
-            }
-        }).collect(), ret));
+        module: &mut ModuleNVVM<'m>,
+    ) -> Self {
+        let ty = module.ty_from_type(TypeNVVM::Fn(
+            args.iter()
+                .map(|a| {
+                    // all values should be params
+                    if let ValueNVVM::Param { ty, .. } = a.0 {
+                        *ty
+                    } else {
+                        panic!("Function arguments should be params");
+                    }
+                })
+                .collect(),
+            ret,
+        ));
         Self {
             is_kernel: false,
             name,
@@ -77,7 +80,6 @@ impl<'m> FunctionNVVM<'m> {
             val_labels: UnsafeCell::new(FxHashMap::default()),
             counter: UnsafeCell::new(0),
             has_panic_block: UnsafeCell::new(false),
-            eh_personality: UnsafeCell::new(None),
         }
     }
 
@@ -121,18 +123,6 @@ impl<'m> FunctionNVVM<'m> {
     pub fn create_val_label(&self, val: Val<'m>, name: String) {
         unsafe {
             (*self.val_labels.get()).insert(val, name);
-        }
-    }
-
-    pub fn assign_eh_personality(&self, val: Val<'m>) {
-        unsafe {
-            *self.eh_personality.get() = Some(val);
-        }
-    }
-
-    pub fn get_eh_personality(&self) -> Val<'m> {
-        unsafe {
-            (*self.eh_personality.get()).unwrap()
         }
     }
 
@@ -192,14 +182,12 @@ impl<'m> FunctionNVVM<'m> {
                 module.use_intrinsic("llvm.trap");
                 //println!("using intrinsic llvm.trap");
                 s.push_str("  unreachable\n");
-            
             }
         }
 
         s.push_str("}\n");
         s
-    } 
-    
+    }
 
     pub fn define(&self, module: &mut ModuleNVVM<'m>) -> String {
         let mut s = format!("declare ");

@@ -216,9 +216,9 @@ use rustc_hir::lang_items::LangItem;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::interpret::{AllocId, ErrorHandled, GlobalAlloc, Scalar};
 use rustc_middle::mir::mono::{InstantiationMode, MonoItem};
-use rustc_middle::mir::traversal;
 use rustc_middle::mir::visit::Visitor as MirVisitor;
 use rustc_middle::mir::{self, Location, MentionedItem};
+use rustc_middle::mir::{traversal, UnwindTerminateReason};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::adjustment::{CustomCoerceUnsized, PointerCoercion};
 use rustc_middle::ty::layout::ValidityRequirement;
@@ -339,7 +339,7 @@ fn collect_items_rec<'tcx>(
     recursion_depths: &mut DefIdMap<usize>,
     recursion_limit: Limit,
     mode: CollectionMode,
-    is_in_kernel: bool
+    is_in_kernel: bool,
 ) {
     if mode == CollectionMode::UsedItems {
         if !state.visited.lock_mut().insert(starting_item.node) {
@@ -408,11 +408,18 @@ fn collect_items_rec<'tcx>(
                     _ if tcx.is_kernel(def_id) => false,
                     _ => bug!(),
                 };
-                
+
                 // Nested statics have no type.
                 if !nested {
                     let ty = instance.ty(tcx, ty::ParamEnv::reveal_all());
-                    visit_drop_use(tcx, ty, true, is_in_kernel, starting_item.span, &mut used_items);
+                    visit_drop_use(
+                        tcx,
+                        ty,
+                        true,
+                        is_in_kernel,
+                        starting_item.span,
+                        &mut used_items,
+                    );
                 }
 
                 if let Ok(alloc) = tcx.eval_static_initializer(def_id) {
@@ -538,7 +545,7 @@ fn collect_items_rec<'tcx>(
                 recursion_depths,
                 recursion_limit,
                 CollectionMode::UsedItems,
-                is_in_kernel
+                is_in_kernel,
             );
         }
     }
@@ -553,7 +560,7 @@ fn collect_items_rec<'tcx>(
             recursion_depths,
             recursion_limit,
             CollectionMode::MentionedItems,
-            is_in_kernel
+            is_in_kernel,
         );
     }
 
@@ -835,7 +842,14 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
                 self.used_mentioned_items.insert(MentionedItem::Fn(callee_ty));
                 let callee_ty = self.monomorphize(callee_ty);
                 self.check_fn_args_move_size(callee_ty, args, *fn_span, location);
-                visit_fn_use(self.tcx, callee_ty, true, source, self.is_in_kernel, &mut self.used_items)
+                visit_fn_use(
+                    self.tcx,
+                    callee_ty,
+                    true,
+                    source,
+                    self.is_in_kernel,
+                    &mut self.used_items,
+                )
             }
             mir::TerminatorKind::Drop { ref place, .. } => {
                 let ty = place.ty(self.body, self.tcx).ty;
@@ -852,7 +866,14 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
                             // *Before* monomorphizing, record that we already handled this mention.
                             self.used_mentioned_items.insert(MentionedItem::Fn(fn_ty));
                             let fn_ty = self.monomorphize(fn_ty);
-                            visit_fn_use(self.tcx, fn_ty, false, source, self.is_in_kernel, self.used_items);
+                            visit_fn_use(
+                                self.tcx,
+                                fn_ty,
+                                false,
+                                source,
+                                self.is_in_kernel,
+                                self.used_items,
+                            );
                         }
                         mir::InlineAsmOperand::SymStatic { def_id } => {
                             let instance = Instance::mono(self.tcx, def_id);
@@ -879,6 +900,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
             mir::TerminatorKind::UnwindTerminate(reason) => {
                 push_mono_lang_item(self, reason.lang_item());
             }
+
             mir::TerminatorKind::Goto { .. }
             | mir::TerminatorKind::SwitchInt { .. }
             | mir::TerminatorKind::UnwindResume
@@ -1006,7 +1028,11 @@ fn visit_instance_use<'tcx>(
 
 /// Returns `true` if we should codegen an instance in the local crate, or returns `false` if we
 /// can just link to the upstream crate and therefore don't need a mono item.
-pub(crate) fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>, is_in_kernel: bool) -> bool {
+pub(crate) fn should_codegen_locally<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+    is_in_kernel: bool,
+) -> bool {
     let Some(def_id) = instance.def.def_id_if_not_guaranteed_local_codegen() else {
         return true;
     };
@@ -1204,9 +1230,8 @@ fn create_mono_items_for_vtable_methods<'tcx>(
                     // all super trait items already covered, so skip them.
                     None
                 }
-                VtblEntry::Method(instance) => {
-                    Some(*instance).filter(|instance| should_codegen_locally(tcx, *instance, is_in_kernel))
-                }
+                VtblEntry::Method(instance) => Some(*instance)
+                    .filter(|instance| should_codegen_locally(tcx, *instance, is_in_kernel)),
             })
             .map(|item| create_fn_mono_item(tcx, item, source));
         output.extend(methods);
@@ -1217,7 +1242,12 @@ fn create_mono_items_for_vtable_methods<'tcx>(
 }
 
 /// Scans the CTFE alloc in order to find function pointers and statics that must be monomorphized.
-fn collect_alloc<'tcx>(tcx: TyCtxt<'tcx>, alloc_id: AllocId, is_in_kernel: bool, output: &mut MonoItems<'tcx>) {
+fn collect_alloc<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    alloc_id: AllocId,
+    is_in_kernel: bool,
+    output: &mut MonoItems<'tcx>,
+) {
     match tcx.global_alloc(alloc_id) {
         GlobalAlloc::Static(def_id) => {
             assert!(!tcx.is_thread_local_static(def_id));
@@ -1343,7 +1373,14 @@ fn visit_mentioned_item<'tcx>(
                 // for "mentioned" item collection.
                 // We can set `is_direct_call`; that just means we'll skip a bunch of shims that anyway
                 // can't have their own failing constants.
-                visit_instance_use(tcx, instance, /*is_direct_call*/ true, is_in_kernel, span, output);
+                visit_instance_use(
+                    tcx,
+                    instance,
+                    /*is_direct_call*/ true,
+                    is_in_kernel,
+                    span,
+                    output,
+                );
             }
         }
         MentionedItem::Drop(ty) => {
@@ -1358,7 +1395,14 @@ fn visit_mentioned_item<'tcx>(
             if (target_ty.is_trait() && !source_ty.is_trait())
                 || (target_ty.is_dyn_star() && !source_ty.is_dyn_star())
             {
-                create_mono_items_for_vtable_methods(tcx, target_ty, source_ty, span, is_in_kernel, output);
+                create_mono_items_for_vtable_methods(
+                    tcx,
+                    target_ty,
+                    source_ty,
+                    span,
+                    is_in_kernel,
+                    output,
+                );
             }
         }
         MentionedItem::Closure(source_ty) => {
@@ -1386,7 +1430,9 @@ fn collect_const_value<'tcx>(
         mir::ConstValue::Scalar(Scalar::Ptr(ptr, _size)) => {
             collect_alloc(tcx, ptr.provenance.alloc_id(), is_in_kernel, output)
         }
-        mir::ConstValue::Indirect { alloc_id, .. } => collect_alloc(tcx, alloc_id, is_in_kernel, output),
+        mir::ConstValue::Indirect { alloc_id, .. } => {
+            collect_alloc(tcx, alloc_id, is_in_kernel, output)
+        }
         mir::ConstValue::Slice { data, meta: _ } => {
             for &prov in data.inner().provenance().ptrs().values() {
                 collect_alloc(tcx, prov.alloc_id(), is_in_kernel, output);

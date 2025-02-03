@@ -168,7 +168,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
     let mir = if cx.target_spec().arch == "nvvm" {
         cx.tcx().instance_device_mir(instance.def)
-    }else {
+    } else {
         cx.tcx().instance_mir(instance.def)
     };
 
@@ -181,7 +181,13 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let mut start_bx = Bx::build(cx, start_llbb);
 
     if mir.basic_blocks.iter().any(|bb| {
-        bb.is_cleanup || matches!(bb.terminator().unwind(), Some(mir::UnwindAction::Terminate(_)))
+        bb.is_cleanup
+            || matches!(
+                bb.terminator().unwind(),
+                Some(mir::UnwindAction::Terminate(
+                    mir::UnwindTerminateReason::Abi | mir::UnwindTerminateReason::InCleanup
+                ))
+            )
     }) {
         start_bx.set_personality_fn(cx.eh_personality());
     }

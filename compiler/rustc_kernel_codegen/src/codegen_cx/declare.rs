@@ -1,12 +1,22 @@
 use rustc_codegen_ssa::traits::{BaseTypeMethods, LayoutTypeMethods, PreDefineMethods};
 use rustc_middle::ty::{self, Ty};
-use rustc_target::abi::{call::{ArgAbi, ArgAttribute, CastTarget, PassMode, Reg, RegKind}, Abi, Scalar, Size};
+use rustc_target::abi::{
+    call::{ArgAbi, ArgAttribute, CastTarget, PassMode, Reg, RegKind},
+    Abi, Scalar, Size,
+};
 
-use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeNVVM}, value::{Val, ValueNVVM}};
+use crate::{
+    function::FunctionNVVM,
+    ty::{TyNVVM, TypeNVVM},
+    value::{Val, ValueNVVM},
+};
 
-use super::{abi::{find_scalarpair_types, Lower}, CodegenCx};
+use super::{
+    abi::{find_scalarpair_types, Lower},
+    CodegenCx,
+};
 
-impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
+impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn predefine_static(
         &self,
         def_id: rustc_hir::def_id::DefId,
@@ -40,13 +50,22 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
             Err(e) => {
                 // KURVA
                 todo!()
-            },
+            }
         };
 
         let mut arg_count = 0;
-        
-        let mut args = vec![];// = abi.args.iter().enumerate().map(|(idx, arg)| {
 
+        let mut args = vec![]; // = abi.args.iter().enumerate().map(|(idx, arg)| {
+
+        // if the return type is indirect, we need to add a pointer to the return type
+        // as argument
+        if abi.ret.is_indirect() {
+            let ty = self.backend_type(abi.ret.layout);
+            let value = ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty };
+            let val = module.create_val(value, Some(ty));
+            args.push(val);
+            arg_count += 1;
+        }
 
         for (idx, arg) in abi.args.iter().enumerate() {
             // lower the type to the NVVM type
@@ -63,34 +82,42 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
                                 Some(t) => t,
                                 None => panic!("Expected scalar pair"),
                             };
-                            let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty: ty1};
-                            let value2 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count + 1, ty: ty2};
-                            (module.create_val(value1, Some(ty1)), module.create_val(value2, Some(ty2)))
+                            let value1 = ValueNVVM::Param {
+                                func_name: symbol_name.to_string(),
+                                idx: arg_count,
+                                ty: ty1,
+                            };
+                            let value2 = ValueNVVM::Param {
+                                func_name: symbol_name.to_string(),
+                                idx: arg_count + 1,
+                                ty: ty2,
+                            };
+                            (
+                                module.create_val(value1, Some(ty1)),
+                                module.create_val(value2, Some(ty2)),
+                            )
                         }
                         _ => panic!("Expected scalar pair"),
                     };
-
 
                     args.push(val1);
                     args.push(val2);
                     arg_count += 2;
                 }
-                PassMode::Indirect { 
-                    attrs,
-                    meta_attrs,
-                    on_stack,
-                } => {
+                PassMode::Indirect { attrs, meta_attrs, on_stack } => {
                     // we need to pass a pointer to the value
                     // CHECK: is this correct?
                     let ty = self.backend_type(arg.layout);
-                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty};
+                    let value =
+                        ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty };
                     let val = module.create_val(value, Some(ty));
                     args.push(val);
                     arg_count += 1;
                 }
                 PassMode::Cast { pad_i32, ref cast } => {
                     let ty = cast.nvvm_type(self);
-                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty};
+                    let value =
+                        ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty };
                     let val = module.create_val(value, Some(ty));
                     args.push(val);
                     arg_count += 1;
@@ -98,25 +125,34 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
                 PassMode::Direct(_) => {
                     // basic case, lower the type and add it to the list
                     let ty = self.backend_type(arg.layout);
-                    let value = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty};
+                    let value =
+                        ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty };
                     let val = module.create_val(value, Some(ty));
                     args.push(val);
                     arg_count += 1;
                 }
             }
-            
         }
-        let ret = self.backend_type(abi.ret.layout);
+        let ret = if abi.ret.is_indirect() {
+            self.type_void()
+        } else {
+            self.backend_type(abi.ret.layout)
+        };
 
         // build the type
-        let ty = module.ty_from_type(TypeNVVM::Fn(args.iter().map(|a| {
-            // all values should be params
-            if let ValueNVVM::Param { ty, .. } = a.0 {
-                *ty
-            } else {
-                panic!("Function arguments should be params");
-            }
-        }).collect(), ret));
+        let ty = module.ty_from_type(TypeNVVM::Fn(
+            args.iter()
+                .map(|a| {
+                    // all values should be params
+                    if let ValueNVVM::Param { ty, .. } = a.0 {
+                        *ty
+                    } else {
+                        panic!("Function arguments should be params");
+                    }
+                })
+                .collect(),
+            ret,
+        ));
 
         let mut f = FunctionNVVM::new(symbol_name.to_string(), is_kernel, ret, args, ty);
 
@@ -128,7 +164,6 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx>{
         // if the function is a kernel, add a kernel interface
     }
 }
-
 
 trait NVVMType<'m, 'tcx> {
     fn nvvm_type(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m>;
@@ -174,24 +209,20 @@ impl<'m, 'tcx> NVVMType<'m, 'tcx> for CastTarget {
     }
 }
 
-impl <'m, 'tcx> NVVMType<'m, 'tcx> for Reg {
+impl<'m, 'tcx> NVVMType<'m, 'tcx> for Reg {
     fn nvvm_type(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m> {
         match self.kind {
-            RegKind::Integer => {
-                match self.size.bytes() {
-                    1 => cx.type_i8(),
-                    4 => cx.type_i32(),
-                    8 => cx.type_i64(),
-                    _ => panic!("Unsupported integer size"),
-                }
-            }
-            RegKind::Float => {
-                match self.size.bytes() {
-                    4 => cx.type_f32(),
-                    8 => cx.type_f64(),
-                    _ => panic!("Unsupported float size"),
-                }
-            }
+            RegKind::Integer => match self.size.bytes() {
+                1 => cx.type_i8(),
+                4 => cx.type_i32(),
+                8 => cx.type_i64(),
+                _ => panic!("Unsupported integer size"),
+            },
+            RegKind::Float => match self.size.bytes() {
+                4 => cx.type_f32(),
+                8 => cx.type_f64(),
+                _ => panic!("Unsupported float size"),
+            },
             _ => panic!("Unsupported register kind"),
         }
     }

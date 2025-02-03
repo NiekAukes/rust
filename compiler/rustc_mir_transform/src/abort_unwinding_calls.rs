@@ -24,6 +24,16 @@ pub struct AbortUnwindingCalls;
 
 impl<'tcx> MirPass<'tcx> for AbortUnwindingCalls {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+        self.run_pass_inner(tcx, body, false);
+    }
+}
+
+impl<'tcx> AbortUnwindingCalls {
+    pub fn run_pass_for_device_code(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+        self.run_pass_inner(tcx, body, true);
+    }
+
+    fn run_pass_inner(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, device_code: bool) {
         let def_id = body.source.def_id();
         let kind = tcx.def_kind(def_id);
 
@@ -32,20 +42,27 @@ impl<'tcx> MirPass<'tcx> for AbortUnwindingCalls {
         if !kind.is_fn_like() {
             return;
         }
-        let a = 1;
+
         // Here we test for this function itself whether its ABI allows
         // unwinding or not.
-        let body_ty = tcx.type_of(def_id).skip_binder();
-        let body_abi = match body_ty.kind() {
-            ty::FnDef(..) => body_ty.fn_sig(tcx).abi(),
-            ty::Closure(..) => Abi::RustCall,
-            ty::CoroutineClosure(..) => Abi::RustCall,
-            ty::Coroutine(..) => Abi::Rust,
-            ty::Error(_) => return,
-            _ if tcx.is_kernel(def_id) => return, //TODO check if this is accurate
-            _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
+        let body_can_unwind = if !device_code {
+            let body_ty = tcx.type_of(def_id).skip_binder();
+            let body_abi = match body_ty.kind() {
+                ty::FnDef(..) => body_ty.fn_sig(tcx).abi(),
+                ty::Closure(..) => Abi::RustCall,
+                ty::CoroutineClosure(..) => Abi::RustCall,
+                ty::Coroutine(..) => Abi::Rust,
+                ty::Error(_) => return,
+
+                // if we are working with a kernel, we know that the ABI is Rust
+                _ if !device_code && tcx.is_kernel(def_id) => Abi::Rust,
+                _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
+            };
+            layout::fn_can_unwind(tcx, Some(def_id), body_abi)
+        } else {
+            // device code may never unwind
+            false
         };
-        let body_can_unwind = layout::fn_can_unwind(tcx, Some(def_id), body_abi);
 
         // Look in this function body for any basic blocks which are terminated
         // with a function call, and whose function we're calling may unwind.
@@ -104,9 +121,15 @@ impl<'tcx> MirPass<'tcx> for AbortUnwindingCalls {
             }
         }
 
+        let should_do_unreachable = device_code || tcx.is_kernel(def_id);
+
         for id in calls_to_terminate {
             let cleanup = body.basic_blocks_mut()[id].terminator_mut().unwind_mut().unwrap();
-            *cleanup = UnwindAction::Terminate(UnwindTerminateReason::Abi);
+            if should_do_unreachable {
+                *cleanup = UnwindAction::Unreachable;
+            } else {
+                *cleanup = UnwindAction::Terminate(UnwindTerminateReason::Abi);
+            }
         }
 
         for id in cleanups_to_remove {

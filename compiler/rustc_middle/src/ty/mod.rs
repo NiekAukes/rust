@@ -1847,7 +1847,6 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-
     // FIXME(@lcnr): Remove this function.
     pub fn get_attrs_unchecked(self, did: DefId) -> &'tcx [ast::Attribute] {
         if let Some(did) = did.as_local() {

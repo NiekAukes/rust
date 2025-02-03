@@ -1,7 +1,20 @@
-use rustc_codegen_ssa::{mir::{operand::{OperandRef, OperandValue}, place::{PlaceRef, PlaceValue}}, traits::{AbiBuilderMethods, ArgAbiMethods, BuilderMethods}, MemFlags};
-use rustc_middle::{bug, ty::{layout::{FnAbiOfHelpers, LayoutOfHelpers}, Ty}};
-use rustc_target::abi::call::{ArgAbi, PassMode};
 use rustc_codegen_ssa::traits::ConstMethods;
+use rustc_codegen_ssa::{
+    mir::{
+        operand::{OperandRef, OperandValue},
+        place::{PlaceRef, PlaceValue},
+    },
+    traits::{AbiBuilderMethods, ArgAbiMethods, BuilderMethods},
+    MemFlags,
+};
+use rustc_middle::{
+    bug,
+    ty::{
+        layout::{FnAbiOfHelpers, LayoutOfHelpers},
+        Ty,
+    },
+};
+use rustc_target::abi::call::{ArgAbi, PassMode};
 
 use crate::{codegen_cx::CodegenCx, ty::TyNVVM, value::Val};
 
@@ -47,34 +60,31 @@ impl<'tcx> FnAbiOfHelpers<'tcx> for Builder<'_, '_, 'tcx> {
         err: rustc_middle::ty::layout::FnAbiError<'tcx>,
         span: rustc_span::Span,
         fn_abi_request: rustc_middle::ty::layout::FnAbiRequest<'tcx>,
-    ) -> <Self::FnAbiOfResult as rustc_middle::ty::layout::MaybeResult<&'tcx rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>>>::Error {
+    ) -> <Self::FnAbiOfResult as rustc_middle::ty::layout::MaybeResult<
+        &'tcx rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
+    >>::Error {
         todo!()
     }
-    
 }
 
 impl<'tcx> LayoutOfHelpers<'tcx> for Builder<'_, '_, 'tcx> {
     type LayoutOfResult = rustc_middle::ty::layout::TyAndLayout<'tcx>;
-    
+
     fn handle_layout_err(
         &self,
         err: rustc_middle::ty::layout::LayoutError<'tcx>,
         span: rustc_span::Span,
         ty: Ty<'tcx>,
-    ) -> <Self::LayoutOfResult as rustc_middle::ty::layout::MaybeResult<rustc_middle::ty::layout::TyAndLayout<'tcx>>>::Error {
+    ) -> <Self::LayoutOfResult as rustc_middle::ty::layout::MaybeResult<
+        rustc_middle::ty::layout::TyAndLayout<'tcx>,
+    >>::Error {
         todo!()
     }
 }
 
-
 pub trait ArgAbiExt<'m, 'tcx> {
     fn memory_ty(&self, cx: &CodegenCx<'m, 'tcx>) -> TyNVVM<'m>;
-    fn store(
-        &self,
-        bx: &mut Builder<'_, 'm, 'tcx>,
-        val: Val<'m>,
-        dst: PlaceRef<'tcx, Val<'m>>,
-    );
+    fn store(&self, bx: &mut Builder<'_, 'm, 'tcx>, val: Val<'m>, dst: PlaceRef<'tcx, Val<'m>>);
     fn store_fn_arg(
         &self,
         bx: &mut Builder<'_, 'm, 'tcx>,
@@ -94,12 +104,7 @@ impl<'m, 'tcx> ArgAbiExt<'m, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
     /// place for the original Rust type of this argument/return.
     /// Can be used for both storing formal arguments into Rust variables
     /// or results of call/invoke instructions into their destinations.
-    fn store(
-        &self,
-        bx: &mut Builder<'_, 'm, 'tcx>,
-        val: Val<'m>,
-        dst: PlaceRef<'tcx, Val<'m>>,
-    ) {
+    fn store(&self, bx: &mut Builder<'_, 'm, 'tcx>, val: Val<'m>, dst: PlaceRef<'tcx, Val<'m>>) {
         match &self.mode {
             PassMode::Ignore => {}
             // Sized indirect arguments

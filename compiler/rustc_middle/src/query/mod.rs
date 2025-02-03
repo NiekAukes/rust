@@ -19,11 +19,11 @@ use crate::middle::resolve_bound_vars::{ObjectLifetimeDefault, ResolveBoundVars,
 use crate::middle::stability::{self, DeprecationEntry};
 use crate::mir;
 use crate::mir::interpret::GlobalId;
+use crate::mir::interpret::{AllocDecodingSession, LitToConstError, LitToConstInput};
 use crate::mir::interpret::{
     EvalStaticInitializerRawResult, EvalToAllocationRawResult, EvalToConstValueResult,
     EvalToValTreeResult,
 };
-use crate::mir::interpret::{LitToConstError, LitToConstInput, AllocDecodingSession};
 use crate::mir::mono::CodegenUnit;
 use crate::query::erase::{erase, restore, Erase};
 use crate::query::plumbing::{
@@ -89,7 +89,6 @@ use std::mem;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
-
 
 pub mod erase;
 mod keys;
@@ -593,7 +592,6 @@ rustc_queries! {
     query optimized_kernel_mir(key: DefId) -> &'tcx mir::Body<'tcx> {
         desc { |tcx| "optimizing kernel MIR for `{}`", tcx.def_path_str(key) }
         cache_on_disk_if { key.is_local() }
-        separate_provide_extern
     }
 
     /// Summarizes coverage IDs inserted by the `InstrumentCoverage` MIR pass
@@ -1935,7 +1933,7 @@ rustc_queries! {
     query codegen_unit(sym: Symbol) -> &'tcx CodegenUnit<'tcx> {
         desc { "getting codegen unit `{sym}`" }
     }
-    
+
     query kernel_unit(sym: Symbol) -> &'tcx CodegenUnit<'tcx> {
         desc { "getting kernel codegen unit" }
     }

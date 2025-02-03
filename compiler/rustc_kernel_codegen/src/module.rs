@@ -4,7 +4,12 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::DefId;
 use rustc_middle::{mir::interpret::AllocId, ty::Ty};
 
-use crate::{function::FunctionNVVM, ty::{TyNVVM, TypeHints, TypeNVVM}, value::{Val, ValueNVVM}, Arena, Global, GlobalNVVM};
+use crate::{
+    function::FunctionNVVM,
+    ty::{TyNVVM, TypeHints, TypeNVVM},
+    value::{Val, ValueNVVM},
+    Arena, Global, GlobalNVVM,
+};
 
 pub trait Assemble<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String;
@@ -28,17 +33,13 @@ pub struct ModuleNVVM<'m> {
     pub metadata: Metadata<'m>,
     pub arena: &'m Arena<'m>,
 
-
     // internal state for assembling the module
     pub tylabels: FxHashMap<TyNVVM<'m>, String>,
     counter: usize,
 }
 
-
 impl<'m> ModuleNVVM<'m> {
-    pub fn new(
-        arena: &'m Arena<'m>,
-    ) -> Self {
+    pub fn new(arena: &'m Arena<'m>) -> Self {
         let mut s = Self {
             functions: FxHashMap::default(),
             defrefs: FxHashMap::default(),
@@ -46,10 +47,7 @@ impl<'m> ModuleNVVM<'m> {
             intrinsics: FxHashMap::default(),
             globals: FxHashMap::default(),
             allocs: FxHashMap::default(),
-            metadata: Metadata {
-                version: (1, 0),
-                kernel: None,
-            },
+            metadata: Metadata { version: (1, 0), kernel: None, entries: FxHashMap::default() },
             types: Vec::new(),
             values: Vec::new(),
             valtypes: FxHashMap::default(),
@@ -69,23 +67,22 @@ impl<'m> ModuleNVVM<'m> {
         alloc.name = format!("global{}", self.allocs.len());
 
         let alloc = self.arena.dropless.alloc(alloc);
-        
+
         // create a value for the allocation
-        let ty_u8 = self.ty_from_type(TypeNVVM::I(8));
-        let ty = if let Some(ref d) = alloc.data {
-             self.ty_from_type(TypeNVVM::Array(ty_u8, d.len()))
+        let ty = if let Some(ty) = alloc.ty {
+            ty
         } else {
+            let ty_u8 = self.ty_from_type(TypeNVVM::I(8));
             self.ty_from_type(TypeNVVM::Pointer(ty_u8))
         };
-        let ty_ptr = self.ty_from_type(TypeNVVM::Pointer(ty));
-        let value = self.create_val(ValueNVVM::Global(alloc), Some(ty_ptr));
-
         let global = Global::new_unchecked(alloc);
-        
+        let ty_ptr = self.ty_from_type(TypeNVVM::Pointer(ty));
+        let value = self.create_val(ValueNVVM::Global(global), Some(ty_ptr));
+
         self.allocs.insert(global, value);
         value
     }
-    
+
     pub fn add_function(&mut self, def_id: DefId, function: FunctionNVVM<'m>) {
         let function = self.arena.dropless.alloc(function);
         self.functions.insert(def_id, function);
@@ -147,7 +144,10 @@ impl<'m> ModuleNVVM<'m> {
 
     pub fn create_ty_label(&mut self, ty: TyNVVM<'m>) -> &str {
         let l = self.counter;
-        self.tylabels.entry(ty).or_insert_with(|| { self.counter += 1; format!("%{}", l) })
+        self.tylabels.entry(ty).or_insert_with(|| {
+            self.counter += 1;
+            format!("%{}", l)
+        })
     }
 
     pub fn get_label_of_ty(&self, ty: TyNVVM<'m>) -> Option<&String> {
@@ -170,7 +170,7 @@ impl<'m> ModuleNVVM<'m> {
         }
     }*/
 
-    pub fn get_intrinsic(&self, name: &str)-> Option<Val<'m>> {
+    pub fn get_intrinsic(&self, name: &str) -> Option<Val<'m>> {
         self.intrinsics.get(name).copied()
     }
 
@@ -187,12 +187,8 @@ impl<'m> ModuleNVVM<'m> {
     pub fn declare_adt(&mut self, def_id: DefId) -> Result<String, String> {
         let name = format!("adt{}", self.forward_decls.len());
         match self.forward_decls.try_insert(def_id, (name.clone(), None)) {
-            Ok(_) => {
-                Ok(name)
-            },
-            Err(_) => {
-                Err(name)
-            }
+            Ok(_) => Ok(name),
+            Err(_) => Err(name),
         }
     }
 
@@ -202,21 +198,27 @@ impl<'m> ModuleNVVM<'m> {
     }
 
     pub fn get_adt(&self, def_id: DefId) -> Option<(&str, TyNVVM<'m>)> {
-        let x: Option<&(String, Option<rustc_data_structures::intern::Interned<'m, TypeNVVM<'m>>>)> = self.forward_decls.get(&def_id);
-        if let Some((name, Some(val))) = x {
-            Some((name, *val))
-        } else {
-            None
-        }
+        let x: Option<&(
+            String,
+            Option<rustc_data_structures::intern::Interned<'m, TypeNVVM<'m>>>,
+        )> = self.forward_decls.get(&def_id);
+        if let Some((name, Some(val))) = x { Some((name, *val)) } else { None }
+    }
+
+    pub fn set_metadata(&mut self, val: Val<'m>, key: &'m str, node: MetadataNode<'m>) {
+        self.metadata.entries.insert((val, key), node);
+    }
+
+    pub fn get_metadata(&self, val: Val<'m>, key: &'m str) -> Option<&MetadataNode<'m>> {
+        self.metadata.entries.get(&(val, key))
     }
 }
-
 
 pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     let mut s = format!("; NVVM IR version {}\n", module.metadata.version.0);
     s.push_str("target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n");
     s.push_str("target triple = \"nvptx64-nvidia-cuda\"\n\n");
-    
+
     let mut kernel = None;
 
     println!("Assembling module");
@@ -259,7 +261,6 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
         }
     }
 
-
     //define the intrinsics used in the module
     let declared_intrinsics = module.declared_intrinsics.clone();
     for name in declared_intrinsics {
@@ -299,8 +300,12 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     if let Some(kernel) = kernel {
         let kernel_name = kernel.name.clone();
         s.push_str(&format!("!nvvm.annotations = !{{!1}}\n"));
-        s.push_str(&format!("!1 = !{{{}* @{}, !\"kernel\", i32 1}}\n", kernel.ty.assemble(module), kernel_name));
-        
+        s.push_str(&format!(
+            "!1 = !{{{}* @{}, !\"kernel\", i32 1}}\n",
+            kernel.ty.assemble(module),
+            kernel_name
+        ));
+
         s.push_str(&format!("!nvvmir.version = !{{!2}}\n"));
         s.push_str(&format!("!2 = !{{i32 {}, i32 {}}}\n", 2, 0));
     }
@@ -309,13 +314,18 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     s
 }
 
-
 #[derive(Debug)]
 pub struct Metadata<'m> {
     version: (u8, u8),
     kernel: Option<&'m FunctionNVVM<'m>>,
+    entries: FxHashMap<(Val<'m>, &'m str), MetadataNode<'m>>,
 }
 
+#[derive(Debug)]
+pub enum MetadataNode<'m> {
+    Identity,
+    REPLACE(Val<'m>),
+}
 
 impl PartialEq for Metadata<'_> {
     fn eq(&self, other: &Self) -> bool {
@@ -325,10 +335,7 @@ impl PartialEq for Metadata<'_> {
 
 impl<'m> Metadata<'m> {
     pub fn new(version: (u8, u8)) -> Self {
-        Self {
-            version,
-            kernel: None,
-        }
+        Self { version, kernel: None, entries: FxHashMap::default() }
     }
 
     pub fn set_kernel(&mut self, kernel: &'m FunctionNVVM<'m>) {

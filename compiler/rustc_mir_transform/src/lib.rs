@@ -19,6 +19,7 @@ extern crate tracing;
 #[macro_use]
 extern crate rustc_middle;
 
+use abort_unwinding_calls::AbortUnwindingCalls;
 use hir::ConstContext;
 use required_consts::RequiredConstsVisitor;
 use rustc_const_eval::util;
@@ -26,13 +27,15 @@ use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::steal::Steal;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::LocalDefId;
+use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_index::IndexVec;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::visit::Visitor as _;
 use rustc_middle::mir::{
-    tcx, traversal, AnalysisPhase, Body, CallSource, ClearCrossCrate, ConstOperand, ConstQualifs, LocalDecl, MirPass, MirPhase, Operand, Place, ProjectionElem, Promoted, RuntimePhase, Rvalue, SourceInfo, Statement, StatementKind, TerminatorKind, START_BLOCK
+    pretty, tcx, traversal, AnalysisPhase, Body, CallSource, ClearCrossCrate, ConstOperand,
+    ConstQualifs, LocalDecl, MirPass, MirPhase, Operand, Place, ProjectionElem, Promoted,
+    RuntimePhase, Rvalue, SourceInfo, Statement, StatementKind, TerminatorKind, START_BLOCK,
 };
 use rustc_middle::query;
 use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
@@ -625,31 +628,19 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
 /// Optimize the MIR and prepare it for codegen.
 fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
-    if tcx.is_kernel(did) {
-        // do not do any optimizations
-        // return the processed mir directly
-        bug!("optimized_mir should not be called yet for kernel functions");
-        tcx.processed_kernel_mir(did)
-    } else {
-        tcx.arena.alloc(inner_optimized_mir(tcx, did))
-    }
-}
+    // if tcx.is_kernel(did) {
+    //     // do not do any optimizations
+    //     // return the processed mir directly
+    //     bug!("optimized_mir should not be called yet for kernel functions")
+    //     //tcx.processed_kernel_mir(did)
+    // }
 
-/// Optimize the MIR and prepare it for codegen.
-/// specifically for kernel code
-fn optimized_kernel_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
-    assert!(tcx.is_kernel(did));
-    
-    tcx.arena.alloc(inner_optimized_mir(tcx, did))
-}
-
-fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
     if tcx.is_constructor(did.to_def_id()) {
         // There's no reason to run all of the MIR passes on constructors when
         // we can just output the MIR we want directly. This also saves const
         // qualification and borrow checking the trouble of special casing
         // constructors.
-        return shim::build_adt_ctor(tcx, did.to_def_id());
+        return tcx.arena.alloc(shim::build_adt_ctor(tcx, did.to_def_id()));
     }
 
     match tcx.hir().body_const_context(did) {
@@ -665,7 +656,7 @@ fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
     let mut body = remap_mir_for_const_eval_select(tcx, body, hir::Constness::NotConst);
 
     if body.tainted_by_errors.is_some() {
-        return body;
+        return tcx.arena.alloc(body);
     }
 
     // If `mir_drops_elaborated_and_const_checked` found that the current body has unsatisfiable
@@ -674,12 +665,26 @@ fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
     if let TerminatorKind::Unreachable = body.basic_blocks[START_BLOCK].terminator().kind
         && body.basic_blocks[START_BLOCK].statements.is_empty()
     {
-        return body;
+        return tcx.arena.alloc(body);
     }
 
     run_optimization_passes(tcx, &mut body);
 
-    body
+    tcx.arena.alloc(body)
+}
+
+/// Optimize the MIR and prepare it for codegen.
+/// specifically for kernel code
+fn optimized_kernel_mir(tcx: TyCtxt<'_>, did: DefId) -> &Body<'_> {
+    // get the normal optimized mir
+    let mut body = tcx.optimized_mir(did).clone();
+
+    AbortUnwindingCalls.run_pass_for_device_code(tcx, &mut body);
+
+    //run_optimization_passes(tcx, &mut body);
+    println!("optimized kernel mir for {:?}", tcx.def_path_str(did));
+
+    tcx.arena.alloc(body)
 }
 
 /// Fetch all the promoteds of an item and prepare their MIR bodies to be ready for
@@ -688,8 +693,6 @@ fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_
     if tcx.is_constructor(def.to_def_id()) {
         return tcx.arena.alloc(IndexVec::new());
     }
-
-    
 
     tcx.ensure_with_value().mir_borrowck(def);
     let mut promoted = tcx.mir_promoted(def).1.steal();
