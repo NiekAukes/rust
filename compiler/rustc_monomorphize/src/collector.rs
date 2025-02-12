@@ -829,7 +829,27 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
         let tcx = self.tcx;
         let in_kernel = self.is_in_kernel;
         let push_mono_lang_item = |this: &mut Self, lang_item: LangItem| {
+            // if we are in a kernel context, we don't want to collect panic lang items
+            if in_kernel
+                && (lang_item == LangItem::Panic
+                    || lang_item == LangItem::PanicInfo
+                    || lang_item == LangItem::PanicBoundsCheck
+                    || lang_item == LangItem::PanicMulOverflow
+                    || lang_item == LangItem::PanicAddOverflow
+                    || lang_item == LangItem::PanicShrOverflow
+                    || lang_item == LangItem::PanicShlOverflow
+                    || lang_item == LangItem::PanicCannotUnwind
+                    || lang_item == LangItem::PanicInCleanup)
+            {
+                return;
+            }
+
+            if in_kernel {
+                println!("including lang item {:?}", lang_item);
+            }
+
             let instance = Instance::mono(tcx, tcx.require_lang_item(lang_item, Some(source)));
+
             if should_codegen_locally(tcx, instance, in_kernel) {
                 this.used_items.push(create_fn_mono_item(tcx, instance, source));
             }

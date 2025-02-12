@@ -1825,7 +1825,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     | DefKind::Ctor(..)
                     | DefKind::AnonConst
                     | DefKind::InlineConst => self.mir_for_ctfe(def),
-                    _ if self.is_kernel(def) => todo!("kernel called from kernel!"),
+                    //_ if self.is_kernel(def) => todo!("kernel called from kernel!"),
                     // If the caller wants `mir_for_ctfe` of a function they should not be using
                     // `instance_mir`, so we'll assume const fn also wants the optimized version.
                     _ => self.optimized_kernel_mir(def),
