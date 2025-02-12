@@ -1,12 +1,9 @@
-use std::sync::Arc;
-
 use crate::build::expr::as_place::PlaceBuilder;
-use crate::build::expr::as_constant::as_constant_inner;
 use crate::build::scope::DropKind;
 use itertools::Itertools;
 use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_apfloat::Float;
-use rustc_ast::{attr, LitKind};
+use rustc_ast::attr;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sorted_map::SortedIndexMultiMap;
 use rustc_errors::ErrorGuaranteed;
@@ -15,21 +12,23 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{self as hir, BindingMode, ByRef, HirId, Node};
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_index::{Idx, IndexSlice, IndexVec};
-use rustc_infer::infer::{canonical, InferCtxt, TyCtxtInferExt};
+use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_middle::hir::place::PlaceBase as HirPlaceBase;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::region;
 use rustc_middle::mir::interpret::{Allocation, Scalar};
 use rustc_middle::mir::*;
 use rustc_middle::query::TyCtxtAt;
-use rustc_middle::thir::{self, Expr, ExprId, ExprKind, LintLevel, LocalVarId, Param, ParamId, PatKind, Thir};
-use rustc_middle::ty::{self, CanonicalUserType, CanonicalUserTypeAnnotation, Const as TyConst, GenericArgs, Region, RegionKind, Ty, TyCtxt, TyKind, TypeVisitableExt, UserType};
+use rustc_middle::thir::{self, ExprId, LintLevel, LocalVarId, Param, ParamId, PatKind, Thir};
+use rustc_middle::ty::{
+    self, CanonicalUserType, CanonicalUserTypeAnnotation, Region, RegionKind, Ty, TyCtxt, TyKind,
+    TypeVisitableExt, UserType,
+};
 use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_span::Symbol;
 use rustc_target::abi::{FieldIdx, VariantIdx};
 use rustc_target::spec::abi::Abi;
-
 
 use super::lints;
 
@@ -483,7 +482,6 @@ fn construct_fn<'tcx>(
         ))),
         ty::Closure(..) | ty::CoroutineClosure(..) | ty::FnDef(..) => None,
         ty => {
-            let a = 1;
             // we may have a kernel type, check CodegenFnAttrFlags
             if tcx.def_kind(fn_def) != DefKind::Fn {
                 span_bug!(span_with_body, "unexpected type of body: {ty:?}")
@@ -491,10 +489,10 @@ fn construct_fn<'tcx>(
             let flags = tcx.codegen_fn_attrs(fn_def).flags;
             if flags.contains(CodegenFnAttrFlags::KERNEL) {
                 None // same as FnDef
-            } else { 
-                span_bug!(span_with_body, "unexpected type of body: {ty:?}") 
+            } else {
+                span_bug!(span_with_body, "unexpected type of body: {ty:?}")
             }
-        },
+        }
     };
 
     if let Some(custom_mir_attr) =
@@ -1105,7 +1103,12 @@ pub(crate) fn parse_float_into_scalar(
     }
 }
 
-pub fn construct_literal_const<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, name: &str, code: &[u8]) -> Body<'tcx> {
+pub fn construct_literal_const<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    name: &str,
+    code: &[u8],
+) -> Body<'tcx> {
     // create a (const) body that will define the code as a [u8]
     let mut cfg = CFG { basic_blocks: IndexVec::new() };
 
@@ -1119,12 +1122,12 @@ pub fn construct_literal_const<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, name: &st
 
     // create &[u8] type
     let tykind = TyKind::Ref(
-        Region::new_from_kind(tcx, RegionKind::ReStatic), 
+        Region::new_from_kind(tcx, RegionKind::ReStatic),
         tcx.mk_ty_from_kind(TyKind::Slice(tcx.types.u8)),
-        Mutability::Not
+        Mutability::Not,
     );
     let code_ty = tcx.mk_ty_from_kind(tykind);
-    
+
     // create const allocation for the code
     let allocation = Allocation::from_bytes_byte_aligned_immutable(code);
     let allocation = tcx.mk_const_alloc(allocation);
@@ -1133,13 +1136,12 @@ pub fn construct_literal_const<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, name: &st
     println!("constant: {:?}", constant);
     let constant = ConstOperand { span: Span::default(), user_ty: None, const_: constant };
     let code_op = Operand::Constant(Box::new(constant));
-    
-    
+
     // create &str type
     let ty_kind = TyKind::Ref(
-        Region::new_from_kind(tcx, RegionKind::ReStatic), 
+        Region::new_from_kind(tcx, RegionKind::ReStatic),
         tcx.types.str_,
-        Mutability::Not
+        Mutability::Not,
     );
     let str_ty = tcx.mk_ty_from_kind(ty_kind);
 
@@ -1151,7 +1153,7 @@ pub fn construct_literal_const<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, name: &st
     let constant = ConstOperand { span: Span::default(), user_ty: None, const_: constant };
     let name_op = Operand::Constant(Box::new(constant));
 
-    let aggr_ty = tcx.type_of(def_id).instantiate_identity();//.instantiate(tcx, g_args);
+    let aggr_ty = tcx.type_of(def_id).instantiate_identity(); //.instantiate(tcx, g_args);
     let user_ty = UserType::Ty(aggr_ty);
     let canon_user_ty = CanonicalUserType {
         value: user_ty,
@@ -1170,10 +1172,13 @@ pub fn construct_literal_const<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, name: &st
     let kind = aggr_ty.kind();
     let g_args = match kind {
         ty::Adt(_, substs) => {
-            let g_args = substs.
-                iter().
-                map(|arg| ty::GenericArg::from(arg.expect_ty())).
-                collect::<Vec<_>>();
+            let g_args = substs
+                .iter()
+                .map(|arg| {
+                    let ty: Ty<'tcx> = tcx.statify_bound_vars(arg.expect_ty());
+                    ty::GenericArg::from(ty)
+                })
+                .collect::<Vec<_>>();
             g_args
         }
         _ => {
@@ -1192,7 +1197,6 @@ pub fn construct_literal_const<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, name: &st
         Some(user_ty_idx),
         None,
     );
-
 
     let mut indexvec = IndexVec::new();
     indexvec.push(name_op);

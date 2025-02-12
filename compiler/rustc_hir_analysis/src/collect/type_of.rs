@@ -1,14 +1,12 @@
 use core::ops::ControlFlow;
-use rustc_ast::{AttrKind, Attribute, PathSegment};
 use rustc_errors::{Applicability, StashKey};
-use rustc_hir::{self as hir, ExprKind, Path};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::HirId;
+use rustc_hir::{self as hir};
 use rustc_middle::query::plumbing::CyclePlaceholder;
-use rustc_middle::ty::print::{self, with_forced_trimmed_paths};
+use rustc_middle::ty::print::with_forced_trimmed_paths;
 use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt};
-use rustc_middle::util::bug;
 use rustc_span::symbol::Ident;
 use rustc_span::{sym, Span, DUMMY_SP};
 
@@ -310,7 +308,11 @@ fn get_path_containing_arg_in_pat<'hir>(
     arg_path
 }
 
-pub(super) fn type_of_inner(tcx: TyCtxt<'_>, def_id: LocalDefId, original: bool) -> ty::EarlyBinder<Ty<'_>> {
+pub(super) fn type_of_inner(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    original: bool,
+) -> ty::EarlyBinder<Ty<'_>> {
     use rustc_hir::*;
     use rustc_middle::ty::Ty;
 
@@ -436,13 +438,13 @@ pub(super) fn type_of_inner(tcx: TyCtxt<'_>, def_id: LocalDefId, original: bool)
             },
             ItemKind::Fn(fn_sig, ..) => {
                 // check if the `#[kernel]` attribute is present,
-                // if it is, the final type of this function will be a const &'static [u8]
+                // if it is, the final type of this function will be a kernel adt
                 if tcx.has_attr(def_id, sym::kernel) && !original {
                     // get the path of the kernel type
                     //let path = get_kernel_type_path(tcx, def_id);
                     //rustc_hir::Path
                     // create a hir Ty from the path
-                    
+
                     let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
                         //let guar = tcx
                         //    .dcx()
@@ -457,13 +459,14 @@ pub(super) fn type_of_inner(tcx: TyCtxt<'_>, def_id: LocalDefId, original: bool)
                     let mut types = vec![];
                     for arg in fn_sig.decl.inputs.iter() {
                         // it is important to strip some lifetimes here,
-                        // when the function has a reference parameter, 
+                        // when the function has a reference parameter,
                         // the lifetime of that reference will break the compiler
                         // for kernels, we supply the lifetime 'static
                         // todo
-                        types.push(icx.lower_ty(arg));
+                        let ty = tcx.statify_bound_vars(icx.lower_ty(arg));
+                        types.push(ty);
                     }
-                    
+
                     /*let args_ty = hir::Ty {
                         hir_id: hir::CRATE_HIR_ID,
                         kind: types,
@@ -480,7 +483,6 @@ pub(super) fn type_of_inner(tcx: TyCtxt<'_>, def_id: LocalDefId, original: bool)
                     println!("fn_args: {:?}", fn_args);
 
                     kernel_type.instantiate(tcx, &[dim_arg, fn_args])
-
                 } else {
                     let args = ty::GenericArgs::identity_for_item(tcx, def_id);
                     Ty::new_fn_def(tcx, def_id.to_def_id(), args)
@@ -703,5 +705,3 @@ pub fn type_alias_is_lazy<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> bool {
     }
     HasTait.visit_ty(tcx.hir().expect_item(def_id).expect_ty_alias().0).is_break()
 }
-
-

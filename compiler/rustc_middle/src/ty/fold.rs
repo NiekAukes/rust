@@ -4,6 +4,8 @@ use rustc_hir::def_id::DefId;
 
 pub use rustc_type_ir::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeSuperFoldable};
 
+use super::RegionKind;
+
 ///////////////////////////////////////////////////////////////////////////
 // Some sample folders
 
@@ -409,6 +411,31 @@ impl<'tcx> TyCtxt<'tcx> {
         let inner = self.replace_escaping_bound_vars_uncached(value.skip_binder(), delegate);
         let bound_vars = self.mk_bound_variable_kinds_from_iter(map.into_values());
         Binder::bind_with_vars(inner, bound_vars)
+    }
+
+    pub fn statify_bound_vars<T>(self, value: T) -> T
+    where
+        T: TypeFoldable<TyCtxt<'tcx>>,
+    {
+        struct Statify<'tcx> {
+            tcx: TyCtxt<'tcx>,
+        }
+        impl<'tcx> BoundVarReplacerDelegate<'tcx> for Statify<'tcx> {
+            fn replace_region(&mut self, _: ty::BoundRegion) -> ty::Region<'tcx> {
+                ty::Region::new_from_kind(self.tcx, RegionKind::ReStatic)
+            }
+
+            fn replace_ty(&mut self, bt: ty::BoundTy) -> Ty<'tcx> {
+                ty::Ty::new_bound(self.tcx, ty::INNERMOST, bt)
+            }
+
+            fn replace_const(&mut self, bv: ty::BoundVar, ty: Ty<'tcx>) -> ty::Const<'tcx> {
+                ty::Const::new_bound(self.tcx, ty::INNERMOST, bv, ty)
+            }
+        }
+
+        let ty = self.replace_escaping_bound_vars_uncached(value, Statify { tcx: self });
+        ty
     }
 }
 
