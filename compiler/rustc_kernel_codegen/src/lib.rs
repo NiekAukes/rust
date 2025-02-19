@@ -38,6 +38,7 @@ impl<'m> GlobalNVVM<'m> {
     pub fn new(data: Vec<u8>) -> Self {
         let consts = data.iter().map(|x| Const::U8(*x)).collect();
         let val = ValueNVVM::Constant(Const::Arr(consts));
+        
         Self { ty: None, val: Some(val), name: String::new() }
         //Self::Initialized { ty: None, data: Some(data), name: String::new() }
     }
@@ -75,16 +76,18 @@ impl<'m> Assemble<'m> for GlobalNVVM<'m> {
         // }
         match self.val {
             Some(ref val) => {
-                let ty = self.ty.unwrap_or_else(|| {
-                    let ty_i8 = module.ty_from_type(TypeNVVM::I(8));
-                    module.ty_from_type(TypeNVVM::Array(ty_i8, 1))
-                });
-                let ty_str = ty.assemble(module);
-                let data_str = match val {
-                    ValueNVVM::Constant(c) => c.assemble(module),
+                let (data_str, sz) = match val {
+                    ValueNVVM::Constant(c) => (c.assemble_for_const(module), c.size()),
                     //ValueNVVM::Instr(i) => i.assemble(module),
                     _ => todo!(),
                 };
+                let ty = self.ty.unwrap_or_else(|| {
+                    let ty_i8 = module.ty_from_type(TypeNVVM::I(8));
+                    // try to 
+                    module.ty_from_type(TypeNVVM::Array(ty_i8, sz))
+                });
+                let ty_str = ty.assemble(module);
+                
                 format!("@{} = constant {} {}", self.name, ty_str, data_str)
             }
             None => {

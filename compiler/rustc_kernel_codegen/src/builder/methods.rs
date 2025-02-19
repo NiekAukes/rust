@@ -701,8 +701,13 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         // add a pointer type to the return type
         rty = self.cx().type_pointer(rty);
 
+        let new_ptr_ty = self.cx().type_pointer(ty);
+
+        // the pointer value may need to be coerced to the right type
+        let nptr = self.convert_argument(ptr, new_ptr_ty);
+
         // build an inbounds getelementptr instruction
-        let instr = Instruction::InBoundsGep { ty, ptr, indices: indices.to_vec() };
+        let instr = Instruction::InBoundsGep { ty, ptr: nptr, indices: indices.to_vec() };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(rty));
 
         // add the instruction to the current basic block

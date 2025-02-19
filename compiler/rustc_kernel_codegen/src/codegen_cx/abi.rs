@@ -698,6 +698,26 @@ impl<'m, 'tcx> Lower<'m, 'tcx> for Scalar {
     }
 }
 
+
+fn find_scalarpairs<'m, 'tcx>(ty: TyNVVM<'m>, scalars: &mut Vec<TyNVVM<'m>>) {
+    match *ty {
+        TypeNVVM::Struct(ref tys) => {
+            for ty in tys.iter() {
+                find_scalarpairs(*ty, scalars);
+                if scalars.len() >= 2 {
+                    return;
+                }
+            }
+        },
+        TypeNVVM::F32 | TypeNVVM::F64 | TypeNVVM::I(_) 
+        | TypeNVVM::Pointer(_) | TypeNVVM::Array(_, _) => {
+            scalars.push(ty);
+        },
+        _ => bug!("find_first_scalarpair: {:?}", ty),
+        
+    }
+}
+
 pub fn find_scalarpair_types<'m, 'tcx>(
     cx: &CodegenCx<'m, 'tcx>,
     layout: TyAndLayout<'tcx, Ty<'tcx>>,
@@ -706,6 +726,15 @@ pub fn find_scalarpair_types<'m, 'tcx>(
         Abi::ScalarPair(a, b) => {
             let a = cx.scalar_type_at(a);
             let b = cx.scalar_type_at(b);
+            //let lty = cx.lower_layout(layout);
+            // let mut scalars = Vec::new();
+            // find_scalarpairs(lty, &mut scalars);
+            // if scalars.len() == 2 {
+            //     Some((scalars[0], scalars[1]))
+            // } else {
+                
+            //     panic!("find_scalarpair_types: {:?}, scalars found: {:?}, layout: {:#?}", lty, scalars, layout);
+            // }
             Some((a, b))
         }
         _ => None,

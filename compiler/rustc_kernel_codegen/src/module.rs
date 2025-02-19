@@ -235,6 +235,17 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     }
     s.push_str("\n");*/
 
+    // define the forward declarations used in the module
+    let forward_decls = module.forward_decls.clone();
+    for (_, (name, ty)) in forward_decls.iter() {
+        if let Some(ty) = ty {
+            let ty_str = ty.assemble(module);
+            s.push_str(&format!("%{} = type {}\n", name, ty_str));
+        } else {
+            s.push_str(&format!("%{} = type opaque\n", name));
+        }
+    }
+
     // define the globals used in the module
     let globals = module.globals.clone();
     for (_, global) in globals.iter() {

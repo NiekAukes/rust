@@ -360,6 +360,38 @@ impl<'m> ValueNVVM<'m> {
 
 impl<'m> Const {
     pub fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String {
+        // the same as assemble for const, but without the type
+        match self {
+            Const::I8(i) => format!("{}", i),
+            Const::I16(i) => format!("{}", i),
+            Const::I32(i) => format!("{}", i),
+            Const::I64(i) => format!("{}", i),
+            Const::I128(i) => format!("{}", i),
+            Const::U8(i) => format!("{}", i),
+            Const::U16(i) => format!("{}", i),
+            Const::U32(i) => format!("{}", i),
+            Const::U64(i) => format!("{}", i),
+            Const::U128(i) => format!("{}", i),
+            Const::F32(f) => format!("{}", f),
+            Const::F64(f) => format!("{}", f),
+            Const::Bool(b) => format!("{}", if *b { 1 } else { 0 }),
+            Const::Lit(s) => format!("\"{}\"", s),
+            Const::Undef => format!("undef"),
+            Const::Arr(l) => {
+                let mut s = format!("[");
+                for (i, c) in l.iter().enumerate() {
+                    if i != 0 {
+                        s.push_str(", ");
+                    }
+
+                    s.push_str(&c.assemble(module));
+                }
+                s.push_str("]");
+                s
+            }
+        }
+    }
+    pub fn assemble_for_const(&self, module: &mut ModuleNVVM<'m>) -> String {
         let ty = self.get_ty(module);
         let ty = ty.assemble(module);
         match self {
@@ -385,7 +417,7 @@ impl<'m> Const {
                         s.push_str(", ");
                     }
 
-                    s.push_str(&c.assemble(module));
+                    s.push_str(&c.assemble_for_const(module));
                 }
                 s.push_str("]");
                 s
