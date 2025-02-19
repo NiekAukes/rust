@@ -839,7 +839,9 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
                     || lang_item == LangItem::PanicShrOverflow
                     || lang_item == LangItem::PanicShlOverflow
                     || lang_item == LangItem::PanicCannotUnwind
-                    || lang_item == LangItem::PanicInCleanup)
+                    || lang_item == LangItem::PanicInCleanup
+                    || lang_item == LangItem::PanicDivZero
+                    || lang_item == LangItem::PanicRemZero)
             {
                 return;
             }

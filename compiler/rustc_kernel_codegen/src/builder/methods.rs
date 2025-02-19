@@ -925,6 +925,24 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
                 self.basic_block.add_instr(v);
                 v
             }
+            TypeNVVM::AdtDefForwardDecl(did, name) => {
+                let els = match self.cx().get_module_mut().get_adt(*did) {
+                    Some((_, ty)) => match ty.0 {
+                        TypeNVVM::Struct(els) => els,
+                        _ => panic!("Expected struct type, found {:?}", ty),
+                    },
+                    None => {
+                        panic!("Adt not found: {:?}", did);
+                    }
+                };
+                let subty = els[idx as usize];
+                let instr = Instruction::ExtractValue(ty, agg_val, idx);
+                let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(subty));
+
+                // add the instruction to the current basic block
+                self.basic_block.add_instr(v);
+                v
+            }
             _ => panic!("Expected struct type, found {:?}", ty),
         }
     }
