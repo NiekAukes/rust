@@ -4,7 +4,7 @@ use rustc_target::abi::{self, Size};
 
 use crate::{
     ty::TyNVVM,
-    value::{Const, Val, ValueNVVM},
+    value::{Const, Instruction, Val, ValueNVVM},
     GlobalNVVM,
 };
 
@@ -207,7 +207,13 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
         val: Self::Value,
         offset: rustc_target::abi::Size,
     ) -> Self::Value {
-        todo!()
+        let mut module = self.get_module_mut();
+        let instr = Instruction::InBoundsGep { 
+            ty: self.type_i8(), 
+            ptr: val,
+            indices: vec![self.const_usize(offset.bytes())],
+        };
+        module.create_val(ValueNVVM::Instr(instr), Some(self.type_i8()))
     }
 }
 

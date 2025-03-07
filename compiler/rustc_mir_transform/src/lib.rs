@@ -675,13 +675,12 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
 
 /// Optimize the MIR and prepare it for codegen.
 /// specifically for kernel code
-fn optimized_kernel_mir(tcx: TyCtxt<'_>, did: DefId) -> &Body<'_> {
+fn optimized_kernel_mir<'tcx>(tcx: TyCtxt<'tcx>, did: DefId) -> &'tcx Body<'tcx> {
     // get the normal optimized mir
     let mut body = tcx.optimized_mir(did).clone();
 
     AbortUnwindingCalls.run_pass_for_device_code(tcx, &mut body);
 
-    //run_optimization_passes(tcx, &mut body);
     println!("optimized kernel mir for {:?}", tcx.def_path_str(did));
 
     tcx.arena.alloc(body)

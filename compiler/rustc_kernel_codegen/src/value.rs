@@ -4,7 +4,7 @@ use crate::{
     basic_block::BasicBlock,
     function::FunctionNVVM,
     module::{Assemble, ModuleNVVM},
-    ty::{TyNVVM, TypeNVVM},
+    ty::{self, TyNVVM, TypeNVVM},
     Global, GlobalNVVM,
 };
 use rustc_data_structures::intern::Interned;
@@ -211,6 +211,12 @@ pub enum Instruction<'m> {
     },
 
     Resume(Val<'m>),
+
+
+
+    // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
+    LifetimeStart(Val<'m>, usize),
+    LifetimeEnd(Val<'m>, usize),
 }
 
 #[derive(Debug)]
@@ -489,8 +495,10 @@ impl<'m> Instruction<'m> {
             | Instruction::Unreachable
             | Instruction::MemCpy { .. }
             | Instruction::Switch { .. }
-            | Instruction::Resume(_) => false,
-            Instruction::Store { .. } => false,
+            | Instruction::Resume(_)
+            | Instruction::LifetimeStart(_, _)
+            | Instruction::LifetimeEnd(_, _) 
+            | Instruction::Store { .. } => false,
 
             Instruction::Call { ret_ty, .. } => ret_ty.size() != 0,
         }
@@ -788,7 +796,9 @@ impl<'m> Instruction<'m> {
                 format!("ret void")
             }
             Instruction::Ret(val) => {
-                format!("ret {}", val.assemble(module, func))
+                let ty = *module.valtypes.get(val).unwrap();
+                let ty_label = ty.assemble(module);
+                format!("ret {} {}", ty_label, val.assemble(module, func))
             }
 
             Instruction::Branch(bb) => {
@@ -925,6 +935,17 @@ impl<'m> Instruction<'m> {
 
             Instruction::Resume(val) => {
                 panic!("Resume instruction not supported in nvvm")
+            }
+
+
+
+
+            // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
+            Instruction::LifetimeStart(_, _) => {
+                panic!("Lifetime is a temporary instruction")
+            }
+            Instruction::LifetimeEnd(_, _) => {
+                panic!("Lifetime is a temporary instruction")
             }
         }
     }

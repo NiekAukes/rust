@@ -11,7 +11,7 @@ use crate::module::{Assemble, ModuleNVVM};
 #[derive(Debug)]
 pub enum TypeNVVM<'m> {
     Zst,
-    I(usize),
+    I(usize), // size of the integer in BITS!
     F32,
     F64,
     Pointer(TyNVVM<'m>),
@@ -61,7 +61,7 @@ impl<'m> TypeNVVM<'m> {
     pub fn size(&self) -> usize {
         match self {
             TypeNVVM::Zst => 0,
-            TypeNVVM::I(size) => *size,
+            TypeNVVM::I(size) => *size / 8,
             TypeNVVM::F32 => 4,
             TypeNVVM::F64 => 8,
             TypeNVVM::Pointer(_) => 8,

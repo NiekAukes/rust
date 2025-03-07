@@ -1,6 +1,8 @@
-use rustc_codegen_ssa::{mir::place::PlaceRef, traits::IntrinsicCallMethods};
+use rustc_codegen_ssa::{mir::{operand::OperandRef, place::PlaceRef}, traits::{ConstMethods, IntrinsicCallMethods}};
 use rustc_middle::ty::{layout::HasTyCtxt, ParamEnv, Ty, TyKind};
 use rustc_span::sym;
+use rustc_target::abi::call::PassMode;
+use rustc_codegen_ssa::traits::BuilderMethods;
 
 use crate::function::FunctionNVVM;
 
@@ -29,10 +31,10 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
         let ret_ty = sig.output();
         let name = tcx.item_name(def_id);
 
-        let llret_ty = self.layout_of(ret_ty).llvm_type(self);
+        let llret_ty = self.lower_ty(&ret_ty);
         let result = PlaceRef::new_sized(llresult, fn_abi.ret.layout);
 
-        let simple = get_simple_intrinsic(self, name);
+        //let simple = get_simple_intrinsic(self, name);
         
         let val = match name {
             sym::unlikely => self
@@ -42,9 +44,9 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
 
         if !fn_abi.ret.is_ignore() {
             if let PassMode::Cast { .. } = &fn_abi.ret.mode {
-                self.store(llval, result.val.llval, result.val.align);
+                self.store(val, result.val.llval, result.val.align);
             } else {
-                OperandRef::from_immediate_or_packed_pair(self, llval, result.layout)
+                OperandRef::from_immediate_or_packed_pair(self, val, result.layout)
                     .val
                     .store(self, result);
             }
@@ -58,7 +60,7 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
     }
 
     fn assume(&mut self, val: Self::Value) {
-        todo!()
+        self.call_intrinsic("llvm.assume", &[val]);
     }
 
     fn expect(&mut self, cond: Self::Value, expected: bool) -> Self::Value {

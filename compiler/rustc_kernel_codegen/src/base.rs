@@ -1,7 +1,7 @@
 use rustc_codegen_ssa::mono_item::MonoItemExt;
 use rustc_middle::{mir::mono::CodegenUnit, ty::TyCtxt};
 
-use crate::arena;
+use crate::{arena};
 use crate::module::assemble;
 use crate::{codegen_cx::CodegenCx, module::ModuleNVVM};
 use crate::builder::Builder;
@@ -41,7 +41,7 @@ pub fn module_codegen<'tcx>(
     cx.build_intrinsics();
     
     for &(mono_item, data) in &mono_items {
-        //println!("predefining {:?}", mono_item);
+        println!("predefining {:?}", mono_item);
         mono_item.predefine::<Builder<'_, '_, '_>>(&cx, data.linkage, data.visibility);
     }
 

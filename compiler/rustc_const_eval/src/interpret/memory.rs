@@ -555,7 +555,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             Some(GlobalAlloc::VTable(..)) => throw_ub!(DerefVTablePointer(id)),
             None => throw_ub!(PointerUseAfterFree(id, CheckInAllocMsg::MemoryAccessTest)),
             Some(GlobalAlloc::Static(def_id)) => {
-                assert!(self.tcx.is_static(def_id));
+                assert!(self.tcx.is_static(def_id) || self.tcx.is_kernel(def_id));
                 // Thread-local statics do not have a constant address. They *must* be accessed via
                 // `ThreadLocalRef`; we can never have a pointer to them as a regular constant value.
                 assert!(!self.tcx.is_thread_local_static(def_id));
@@ -773,8 +773,16 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 // `ThreadLocalRef`; we can never have a pointer to them as a regular constant value.
                 assert!(!self.tcx.is_thread_local_static(def_id));
 
-                let DefKind::Static { nested, .. } = self.tcx.def_kind(def_id) else {
-                    bug!("GlobalAlloc::Static is not a static")
+                let nested = if self.tcx.is_kernel(def_id) {
+                    // Kernel statics are always nested.
+                    false
+                } else {
+                    // For all other statics, we need to check.
+                    let DefKind::Static { nested, .. } = self.tcx.def_kind(def_id) else
+                    {
+                        bug!("GlobalAlloc::Static is not a static")
+                    };
+                    nested
                 };
 
                 let (size, align) = if nested {

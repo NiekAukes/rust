@@ -27,4 +27,8 @@ impl<'m> BasicBlock<'m> {
     pub fn instrs(&self) -> Vec<Val<'m>> {
         unsafe { (*self.instrs.get()).clone() }
     }
+
+    pub fn instrs_ref(&self) -> &Vec<Val<'m>> {
+        unsafe { &(*self.instrs.get()) }
+    }
 }

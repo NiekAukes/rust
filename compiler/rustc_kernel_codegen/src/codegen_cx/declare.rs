@@ -61,6 +61,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         // as argument
         if abi.ret.is_indirect() {
             let ty = self.backend_type(abi.ret.layout);
+            let ty = self.type_pointer(ty);
             let value = ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty };
             let val = module.create_val(value, Some(ty));
             args.push(val);
@@ -69,7 +70,6 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
 
         for (idx, arg) in abi.args.iter().enumerate() {
             // lower the type to the NVVM type
-            //println!("Arg: {:?}", arg);
             match arg.mode {
                 PassMode::Ignore => continue,
                 PassMode::Pair(a, b) => {
@@ -138,6 +138,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         } else {
             self.backend_type(abi.ret.layout)
         };
+
 
         // build the type
         let ty = module.ty_from_type(TypeNVVM::Fn(

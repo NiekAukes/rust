@@ -93,6 +93,14 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         fn_abi: &rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
     ) -> Self::Type {
         let mut args = vec![]; // = abi.args.iter().enumerate().map(|(idx, arg)| {
+
+        if fn_abi.ret.is_indirect() {
+            // add a pointer to the return type
+            let ret = self.backend_type(fn_abi.ret.layout);
+            let ret = self.type_pointer(ret);
+            args.push(ret);
+        }
+
         for (idx, arg) in fn_abi.args.iter().enumerate() {
             // lower the type to the NVVM type
             match arg.mode {
@@ -104,7 +112,12 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
                     args.push(ty1);
                     args.push(ty2);
                 }
-                PassMode::Indirect { .. } => todo!(),
+                PassMode::Indirect { attrs, meta_attrs, on_stack } => {
+                    // add a pointer to the type to the list
+                    let ty = self.backend_type(arg.layout);
+                    let ty = self.type_pointer(ty);
+                    args.push(ty);
+                }
                 PassMode::Cast { .. } => todo!(),
                 PassMode::Direct(_) => {
                     // basic case, lower the type and add it to the list
@@ -113,7 +126,11 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
                 }
             }
         }
-        let ret = self.backend_type(fn_abi.ret.layout);
+        let ret = if fn_abi.ret.is_indirect() {
+            self.type_void()
+        } else {
+            self.backend_type(fn_abi.ret.layout)
+        };
 
         // build the type
         let mut module = self.get_module_mut();
@@ -351,14 +368,14 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
             ty::Int(n) => {
                 let bitwidth = match n.bit_width() {
                     Some(w) => w,
-                    None => 32, // only isize and usize have no bit width
+                    None => 64, // only isize and usize have no bit width
                 };
                 module.ty_from_type(crate::ty::TypeNVVM::I(bitwidth as usize))
             }
             ty::Uint(n) => {
                 let bitwidth = match n.bit_width() {
                     Some(w) => w,
-                    None => 32, // only isize and usize have no bit width
+                    None => 64, // only isize and usize have no bit width
                 };
                 module.ty_from_type(crate::ty::TypeNVVM::I(bitwidth as usize))
             }

@@ -232,7 +232,13 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn sdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let instr = Instruction::SDiv(lhs, rhs);
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(lhs)));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn exactsdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -262,7 +268,13 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn srem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let instr = Instruction::SRem(lhs, rhs);
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(lhs)));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn frem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -498,7 +510,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: Align) -> Self::Value {
-        let instr = Instruction::Load { ty, ptr, align: align.bytes() };
+        // the ty and the ptr value may not be the same
+        // try to convert the ptr value to the correct type
+        let to_ty = self.cx().type_pointer(ty);
+        let nptr = self.convert_argument(ptr, to_ty);
+
+        let instr = Instruction::Load { ty, ptr: nptr, align: align.bytes() };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(ty));
         self.basic_block.add_instr(v);
         v
@@ -1079,20 +1096,16 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         };
 
         let mut args_vec = Vec::new();
-        let mut unpacked_fn_abi = Vec::new();
-        for arg in fn_abi.unwrap().args.iter() {
-            match arg.layout.abi {
-                Abi::ScalarPair(..) => {
-                    unpacked_fn_abi.push(arg.layout.field(self.cx(), 0));
-                    unpacked_fn_abi.push(arg.layout.field(self.cx(), 1));
-                }
-                _ => unpacked_fn_abi.push(arg.layout),
-            }
-        }
+        let fn_decl_ty = self.cx().fn_decl_backend_type(fn_abi.unwrap());
+        let unpacked_fn_abi = match fn_decl_ty.0 {
+            TypeNVVM::Fn(args, ret) => args,
+            _ => panic!("Expected function type, found {:?}", fn_decl_ty),
+        };
+
         // check if all function parameters have the correct type
         for (i, (arg, expected_ty)) in args.iter().zip(unpacked_fn_abi.iter()).enumerate() {
-            let ty = self.cx().backend_type(*expected_ty);
-            args_vec.push(self.convert_argument(*arg, ty));
+            //let ty = self.cx().backend_type(*expected_ty);
+            args_vec.push(self.convert_argument(*arg, *expected_ty));
         }
 
         let instr = Instruction::Call { ret_ty: *ret, fn_val: llfn, fn_ty: llty, args: args_vec };
@@ -1172,12 +1185,13 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
 
         // if the target type is larger than the source type, we need to extend
         if from_size < to_size {
+            //println!("SIZE: {:?} -> {:?}", from_size, to_size);
             if let TypeNVVM::I(_) = from_ty.0 {
                 return self.zext(arg, to_ty);
             } else if *from_ty.0 == TypeNVVM::F32 || *from_ty.0 == TypeNVVM::F64 {
                 return self.fpext(arg, to_ty);
             } else {
-                bug!("convert_argument: unsupported conversion from {:?} to {:?}", from_ty, to_ty);
+                bug!("convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}", from_ty, to_ty, arg);
             }
         }
 
@@ -1191,11 +1205,11 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
                 println!("WARNING: converting to ZST type: {:#?}", arg);
                 return self.cx().const_undef(to_ty);
             } else {
-                bug!("convert_argument: unsupported conversion from {:?} to {:?}", from_ty, to_ty);
+                bug!("convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}", from_ty, to_ty, arg);
             }
         }
 
-        todo!("convert_argument: unsupported conversion from {:?} to {:?}", from_ty, to_ty);
+        todo!("convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}", from_ty, to_ty, arg);
     }
 
     fn convert_arguments_to_largest(&mut self, args: &[Val<'m>]) -> (String, Vec<Val<'m>>) {

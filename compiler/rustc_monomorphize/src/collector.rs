@@ -833,11 +833,18 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
             if in_kernel
                 && (lang_item == LangItem::Panic
                     || lang_item == LangItem::PanicInfo
+                    || lang_item == LangItem::PanicFmt
+                    || lang_item == LangItem::PanicLocation
+                    || lang_item == LangItem::BeginPanic
+                    || lang_item == LangItem::PanicNounwind
+                    || lang_item == LangItem::ConstPanicFmt
                     || lang_item == LangItem::PanicBoundsCheck
                     || lang_item == LangItem::PanicMulOverflow
                     || lang_item == LangItem::PanicAddOverflow
                     || lang_item == LangItem::PanicShrOverflow
                     || lang_item == LangItem::PanicShlOverflow
+                    || lang_item == LangItem::PanicDivOverflow
+                    || lang_item == LangItem::PanicRemOverflow
                     || lang_item == LangItem::PanicCannotUnwind
                     || lang_item == LangItem::PanicInCleanup
                     || lang_item == LangItem::PanicDivZero
@@ -1003,10 +1010,13 @@ fn visit_instance_use<'tcx>(
             // be lowered in codegen to nothing or a call to panic_nounwind. So if we encounter any
             // of those intrinsics, we need to include a mono item for panic_nounwind, else we may try to
             // codegen a call to that function without generating code for the function itself.
-            let def_id = tcx.lang_items().get(LangItem::PanicNounwind).unwrap();
-            let panic_instance = Instance::mono(tcx, def_id);
-            if should_codegen_locally(tcx, panic_instance, is_in_kernel) {
-                output.push(create_fn_mono_item(tcx, panic_instance, source));
+
+            if (!is_in_kernel) {
+                let def_id = tcx.lang_items().get(LangItem::PanicNounwind).unwrap();
+                let panic_instance = Instance::mono(tcx, def_id);
+                if should_codegen_locally(tcx, panic_instance, is_in_kernel) {
+                    output.push(create_fn_mono_item(tcx, panic_instance, source));
+                }
             }
         } else if tcx.has_attr(def_id, sym::rustc_intrinsic) {
             // Codegen the fallback body of intrinsics with fallback bodies

@@ -8,6 +8,7 @@ use crate::ty::TypeNVVM;
 use crate::value::{Val, ValueNVVM};
 use crate::{basic_block::BasicBlock, ty::TyNVVM};
 
+
 #[derive(Debug)]
 pub struct FunctionNVVM<'m> {
     pub is_kernel: bool,
@@ -123,6 +124,13 @@ impl<'m> FunctionNVVM<'m> {
     pub fn create_val_label(&self, val: Val<'m>, name: String) {
         unsafe {
             (*self.val_labels.get()).insert(val, name);
+        }
+    }
+
+    pub fn iter_basic_blocks(&self) -> impl Iterator<Item = &&'m BasicBlock<'m>> {
+        unsafe {
+            let bbs = &*self.basic_blocks.get();
+            bbs.iter()
         }
     }
 

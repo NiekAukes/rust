@@ -71,9 +71,19 @@ impl<'m> ModuleNVVM<'m> {
         // create a value for the allocation
         let ty = if let Some(ty) = alloc.ty {
             ty
+        } else if let Some(val) = &alloc.val {
+            // let ty_u8 = self.ty_from_type(TypeNVVM::I(8));
+            // self.ty_from_type(TypeNVVM::Pointer(ty_u8))
+            match val {
+                ValueNVVM::Constant(c) => {
+                    let size = c.size();
+                    let ty_i8 = self.ty_from_type(TypeNVVM::I(8));
+                    self.ty_from_type(TypeNVVM::Array(ty_i8, size))
+                }
+                _ => todo!(),
+            }
         } else {
-            let ty_u8 = self.ty_from_type(TypeNVVM::I(8));
-            self.ty_from_type(TypeNVVM::Pointer(ty_u8))
+            todo!()
         };
         let global = Global::new_unchecked(alloc);
         let ty_ptr = self.ty_from_type(TypeNVVM::Pointer(ty));
@@ -214,7 +224,11 @@ impl<'m> ModuleNVVM<'m> {
     }
 }
 
+const LIBINTRINSIC: &str = include_str!("libintrinsics.ll");
+
 pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
+
+
     let mut s = format!("; NVVM IR version {}\n", module.metadata.version.0);
     s.push_str("target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n");
     s.push_str("target triple = \"nvptx64-nvidia-cuda\"\n\n");
@@ -253,7 +267,8 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     }
     let allocs = module.allocs.clone();
     for (global, val) in allocs.iter() {
-        s.push_str(&global.0.assemble(module));
+        let g = global.0.assemble(module) + "\n";
+        s.push_str(&g);
     }
     s.push_str("\n");
 
@@ -261,8 +276,8 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     // define or declare the functions used in the module
     for (def_id, function) in fns.iter() {
         if !function.is_defined() {
-            s.push_str(&function.define(module));
-            s.push_str("\n\n");
+            // s.push_str(&function.define(module));
+            // s.push_str("\n\n");
         } else {
             s.push_str(&function.assemble(module));
             s.push_str("\n\n");
@@ -300,14 +315,10 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     }
     s.push_str("\n");
 
-    /*
-    !nvvm.annotations = !{!1}
-    !1 = !{void (i32*)* @simple, !"kernel", i32 1}
+    // add libintrinsics
+    s += LIBINTRINSIC;
 
-    !nvvmir.version = !{!2}
-    !2 = !{i32 2, i32 0, i32 3, i32 1}
-     */
-
+    // add metadata
     if let Some(kernel) = kernel {
         let kernel_name = kernel.name.clone();
         s.push_str(&format!("!nvvm.annotations = !{{!1}}\n"));
