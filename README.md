@@ -1,77 +1,350 @@
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/rust-lang/www.rust-lang.org/master/static/images/rust-social-wide-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/rust-lang/www.rust-lang.org/master/static/images/rust-social-wide-light.svg">
-    <img alt="The Rust Programming Language: A language empowering everyone to build reliable and efficient software"
-         src="https://raw.githubusercontent.com/rust-lang/www.rust-lang.org/master/static/images/rust-social-wide-light.svg"
-         width="50%">
-  </picture>
+# Installing this compiler
 
-[Website][Rust] | [Getting started] | [Learn] | [Documentation] | [Contributing]
-</div>
+**Note: This document is modified from INSTALL.md and describes _building_ Rust _from source_.
+Prebuilt binaries are not available for this modified rust compiler.
+**
 
-This is the main source code repository for [Rust]. It contains the compiler,
-standard library, and documentation.
+## Dependencies
 
-[Rust]: https://www.rust-lang.org/
-[Getting Started]: https://www.rust-lang.org/learn/get-started
-[Learn]: https://www.rust-lang.org/learn
-[Documentation]: https://www.rust-lang.org/learn#learn-use
-[Contributing]: CONTRIBUTING.md
+Make sure you have the required hardware and software to run CUDA programs:
 
-## Why Rust?
+-   A CUDA-enabled GPU with (compute capability)[https://developer.nvidia.com/cuda-gpus] >= 5
+-   `cuda-toolkit` version 12.x
+-   An appropriate nvidia driver ((see table here)[https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6])
 
-- **Performance:** Fast and memory-efficient, suitable for critical services, embedded devices, and easily integrate with other languages.
+And make sure you have installed the dependencies:
 
-- **Reliability:** Our rich type system and ownership model ensure memory and thread safety, reducing bugs at compile-time.
+-   `python` 3 or 2.7
+-   `git`
+-   A C compiler (when building for the host, `cc` is enough; cross-compiling may
+    need additional compilers)
+-   `curl` (not needed on Windows)
+-   `pkg-config` if you are compiling on Linux and targeting Linux
+-   `libiconv` (already included with glibc on Debian-based distros)
 
-- **Productivity:** Comprehensive documentation, a compiler committed to providing great diagnostics, and advanced tooling including package manager and build tool ([Cargo]), auto-formatter ([rustfmt]), linter ([Clippy]) and editor support ([rust-analyzer]).
+To build Cargo, you'll also need OpenSSL (`libssl-dev` or `openssl-devel` on
+most Unix distros).
 
-[Cargo]: https://github.com/rust-lang/cargo
-[rustfmt]: https://github.com/rust-lang/rustfmt
-[Clippy]: https://github.com/rust-lang/rust-clippy
-[rust-analyzer]: https://github.com/rust-lang/rust-analyzer
+On this compiler version, you'll need additional tools to compile LLVM:
 
-## Quick Start
+-   `g++`, `clang++`, or MSVC with versions listed on
+    [LLVM's documentation](https://llvm.org/docs/GettingStarted.html#host-c-toolchain-both-compiler-and-standard-library)
+-   `ninja`, or GNU `make` 3.81 or later (Ninja is recommended, especially on
+    Windows)
+-   `cmake` 3.13.4 or later
+-   `libstdc++-static` may be required on some Linux distributions such as Fedora
+    and Ubuntu
 
-Read ["Installation"] from [The Book].
+## Building on a Unix-like system
 
-["Installation"]: https://doc.rust-lang.org/book/ch01-01-installation.html
-[The Book]: https://doc.rust-lang.org/book/index.html
+### Build steps
 
-## Installing from Source
+1. Clone the [source] with `git`:
 
-If you really want to install from source (though this is not recommended), see
-[INSTALL.md](INSTALL.md).
+    ```sh
+    git clone https://github.com/NiekAukes/rust.git
+    cd rust
+    ```
 
-## Getting Help
+[source]: https://github.com/NiekAukes/rust
 
-See https://www.rust-lang.org/community for a list of chat platforms and forums.
+2. Configure the build settings:
 
-## Contributing
+    ```sh
+    ./configure
+    ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+3. Build:
 
-## License
+    ```sh
+    ./x.py build
+    ```
 
-Rust is primarily distributed under the terms of both the MIT license and the
-Apache License (Version 2.0), with portions covered by various BSD-like
-licenses.
+4. (alternative) link via cargo in sample project:
 
-See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT), and
-[COPYRIGHT](COPYRIGHT) for details.
+### Configure and Make
 
-## Trademark
+This project provides a configure script and makefile (the latter of which just
+invokes `x.py`). `./configure` is the recommended way to programmatically
+generate a `config.toml`. `make` is not recommended (we suggest using `x.py`
+directly), but it is supported and we try not to break it unnecessarily.
 
-[The Rust Foundation][rust-foundation] owns and protects the Rust and Cargo
-trademarks and logos (the "Rust Trademarks").
+```sh
+./configure
+make && sudo make install
+```
 
-If you want to use these names or brands, please read the
-[media guide][media-guide].
+`configure` generates a `config.toml` which can also be used with normal `x.py`
+invocations.
 
-Third-party logos may be subject to third-party copyrights and trademarks. See
-[Licenses][policies-licenses] for details.
+## Building on Windows
 
-[rust-foundation]: https://foundation.rust-lang.org/
-[media-guide]: https://foundation.rust-lang.org/policies/logo-policy-and-media-guide/
-[policies-licenses]: https://www.rust-lang.org/policies/licenses
+On Windows, we suggest using [winget] to install dependencies by running the
+following in a terminal:
+
+```powershell
+winget install -e Python.Python.3
+winget install -e Kitware.CMake
+winget install -e Git.Git
+```
+
+Then edit your system's `PATH` variable and add: `C:\Program Files\CMake\bin`.
+See
+[this guide on editing the system `PATH`](https://www.java.com/en/download/help/path.html)
+from the Java documentation.
+
+[winget]: https://github.com/microsoft/winget-cli
+
+There are two prominent ABIs in use on Windows: the native (MSVC) ABI used by
+Visual Studio and the GNU ABI used by the GCC toolchain. Which version of Rust
+you need depends largely on what C/C++ libraries you want to interoperate with.
+Use the MSVC build of Rust to interop with software produced by Visual Studio
+and the GNU build to interop with GNU software built using the MinGW/MSYS2
+toolchain.
+
+### MinGW
+
+[MSYS2][msys2] can be used to easily build Rust on Windows:
+
+[msys2]: https://www.msys2.org/
+
+1. Download the latest [MSYS2 installer][msys2] and go through the installer.
+
+2. Download and install [Git for Windows](https://git-scm.com/download/win).
+   Make sure that it's in your Windows PATH. To enable access to it from within
+   MSYS2, edit the relevant `mingw[32|64].ini` file in your MSYS2 installation
+   directory and uncomment the line `MSYS2_PATH_TYPE=inherit`.
+
+    You could install and use MSYS2's version of git instead with `pacman`,
+    however this is not recommended as it's excruciatingly slow, and not frequently
+    tested for compatibility.
+
+3. Start a MINGW64 or MINGW32 shell (depending on whether you want 32-bit
+   or 64-bit Rust) either from your start menu, or by running `mingw64.exe`
+   or `mingw32.exe` from your MSYS2 installation directory (e.g. `C:\msys64`).
+
+4. From this terminal, install the required tools:
+
+    ```sh
+    # Update package mirrors (may be needed if you have a fresh install of MSYS2)
+    pacman -Sy pacman-mirrors
+
+    # Install build tools needed for Rust. If you're building a 32-bit compiler,
+    # then replace "x86_64" below with "i686".
+    # Note that it is important that you do **not** use the 'python2', 'cmake',
+    # and 'ninja' packages from the 'msys2' subsystem.
+    # The build has historically been known to fail with these packages.
+    pacman -S make \
+                diffutils \
+                tar \
+                mingw-w64-x86_64-python \
+                mingw-w64-x86_64-cmake \
+                mingw-w64-x86_64-gcc \
+                mingw-w64-x86_64-ninja
+    ```
+
+5. Navigate to Rust's source code (or clone it), then build it:
+
+    ```sh
+    python x.py setup dist && python x.py build && python x.py install
+    ```
+
+If you want to try the native Windows versions of Python or CMake, you can remove
+them from the above pacman command and install them from another source. Follow
+the instructions in step 2 to get them on PATH.
+
+Using Windows native Python can be helpful if you get errors when building LLVM.
+You may also want to use Git for Windows, as it is often _much_ faster. Turning
+off real-time protection in the Windows Virus & Threat protections settings can
+also help with long run times (although note that it will automatically turn
+itself back on after some time).
+
+### MSVC
+
+MSVC builds of Rust additionally require an installation of Visual Studio 2017
+(or later) so `rustc` can use its linker. The simplest way is to get
+[Visual Studio], check the "C++ build tools" and "Windows 10 SDK" workload.
+
+[Visual Studio]: https://visualstudio.microsoft.com/downloads/ (If you're installing CMake yourself, be careful that "C++ CMake tools for
+Windows" doesn't get included under "Individual components".)
+
+With these dependencies installed, you can build the compiler in a `cmd.exe`
+shell with:
+
+```sh
+python x.py setup user
+python x.py build
+```
+
+Right now, building Rust only works with some known versions of Visual Studio.
+If you have a more recent version installed and the build system doesn't
+understand, you may need to force rustbuild to use an older version.
+This can be done by manually calling the appropriate vcvars file before running
+the bootstrap.
+
+```batch
+CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+python x.py build
+```
+
+### Specifying an ABI
+
+Each specific ABI can also be used from either environment (for example, using
+the GNU ABI in PowerShell) by using an explicit build triple. The available
+Windows build triples are:
+
+-   GNU ABI (using GCC)
+    -   `i686-pc-windows-gnu`
+    -   `x86_64-pc-windows-gnu`
+-   The MSVC ABI
+    -   `i686-pc-windows-msvc`
+    -   `x86_64-pc-windows-msvc`
+
+The build triple can be specified by either specifying `--build=<triple>` when
+invoking `x.py` commands, or by creating a `config.toml` file (as described in
+[Building on a Unix-like system](#building-on-a-unix-like-system)), and passing
+`--set build.build=<triple>` to `./configure`.
+
+# Using this compiler with the sample project
+
+## Clone the sample project including dependencies
+
+you can clone the sample project setup found on the [rust-kernels](https://github.com/NiekAukes/rust-kernels) repository, Preferably outside the compiler folder to avoid confusion.
+In rust-kernels, there is the sample folder, and 3 dependencies to execute the code on the GPU.
+
+## Linking the compiler to rustup
+
+There are 2 methods to install the compiler.
+
+1. Link a new toolchain via rustup (recommended):
+
+    ```sh
+    rustup toolchain link rust-gpuhc [path-to-compiler]/build/x86_64-unknown-linux-gnu/stage1
+    ```
+
+    this links a toolchain to the compiler version that was just built. Note that it may be necessary to change `x86_64-unknown-linux-gnu` in the command.
+
+    Then in the sample project, create a new file called `rust-toolchain` (without file extension), and paste in `rust-gpuhc`. Cargo should now know to compile the project with the modified compiler
+
+2. Link via cargo:
+   in the sample project, create a new folder called `.cargo` and in that folder a file `config.toml`. This file should have contents similar to
+    ```
+    [build]
+    rustc = "[path-to-compiler]/build/x86_64-unknown-linux-gnu/stage1/bin/rustc"
+    ```
+
+please note that rust-analyzer is not used to this compiler and may give faulty feedback. please refer to the compiler output for potential syntax errors.
+
+## Writing code
+
+<!-- see the README.md in the [rust-kernels](https://github.com/NiekAukes/rust-kernels) repository for more information on how to run and write code with this compiler. -->
+
+### Defining a kernel
+
+With this compiler, writing code for the GPU is quite straightforward. To designate a function to be runnable on the GPU, use the `#[kernel]` attribute. This attribute can only be used on functions. Furthermore, this function is not callable anymore on the CPU as it is entirely replaced by a bytecode reference.
+
+```rust
+// an example of a kernel function that fills a simple array
+#[kernel]
+fn gpu64(a: Buffer<i32>) {
+    let i = gpu::global_tid();
+    a[i] = i as i32;
+}
+```
+
+### Mutable buffers
+
+An important conceptual limitation of GPU programming in Rust is that mutable references may not be passed to the GPU. This is because the reference is inherently copied to multiple threads, which is not allowed in Rust. To work around this, the compiler provides a `Buffer<T>` type, which refers to a mutable buffer on the GPU. This buffer can be read from and written to without any issues using the `set` and `get` methods.
+
+```rust
+#[kernel]
+fn add(a: Buffer<i32>, b: Buffer<i32>, out: Buffer<i32>) {
+    let i = gpu::global_tid();
+    out.set(i, a.get(i) + b.get(i));
+    a.set(i, 0);
+    b.set(i, 0);
+}
+```
+
+This constraint is not directly enforced by the compiler. However, the interface to run GPU code only accepts `Buffer<T>` types, and will not allow you to pass mutable references.
+
+### Supported language features
+
+Unfortunately not all language features are supported by the compiler, and some care should be taken when writing code. A very stringent limitation is that the compiler cannot use features defined in the `std` library, even if they can be defined for non-std use cases. Examples of this are ranges and iterators. The compiler does not support these features, and will crash when you use them.
+
+As alternatives, use while loops with a counter, or manually iterate over the array.
+
+```rust
+// non-conforming code
+#[kernel]
+fn add2_wrong(a: &[i32], b: &[i32], out: Buffer<i32>) {
+    for i in 0..a.len() {
+        out[i] = a[i] + b[i];
+    }
+}
+
+// conforming code
+#[kernel]
+fn add2_right(a: &[i32], b: &[i32], out: Buffer<i32>) {
+    let mut i = 0;
+    while i < a.len() {
+        out[i] = a[i] + b[i];
+        i += 1;
+    }
+}
+```
+
+### Specifying an engine
+
+To make a program compilable, an engine must be specified. This is done by adding the `#![engine(cuda)]` attribute to the crate root. This attribute is required for the compiler to know where to store the compiled code.
+
+For devices that don't support CUDA, the `#![engine(placeholder)]` attribute can be used. This engine will compile the code, but won't provide any functionality to run it.
+
+## Running code
+
+> Note: This section assumes you are using the cuda engine as specified in the previous section.
+
+To run a gpu kernel, you can call the `kernel.launch(threads, blocks, args...)` function. This function takes the desired number of threads to run per block, the number of blocks to run, and the arguments to pass to the kernel. The arguments must be of the same type as the kernel arguments.
+
+```rust
+fn main() {
+    let mut a = vec![1, 2, 3, 4, 5];
+    let mut b = vec![5, 4, 3, 2, 1];
+
+    let out = Buffer::allocate(5);
+
+    add2_right.launch(5, 1, &a, &b, out);
+
+    let out = out.copy_to_host::<Vec<i32>>();
+    println!("{:?}", out);
+}
+```
+
+### Instantiating buffers
+
+Unlike other types, `Buffer<T>` cannot be used on the CPU. Buffers created are only valid on the GPU. Using a buffer on the CPU will result in UB. `Buffer::allocate` is used to create a new empty buffer with memory allocated on the GPU. To create a buffer with data, use `Buffer::allocate_with`.
+
+To copy data from the GPU, you can use the `copy_to_host` method. This method will copy the data from the GPU to the CPU and return it as a vector.
+
+### Using launch_with_dptr
+
+The `launch_with_dptr` function is a more advanced version of the `launch` function. It allows you to pass pointers to the device memory as an argument. This can be useful when you want to pass data that is continuously updated on the GPU. Use the `to_device` method to copy variables to the GPU.
+
+```rust
+fn main() {
+    let a = vec![1, 2, 3, 4, 5];
+    let b = vec![5, 4, 3, 2, 1];
+
+    // with a Buffer, the data is already on the GPU
+    // the to_device method simply converts the Buffer to a DPtr
+    let mut out = Buffer::allocate(5).to_device();
+
+    let mut da = a.to_device();
+    let mut db = b.to_device();
+
+    add2_right.launch_with_dptr(5, 1, &mut a, &mut b, &mut out);
+
+    let out = out.copy_to_host::<Vec<i32>>();
+    println!("{:?}", out);
+}
+```
