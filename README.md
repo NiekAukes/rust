@@ -1,4 +1,14 @@
-# Installing this compiler
+# Downloading this compiler
+Make sure you have the required hardware and software to run CUDA programs:
+
+-   A CUDA-enabled GPU with [compute capability](https://developer.nvidia.com/cuda-gpus) >= 5
+-   `cuda-toolkit` version 12.x
+-   An appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
+
+Then download the compiler from the [releases page](https://github.com/NiekAukes/rust/releases/) and unpack it.
+
+
+# Installing this compiler from source
 
 **Note: This document is modified from INSTALL.md and describes _building_ Rust _from source_.
 Prebuilt binaries are not available for this modified rust compiler.
@@ -8,9 +18,9 @@ Prebuilt binaries are not available for this modified rust compiler.
 
 Make sure you have the required hardware and software to run CUDA programs:
 
--   A CUDA-enabled GPU with (compute capability)[https://developer.nvidia.com/cuda-gpus] >= 5
+-   A CUDA-enabled GPU with [compute capability](https://developer.nvidia.com/cuda-gpus) >= 5
 -   `cuda-toolkit` version 12.x
--   An appropriate nvidia driver ((see table here)[https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6])
+-   An appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
 
 And make sure you have installed the dependencies:
 
@@ -219,8 +229,14 @@ There are 2 methods to install the compiler.
 1. Link a new toolchain via rustup (recommended):
 
     ```sh
-    rustup toolchain link rust-gpuhc [path-to-compiler]/build/x86_64-unknown-linux-gnu/stage1
+    rustup toolchain link rust-gpuhc [path-to-compiler]/rust-gpuhc
     ```
+
+    or when building from source:
+    ```sh
+    rustup toolchain link rust-gpuhc [path-to-compiler]/build/[platform]/stage1
+    ```
+    
 
     this links a toolchain to the compiler version that was just built. Note that it may be necessary to change `x86_64-unknown-linux-gnu` in the command.
 
@@ -230,6 +246,8 @@ There are 2 methods to install the compiler.
    in the sample project, create a new folder called `.cargo` and in that folder a file `config.toml`. This file should have contents similar to
     ```
     [build]
+    rustc = "[path-to-compiler]/rust-gpuhc/bin/rustc"
+    // or when building from source
     rustc = "[path-to-compiler]/build/x86_64-unknown-linux-gnu/stage1/bin/rustc"
     ```
 
@@ -239,6 +257,9 @@ please note that rust-analyzer is not used to this compiler and may give faulty 
 
 <!-- see the README.md in the [rust-kernels](https://github.com/NiekAukes/rust-kernels) repository for more information on how to run and write code with this compiler. -->
 
+### Building and running with cargo
+To build and run the code, you can use the `cargo` tool Rust provides. Make sure you have followed the steps above to link the compiler to rustup or cargo.
+
 ### Defining a kernel
 
 With this compiler, writing code for the GPU is quite straightforward. To designate a function to be runnable on the GPU, use the `#[kernel]` attribute. This attribute can only be used on functions. Furthermore, this function is not callable anymore on the CPU as it is entirely replaced by a bytecode reference.
@@ -246,9 +267,9 @@ With this compiler, writing code for the GPU is quite straightforward. To design
 ```rust
 // an example of a kernel function that fills a simple array
 #[kernel]
-fn gpu64(a: Buffer<i32>) {
-    let i = gpu::global_tid();
-    a[i] = i as i32;
+unsafe fn gpu64(mut a: Buffer<i32>) {
+    let i = gpu::global_tid_x();
+    a.set(i as usize, i);
 }
 ```
 
@@ -258,8 +279,10 @@ An important conceptual limitation of GPU programming in Rust is that mutable re
 
 ```rust
 #[kernel]
-fn add(a: Buffer<i32>, b: Buffer<i32>, out: Buffer<i32>) {
-    let i = gpu::global_tid();
+unsafe fn add(mut a: Buffer<i32>, 
+              mut b: Buffer<i32>, 
+              mut out: Buffer<i32>) {
+    let i = gpu::global_tid_x() as usize;
     out.set(i, a.get(i) + b.get(i));
     a.set(i, 0);
     b.set(i, 0);
@@ -277,18 +300,18 @@ As alternatives, use while loops with a counter, or manually iterate over the ar
 ```rust
 // non-conforming code
 #[kernel]
-fn add2_wrong(a: &[i32], b: &[i32], out: Buffer<i32>) {
+unsafe fn add2_wrong(a: &[i32], b: &[i32], mut out: Buffer<i32>) {
     for i in 0..a.len() {
-        out[i] = a[i] + b[i];
+        out.set(i, a[i] + b[i]);
     }
 }
 
 // conforming code
 #[kernel]
-fn add2_right(a: &[i32], b: &[i32], out: Buffer<i32>) {
+unsafe fn add2_right(a: &[i32], b: &[i32], mut out: Buffer<i32>) {
     let mut i = 0;
     while i < a.len() {
-        out[i] = a[i] + b[i];
+        out.set(i, a[i] + b[i]);
         i += 1;
     }
 }
@@ -296,7 +319,7 @@ fn add2_right(a: &[i32], b: &[i32], out: Buffer<i32>) {
 
 ### Specifying an engine
 
-To make a program compilable, an engine must be specified. This is done by adding the `#![engine(cuda)]` attribute to the crate root. This attribute is required for the compiler to know where to store the compiled code.
+To make a program compilable, an engine must be specified. This is done by adding the `#![engine(cuda::engine)]` attribute to the crate root. This attribute is required for the compiler to know where to store the compiled code.
 
 For devices that don't support CUDA, the `#![engine(placeholder)]` attribute can be used. This engine will compile the code, but won't provide any functionality to run it.
 
@@ -307,24 +330,31 @@ For devices that don't support CUDA, the `#![engine(placeholder)]` attribute can
 To run a gpu kernel, you can call the `kernel.launch(threads, blocks, args...)` function. This function takes the desired number of threads to run per block, the number of blocks to run, and the arguments to pass to the kernel. The arguments must be of the same type as the kernel arguments.
 
 ```rust
+#[kernel]
+unsafe fn add2(a: &[i32], b: &[i32], mut out: Buffer<i32>) {
+    let i = gpu::global_tid_x() as usize;
+    out.set(i, a[i] + b[i]);
+}
+
 fn main() {
-    let mut a = vec![1, 2, 3, 4, 5];
-    let mut b = vec![5, 4, 3, 2, 1];
+    let a = vec![1, 2, 3, 4, 5];
+    let b = vec![5, 4, 3, 2, 1];
 
-    let out = Buffer::allocate(5);
+    let out = Buffer::alloc(5).unwrap();
 
-    add2_right.launch(5, 1, &a, &b, out);
+    add2.launch(5, 1, &a.as_slice(), &b.as_slice(), out)
+        .unwrap();
 
-    let out = out.copy_to_host::<Vec<i32>>();
-    println!("{:?}", out);
+    let result = out.retrieve().unwrap();
+    println!("{:?}", result);
 }
 ```
 
 ### Instantiating buffers
 
-Unlike other types, `Buffer<T>` cannot be used on the CPU. Buffers created are only valid on the GPU. Using a buffer on the CPU will result in UB. `Buffer::allocate` is used to create a new empty buffer with memory allocated on the GPU. To create a buffer with data, use `Buffer::allocate_with`.
+Unlike other types, `Buffer<T>` cannot be used on the CPU. Buffers created are only valid on the GPU. Using a buffer on the CPU will result in UB. `Buffer::alloc` is used to create a new empty buffer with memory allocated on the GPU. To create a buffer with data, use `Buffer::allocate_with`.
 
-To copy data from the GPU, you can use the `copy_to_host` method. This method will copy the data from the GPU to the CPU and return it as a vector.
+To copy data from the GPU, you can use the `retrieve` method. This method will copy the data from the GPU to the CPU and return it as a vector.
 
 ### Using launch_with_dptr
 
@@ -337,14 +367,18 @@ fn main() {
 
     // with a Buffer, the data is already on the GPU
     // the to_device method simply converts the Buffer to a DPtr
-    let mut out = Buffer::allocate(5).to_device();
+    let mut out = Buffer::<i32>::alloc(5).unwrap().to_device().unwrap();
 
-    let mut da = a.to_device();
-    let mut db = b.to_device();
+    let mut da = a.as_slice().to_device().unwrap();
+    let mut db = b.as_slice().to_device().unwrap();
 
-    add2_right.launch_with_dptr(5, 1, &mut a, &mut b, &mut out);
+    add2.launch_with_dptr(5, 1, &mut da, &mut db, &mut out);
 
-    let out = out.copy_to_host::<Vec<i32>>();
+    let out = out.retrieve();
     println!("{:?}", out);
 }
 ```
+
+### Unforseen Errors
+The compiler is still in development, and some features may not work as expected. This usually results in a crash of the compiler, but may also result in UB. If you encounter any issues, please report them on the [issues page](https://github.com/NiekAukes/rust/issues) of the compiler repository. Please include the code that caused the issue.
+

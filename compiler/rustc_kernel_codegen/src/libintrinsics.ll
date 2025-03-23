@@ -85,6 +85,12 @@ start:
   ret i32 %0
 }
 
+define linkonce void @__trap() alwaysinline {
+  start:
+  call void @llvm.trap()
+  unreachable
+}
+
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.y()
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.z()
