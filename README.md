@@ -68,7 +68,7 @@ On this compiler version, you'll need additional tools to compile LLVM:
 3. Build:
 
     ```sh
-    ./x.py build
+    ./x.py build --stage 1
     ```
 
 4. (alternative) link via cargo in sample project:
