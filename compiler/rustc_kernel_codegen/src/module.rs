@@ -105,6 +105,24 @@ impl<'m> ModuleNVVM<'m> {
                 return *t;
             }
         }
+
+        // IMPORTANT: search for illegal types
+        match ty {
+            TypeNVVM::Pointer(t) => {
+                match *t {
+                    TypeNVVM::Zst => {
+                        //panic!("Cannot have a pointer to a ZST");
+                        // return a pointer to i8 instead
+                        let ty_i8 = self.ty_from_type(TypeNVVM::I(8));
+                        let ty_ptr = self.ty_from_type(TypeNVVM::Pointer(ty_i8));
+                        return ty_ptr;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+
         let alloc_type = self.arena.dropless.alloc(ty);
         let ty = TyNVVM::new_unchecked(alloc_type);
         self.types.push(ty);
@@ -227,6 +245,8 @@ impl<'m> ModuleNVVM<'m> {
 const LIBINTRINSIC: &str = include_str!("libintrinsics.ll");
 
 pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
+
+    module.use_intrinsic("llvm.trap");
 
 
     let mut s = format!("; NVVM IR version {}\n", module.metadata.version.0);

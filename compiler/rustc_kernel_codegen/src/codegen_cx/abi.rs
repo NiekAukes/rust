@@ -532,7 +532,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
             }
 
             ty::Closure(did, substs) => {
-                //todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
                 // this should be just a function pointer
 
                 // BE CAREFUL WITH skip_binder
@@ -542,7 +542,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
                 // let fn_ty = module.ty_from_type(crate::ty::TypeNVVM::Fn(inputs_tys, output_ty));
                 // module.ty_from_type(crate::ty::TypeNVVM::Pointer(fn_ty))
-                self.type_voidptr()
+                //self.type_voidptr()
             }
 
             ty::Coroutine(did, substs) => {
@@ -605,7 +605,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
     pub fn type_voidptr(&self) -> TyNVVM<'m> {
         let module = unsafe { &mut *self.module.get() };
-        let void = self.type_void();
+        let void = self.type_i8();
         module.ty_from_type(crate::ty::TypeNVVM::Pointer(void))
     }
 

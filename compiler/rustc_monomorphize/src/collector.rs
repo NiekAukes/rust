@@ -845,6 +845,9 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
                     || lang_item == LangItem::PanicShlOverflow
                     || lang_item == LangItem::PanicDivOverflow
                     || lang_item == LangItem::PanicRemOverflow
+                    || lang_item == LangItem::PanicSubOverflow
+                    || lang_item == LangItem::PanicNegOverflow
+                    || lang_item == LangItem::PanicMisalignedPointerDereference
                     || lang_item == LangItem::PanicCannotUnwind
                     || lang_item == LangItem::PanicInCleanup
                     || lang_item == LangItem::PanicDivZero
@@ -1011,7 +1014,7 @@ fn visit_instance_use<'tcx>(
             // of those intrinsics, we need to include a mono item for panic_nounwind, else we may try to
             // codegen a call to that function without generating code for the function itself.
 
-            if (!is_in_kernel) {
+            if !is_in_kernel {
                 let def_id = tcx.lang_items().get(LangItem::PanicNounwind).unwrap();
                 let panic_instance = Instance::mono(tcx, def_id);
                 if should_codegen_locally(tcx, panic_instance, is_in_kernel) {

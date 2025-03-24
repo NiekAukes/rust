@@ -681,8 +681,6 @@ fn optimized_kernel_mir<'tcx>(tcx: TyCtxt<'tcx>, did: DefId) -> &'tcx Body<'tcx>
 
     AbortUnwindingCalls.run_pass_for_device_code(tcx, &mut body);
 
-    println!("optimized kernel mir for {:?}", tcx.def_path_str(did));
-
     tcx.arena.alloc(body)
 }
 
