@@ -1,4 +1,5 @@
 # Downloading this compiler
+
 Make sure you have the required hardware and software to run CUDA programs:
 
 -   A CUDA-enabled GPU with [compute capability](https://developer.nvidia.com/cuda-gpus) >= 5
@@ -6,7 +7,6 @@ Make sure you have the required hardware and software to run CUDA programs:
 -   An appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
 
 Then download the compiler from the [releases page](https://github.com/NiekAukes/rust/releases/) and unpack it.
-
 
 # Installing this compiler from source
 
@@ -96,6 +96,34 @@ Use the MSVC build of Rust to interop with software produced by Visual Studio
 and the GNU build to interop with GNU software built using the MinGW/MSYS2
 toolchain.
 
+### MSVC
+
+MSVC builds of Rust additionally require an installation of Visual Studio 2017
+(or later) so `rustc` can use its linker. The simplest way is to get
+[Visual Studio], check the "C++ build tools" and "Windows 10 SDK" workload.
+
+[Visual Studio]: https://visualstudio.microsoft.com/downloads/ (If you're installing CMake yourself, be careful that "C++ CMake tools for
+Windows" doesn't get included under "Individual components".)
+
+With these dependencies installed, you can build the compiler in a `cmd.exe`
+shell with:
+
+```sh
+python x.py setup user
+python x.py build
+```
+
+Right now, building Rust only works with some known versions of Visual Studio.
+If you have a more recent version installed and the build system doesn't
+understand, you may need to force rustbuild to use an older version.
+This can be done by manually calling the appropriate vcvars file before running
+the bootstrap.
+
+```batch
+CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+python x.py build
+```
+
 ### MinGW
 
 [MSYS2][msys2] can be used to easily build Rust on Windows:
@@ -153,52 +181,6 @@ off real-time protection in the Windows Virus & Threat protections settings can
 also help with long run times (although note that it will automatically turn
 itself back on after some time).
 
-### MSVC
-
-MSVC builds of Rust additionally require an installation of Visual Studio 2017
-(or later) so `rustc` can use its linker. The simplest way is to get
-[Visual Studio], check the "C++ build tools" and "Windows 10 SDK" workload.
-
-[Visual Studio]: https://visualstudio.microsoft.com/downloads/ (If you're installing CMake yourself, be careful that "C++ CMake tools for
-Windows" doesn't get included under "Individual components".)
-
-With these dependencies installed, you can build the compiler in a `cmd.exe`
-shell with:
-
-```sh
-python x.py setup user
-python x.py build
-```
-
-Right now, building Rust only works with some known versions of Visual Studio.
-If you have a more recent version installed and the build system doesn't
-understand, you may need to force rustbuild to use an older version.
-This can be done by manually calling the appropriate vcvars file before running
-the bootstrap.
-
-```batch
-CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
-python x.py build
-```
-
-### Specifying an ABI
-
-Each specific ABI can also be used from either environment (for example, using
-the GNU ABI in PowerShell) by using an explicit build triple. The available
-Windows build triples are:
-
--   GNU ABI (using GCC)
-    -   `i686-pc-windows-gnu`
-    -   `x86_64-pc-windows-gnu`
--   The MSVC ABI
-    -   `i686-pc-windows-msvc`
-    -   `x86_64-pc-windows-msvc`
-
-The build triple can be specified by either specifying `--build=<triple>` when
-invoking `x.py` commands, or by creating a `config.toml` file (as described in
-[Building on a Unix-like system](#building-on-a-unix-like-system)), and passing
-`--set build.build=<triple>` to `./configure`.
-
 # Using this compiler with the sample project
 
 ## Clone the sample project including dependencies
@@ -217,10 +199,10 @@ There are 2 methods to install the compiler.
     ```
 
     or when building from source:
+
     ```sh
     rustup toolchain link rust-gpuhc [path-to-compiler]/build/host/stage1
     ```
-    
 
     this links a toolchain to the compiler version that was just built. Note that it may be necessary to change `x86_64-unknown-linux-gnu` in the command.
 
@@ -242,6 +224,7 @@ please note that rust-analyzer is not used to this compiler and may give faulty 
 <!-- see the README.md in the [rust-kernels](https://github.com/NiekAukes/rust-kernels) repository for more information on how to run and write code with this compiler. -->
 
 ### Building and running with cargo
+
 To build and run the code, you can use the `cargo` tool Rust provides. Make sure you have followed the steps above to link the compiler to rustup or cargo.
 
 ### Defining a kernel
@@ -263,8 +246,8 @@ An important conceptual limitation of GPU programming in Rust is that mutable re
 
 ```rust
 #[kernel]
-unsafe fn add(mut a: Buffer<i32>, 
-              mut b: Buffer<i32>, 
+unsafe fn add(mut a: Buffer<i32>,
+              mut b: Buffer<i32>,
               mut out: Buffer<i32>) {
     let i = gpu::global_tid_x() as usize;
     out.set(i, a.get(i) + b.get(i));
@@ -364,9 +347,11 @@ fn main() {
 ```
 
 ### Unforseen Errors
+
 The compiler is still in development, and some features may not work as expected. This usually results in a crash of the compiler, but may also result in UB. If you encounter any issues, please report them on the [issues page](https://github.com/NiekAukes/rust/issues) of the compiler repository. Please include the code that caused the issue.
 
 ### Known Issues
-- incompatible NVVM version: Most likely, your driver version is not compatible with the CUDA toolkit you're running. Please install an appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
 
-- "parse invalid cast opcode for cast from 'i8*' to 'i64'": This is a known issue with the compiler. Compiling with --release should fix this issue in most cases. If not, please report it on the issues page.
+-   incompatible NVVM version: Most likely, your driver version is not compatible with the CUDA toolkit you're running. Please install an appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
+
+-   "parse invalid cast opcode for cast from 'i8\*' to 'i64'": This is a known issue with the compiler. Compiling with --release should fix this issue in most cases. If not, please report it on the issues page.
