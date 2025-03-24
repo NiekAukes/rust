@@ -54,6 +54,7 @@ On this compiler version, you'll need additional tools to compile LLVM:
     ```sh
     git clone https://github.com/NiekAukes/rust.git
     cd rust
+    git checkout kernel-dev-codegen
     ```
 
 [source]: https://github.com/NiekAukes/rust
@@ -71,21 +72,6 @@ On this compiler version, you'll need additional tools to compile LLVM:
     ```
 
 4. (alternative) link via cargo in sample project:
-
-### Configure and Make
-
-This project provides a configure script and makefile (the latter of which just
-invokes `x.py`). `./configure` is the recommended way to programmatically
-generate a `config.toml`. `make` is not recommended (we suggest using `x.py`
-directly), but it is supported and we try not to break it unnecessarily.
-
-```sh
-./configure
-make && sudo make install
-```
-
-`configure` generates a `config.toml` which can also be used with normal `x.py`
-invocations.
 
 ## Building on Windows
 
@@ -234,7 +220,7 @@ There are 2 methods to install the compiler.
 
     or when building from source:
     ```sh
-    rustup toolchain link rust-gpuhc [path-to-compiler]/build/[platform]/stage1
+    rustup toolchain link rust-gpuhc [path-to-compiler]/build/host/stage1
     ```
     
 
@@ -248,7 +234,7 @@ There are 2 methods to install the compiler.
     [build]
     rustc = "[path-to-compiler]/rust-gpuhc/bin/rustc"
     // or when building from source
-    rustc = "[path-to-compiler]/build/x86_64-unknown-linux-gnu/stage1/bin/rustc"
+    rustc = "[path-to-compiler]/build/host/stage1/bin/rustc"
     ```
 
 please note that rust-analyzer is not used to this compiler and may give faulty feedback. please refer to the compiler output for potential syntax errors.
@@ -382,3 +368,7 @@ fn main() {
 ### Unforseen Errors
 The compiler is still in development, and some features may not work as expected. This usually results in a crash of the compiler, but may also result in UB. If you encounter any issues, please report them on the [issues page](https://github.com/NiekAukes/rust/issues) of the compiler repository. Please include the code that caused the issue.
 
+### Known Issues
+- incompatible NVVM version: Most likely, your driver version is not compatible with the CUDA toolkit you're running. Please install an appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
+
+- "parse invalid cast opcode for cast from 'i8*' to 'i64'": This is a known issue with the compiler. Compiling with --release should fix this issue in most cases. If not, please report it on the issues page.
