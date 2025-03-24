@@ -62,7 +62,7 @@ On this compiler version, you'll need additional tools to compile LLVM:
 2. Configure the build settings:
 
     ```sh
-    ./configure
+    ./configure --set build.extended=false --set rust.deny-warnings=false
     ```
 
 3. Build:
@@ -70,8 +70,6 @@ On this compiler version, you'll need additional tools to compile LLVM:
     ```sh
     ./x.py build --stage 1
     ```
-
-4. (alternative) link via cargo in sample project:
 
 ## Building on Windows
 
