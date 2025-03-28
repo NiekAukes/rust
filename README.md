@@ -73,29 +73,6 @@ On this compiler version, you'll need additional tools to compile LLVM:
 
 ## Building on Windows
 
-On Windows, we suggest using [winget] to install dependencies by running the
-following in a terminal:
-
-```powershell
-winget install -e Python.Python.3
-winget install -e Kitware.CMake
-winget install -e Git.Git
-```
-
-Then edit your system's `PATH` variable and add: `C:\Program Files\CMake\bin`.
-See
-[this guide on editing the system `PATH`](https://www.java.com/en/download/help/path.html)
-from the Java documentation.
-
-[winget]: https://github.com/microsoft/winget-cli
-
-There are two prominent ABIs in use on Windows: the native (MSVC) ABI used by
-Visual Studio and the GNU ABI used by the GCC toolchain. Which version of Rust
-you need depends largely on what C/C++ libraries you want to interoperate with.
-Use the MSVC build of Rust to interop with software produced by Visual Studio
-and the GNU build to interop with GNU software built using the MinGW/MSYS2
-toolchain.
-
 ### MSVC
 
 MSVC builds of Rust additionally require an installation of Visual Studio 2017
@@ -106,12 +83,27 @@ MSVC builds of Rust additionally require an installation of Visual Studio 2017
 Windows" doesn't get included under "Individual components".)
 
 With these dependencies installed, you can build the compiler in a `cmd.exe`
-shell with:
+shell by:
 
-```sh
-python x.py setup user
-python x.py build
-```
+1. Clone the [source] with `git`:
+
+    ```batch
+    git clone https://github.com/NiekAukes/rust.git
+    cd rust
+    git checkout kernel-dev-codegen
+    ```
+
+2. Configure the build settings:
+
+    ```batch
+    x setup compiler
+    ```
+
+3. Build:
+
+    ```sh
+    x build --stage 1 --set llvm.download-ci-llvm=false --set rust.deny-warnings=false
+    ```
 
 Right now, building Rust only works with some known versions of Visual Studio.
 If you have a more recent version installed and the build system doesn't
