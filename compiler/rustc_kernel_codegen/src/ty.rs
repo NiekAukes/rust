@@ -25,8 +25,6 @@ pub enum TypeNVVM<'m> {
 /// Interned type for NVVM.
 pub type TyNVVM<'m> = Interned<'m, TypeNVVM<'m>>;
 
-
-
 impl<'m> PartialEq for TypeNVVM<'m> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -58,21 +56,51 @@ impl<'m> Assemble<'m> for TyNVVM<'m> {
 }
 
 impl<'m> TypeNVVM<'m> {
-    pub fn size(&self) -> usize {
+    pub fn simple_size(&self) -> usize {
         match self {
             TypeNVVM::Zst => 0,
             TypeNVVM::I(size) => *size / 8,
             TypeNVVM::F32 => 4,
             TypeNVVM::F64 => 8,
             TypeNVVM::Pointer(_) => 8,
-            TypeNVVM::Array(ty, size) => ty.size() * size,
-            TypeNVVM::Struct(fields) => fields.iter().map(|f| f.size()).sum(),
+            TypeNVVM::Array(ty, size) => ty.simple_size() * size,
+            TypeNVVM::Struct(fields) => fields.iter().map(|f| f.simple_size()).sum(),
             TypeNVVM::Fn(_, _) => 8, // function pointer size
-            TypeNVVM::Union(fields) => fields.iter().map(|f| f.size()).max().unwrap_or(0),
-            TypeNVVM::AdtDefForwardDecl(_, _) => panic!("AdtDefForwardDecl should not be used for size calculation"),
+            TypeNVVM::Union(fields) => fields.iter().map(|f| f.simple_size()).max().unwrap_or(0),
+            TypeNVVM::AdtDefForwardDecl(did, name) => {
+                panic!("AdtDefForwardDecl should not be used for size calculation")
+            }
         }
     }
-    
+
+    pub fn size(&self, module: &ModuleNVVM<'m>) -> usize {
+        match self {
+            TypeNVVM::Zst => 0,
+            TypeNVVM::I(size) => *size / 8,
+            TypeNVVM::F32 => 4,
+            TypeNVVM::F64 => 8,
+            TypeNVVM::Pointer(_) => 8,
+            TypeNVVM::Array(ty, size) => ty.size(module) * size,
+            TypeNVVM::Struct(fields) => fields.iter().map(|f| f.size(module)).sum(),
+            TypeNVVM::Fn(_, _) => 8, // function pointer size
+            TypeNVVM::Union(fields) => fields.iter().map(|f| f.size(module)).max().unwrap_or(0),
+            TypeNVVM::AdtDefForwardDecl(did, name) => {
+                //panic!("AdtDefForwardDecl should not be used for size calculation")
+                if let Some((_, ty)) = module.get_adt(*did) {
+                    ty.size(module)
+                } else {
+                    panic!("AdtDefForwardDecl could not be found")
+                }
+            }
+        }
+    }
+
+    pub fn is_zst(&self) -> bool {
+        match self {
+            TypeNVVM::Zst => true,
+            _ => false,
+        }
+    }
 }
 
 // display for the initial declaration and simple types
@@ -112,7 +140,7 @@ impl Display for TypeNVVM<'_> {
                 // and simply create an i8 array of that width
                 let mut max_size = 0;
                 for field in fields {
-                    let size = field.size();
+                    let size = field.simple_size();
                     if size > max_size {
                         max_size = size;
                     }
@@ -127,9 +155,7 @@ impl Display for TypeNVVM<'_> {
     }
 }
 
-
-
-/// A type for inferring the final type of a value. This needs to be done 
+/// A type for inferring the final type of a value. This needs to be done
 /// because the type of a value is not given to us...
 pub struct TypeHints<'m> {
     size: usize,
@@ -140,11 +166,7 @@ pub struct TypeHints<'m> {
 
 impl<'m> TypeHints<'m> {
     pub fn new(size: usize) -> Self {
-        Self {
-            size,
-            layout: Vec::new(),
-            structures: Vec::new(),
-        }
+        Self { size, layout: Vec::new(), structures: Vec::new() }
     }
 
     pub fn layout_hint(&mut self, offset: usize, size: usize, ty: TyNVVM<'m>) {
@@ -182,8 +204,9 @@ impl<'m> TypeHints<'m> {
         self.build_struct(&layout, &structures, module, p, scount, lcount)
     }
 
-    fn build_struct(&self, 
-        layout: &[(usize, usize, TyNVVM<'m>)], 
+    fn build_struct(
+        &self,
+        layout: &[(usize, usize, TyNVVM<'m>)],
         structures: &[(usize, usize)],
         module: &mut ModuleNVVM<'m>,
         p: usize,

@@ -212,8 +212,6 @@ pub enum Instruction<'m> {
 
     Resume(Val<'m>),
 
-
-
     // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
     LifetimeStart(Val<'m>, usize),
     LifetimeEnd(Val<'m>, usize),
@@ -497,10 +495,10 @@ impl<'m> Instruction<'m> {
             | Instruction::Switch { .. }
             | Instruction::Resume(_)
             | Instruction::LifetimeStart(_, _)
-            | Instruction::LifetimeEnd(_, _) 
+            | Instruction::LifetimeEnd(_, _)
             | Instruction::Store { .. } => false,
 
-            Instruction::Call { ret_ty, .. } => ret_ty.size() != 0,
+            Instruction::Call { ret_ty, .. } => !ret_ty.is_zst(),
         }
     }
 }
@@ -936,9 +934,6 @@ impl<'m> Instruction<'m> {
             Instruction::Resume(val) => {
                 panic!("Resume instruction not supported in nvvm")
             }
-
-
-
 
             // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
             Instruction::LifetimeStart(_, _) => {

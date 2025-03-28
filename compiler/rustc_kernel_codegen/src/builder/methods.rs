@@ -798,12 +798,13 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn intcast(&mut self, val: Self::Value, dest_ty: Self::Type, is_signed: bool) -> Self::Value {
+        let module = self.cx().get_module();
         // get the original type
         let ty = self.cx().val_ty(val);
         // if the original type is larger than the destination type, truncate
         // if the original type is smaller than the destination type, sign or zero extend
-        let tysz1 = ty.size();
-        let tysz2 = dest_ty.size();
+        let tysz1 = ty.size(module);
+        let tysz2 = dest_ty.size(module);
         if tysz1 > tysz2 {
             self.trunc(val, dest_ty)
         } else if tysz1 < tysz2 {
@@ -823,10 +824,11 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         lhs: Self::Value,
         rhs: Self::Value,
     ) -> Self::Value {
+        let module = self.cx().get_module();
         // check if the types of the operands are the same
         let (lhs, rhs) = if self.cx().val_ty(lhs) != self.cx().val_ty(rhs) {
             // if not, pick the larger type and cast the other operand to it
-            if self.cx().val_ty(lhs).size() > self.cx().val_ty(rhs).size() {
+            if self.cx().val_ty(lhs).size(module) > self.cx().val_ty(rhs).size(module) {
                 (lhs, self.intcast(rhs, self.cx().val_ty(lhs), false))
             } else {
                 (self.intcast(lhs, self.cx().val_ty(rhs), false), rhs)
@@ -1175,10 +1177,12 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
             bug!("convert_argument: types are equal but not the same");
         }
 
+        let module = self.cx().get_module();
+
         // if the target type has the same amount of bits as the source type
         // then a bitcast is sufficient
-        let from_size = from_ty.size();
-        let to_size = to_ty.size();
+        let from_size = from_ty.size(module);
+        let to_size = to_ty.size(module);
         if from_size == to_size {
             return self.bitcast(arg, to_ty);
         }
@@ -1191,7 +1195,12 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
             } else if *from_ty.0 == TypeNVVM::F32 || *from_ty.0 == TypeNVVM::F64 {
                 return self.fpext(arg, to_ty);
             } else {
-                bug!("convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}", from_ty, to_ty, arg);
+                bug!(
+                    "convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}",
+                    from_ty,
+                    to_ty,
+                    arg
+                );
             }
         }
 
@@ -1205,19 +1214,30 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
                 println!("WARNING: converting to ZST type: {:#?}", arg);
                 return self.cx().const_undef(to_ty);
             } else {
-                bug!("convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}", from_ty, to_ty, arg);
+                bug!(
+                    "convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}",
+                    from_ty,
+                    to_ty,
+                    arg
+                );
             }
         }
 
-        todo!("convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}", from_ty, to_ty, arg);
+        todo!(
+            "convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}",
+            from_ty,
+            to_ty,
+            arg
+        );
     }
 
     fn convert_arguments_to_largest(&mut self, args: &[Val<'m>]) -> (String, Vec<Val<'m>>) {
         // get the largest type of all arguments
+        let module = self.cx().get_module();
         let mut largest_ty = self.cx().type_i8();
         for arg in args.iter() {
             let ty = self.cx().val_ty(*arg);
-            if ty.size() > largest_ty.size() {
+            if ty.size(module) > largest_ty.size(module) {
                 largest_ty = ty;
             }
         }
