@@ -656,11 +656,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 
         // if the types are not the same, cast the value to the type of the pointer
         let ptr = if target_ty != org_ptr_ty {
-            let cast = Instruction::BitCast { ty: org_ptr_ty, val: ptr, to: target_ty };
-            let castval =
-                self.cx().get_module_mut().create_val(ValueNVVM::Instr(cast), Some(target_ty));
-            self.basic_block.add_instr(castval);
-            castval
+            // let cast = Instruction::BitCast { ty: org_ptr_ty, val: ptr, to: target_ty };
+            // let castval =
+            //     self.cx().get_module_mut().create_val(ValueNVVM::Instr(cast), Some(target_ty));
+            // self.basic_block.add_instr(castval);
+            // castval
+            self.bitcast(ptr, target_ty)
         } else {
             ptr
         };
@@ -781,16 +782,35 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn ptrtoint(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        self.bitcast(val, dest_ty)
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::PtrToInt { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn inttoptr(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        self.bitcast(val, dest_ty)
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::IntToPtr { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn bitcast(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
+        // check if the type is valid for a bitcast
+        // match dest_ty.0 {
+        //     TypeNVVM::Pointer(_) | TypeNVVM::I(..) | TypeNVVM::F32 | TypeNVVM::F64 => {}
+        //     _ => panic!("Invalid type for bitcast for type: {:#?}", dest_ty),
+        // }
+
+        
+
+
         // build a bitcast instruction
         let ty = self.cx().val_ty(val);
+
+
         let instr = Instruction::BitCast { ty, val, to: dest_ty };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
         self.basic_block.add_instr(v);
