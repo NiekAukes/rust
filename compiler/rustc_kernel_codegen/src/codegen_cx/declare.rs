@@ -53,6 +53,9 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
             }
         };
 
+        // fix the symbol name for ptx
+        let symbol_name = fix_ptx_name(symbol_name);
+
         let mut arg_count = 0;
 
         let mut args = vec![]; // = abi.args.iter().enumerate().map(|(idx, arg)| {
@@ -227,4 +230,10 @@ impl<'m, 'tcx> NVVMType<'m, 'tcx> for Reg {
             _ => panic!("Unsupported register kind"),
         }
     }
+}
+
+pub fn fix_ptx_name(name: &str) -> String {
+    // replace all dots with underscores
+    // because PTX doesn't allow dots in names
+    name.replace(".", "_")
 }

@@ -497,7 +497,11 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         // create a new alloca instruction
         let ty = self.cx().type_i8();
         let ptr_ty = self.cx().type_pointer(ty);
-        let alloca = ValueNVVM::Instr(Instruction::Alloca(ty, size.bytes()));
+        let alloca = ValueNVVM::Instr(Instruction::Alloca {
+            ty, 
+            size: size.bytes(), 
+            align: align.bytes()
+        });
         let v = self.cx().get_module_mut().create_val(alloca, Some(ptr_ty)); // the type of the alloca is not known
 
         // add the alloca instruction to the current basic block

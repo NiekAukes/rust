@@ -68,7 +68,12 @@ impl Display for Comp {
 
 #[derive(Debug)]
 pub enum Instruction<'m> {
-    Alloca(TyNVVM<'m>, u64),
+    //Alloca(TyNVVM<'m>, u64),
+    Alloca {
+        ty: TyNVVM<'m>,
+        size: u64,
+        align: u64,
+    },
     ExtractValue(TyNVVM<'m>, Val<'m>, u64),
     /// Store a value to a pointer
     Store {
@@ -126,6 +131,17 @@ pub enum Instruction<'m> {
         val: Val<'m>,
         to: TyNVVM<'m>,
     },
+    PtrToInt {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+    IntToPtr {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+
     Trunc {
         val: Val<'m>,
         to: TyNVVM<'m>,
@@ -458,9 +474,11 @@ impl<'m> Instruction<'m> {
     /// whether the instruction supports %x = instr
     pub fn has_ret(&self) -> bool {
         match self {
-            Instruction::Alloca(..)
+            Instruction::Alloca { .. }
             | Instruction::ExtractValue(_, _, _)
             | Instruction::BitCast { .. }
+            | Instruction::PtrToInt { .. }
+            | Instruction::IntToPtr { .. }
             | Instruction::Load { .. }
             | Instruction::Sub { .. }
             | Instruction::Add { .. }
@@ -511,8 +529,8 @@ impl<'m> Instruction<'m> {
         val: &Val<'m>,
     ) -> String {
         match self {
-            Instruction::Alloca(ty, size) => {
-                format!("alloca {}, i64 {}", ty.assemble(module), size)
+            Instruction::Alloca{ty, size, align} => {
+                format!("alloca {}, i64 {}, align {}", ty.assemble(module), size, align)
             }
             Instruction::ExtractValue(ty, val, idx) => {
                 format!(
@@ -751,6 +769,20 @@ impl<'m> Instruction<'m> {
                 format!("bitcast {} {} to {}", ty_label, val_label, to_label)
             }
 
+            Instruction::PtrToInt { ty, val, to } => {
+                let val_label = val.assemble(module, func);
+                let ty_label = ty.assemble(module);
+                let to_label = to.assemble(module);
+                format!("ptrtoint {} {} to {}", ty_label, val_label, to_label)
+            }
+
+            Instruction::IntToPtr { ty, val, to } => {
+                let val_label = val.assemble(module, func);
+                let ty_label = ty.assemble(module);
+                let to_label = to.assemble(module);
+                format!("inttoptr {} {} to {}", ty_label, val_label, to_label)
+            }
+
             Instruction::Trunc { val, to } => {
                 let ty = *module.valtypes.get(val).unwrap();
                 let ty_label = ty.assemble(module);
@@ -779,12 +811,13 @@ impl<'m> Instruction<'m> {
                 let ty = *module.valtypes.get(aggregate).unwrap();
                 let ty_label = ty.assemble(module);
                 let aggregate_label = aggregate.assemble(module, func);
+                let elt_ty = *module.valtypes.get(elt).unwrap();
                 let elt_label = elt.assemble(module, func);
                 format!(
                     "insertvalue {} {}, {} {}, {}",
                     ty_label,
                     aggregate_label,
-                    ty.assemble(module),
+                    elt_ty.assemble(module),
                     elt_label,
                     idx
                 )

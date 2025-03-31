@@ -1,4 +1,4 @@
-use std::marker::Tuple;
+use std::{marker::Tuple, num::NonZeroUsize};
 use tracing::debug;
 
 use rustc_codegen_ssa::{
@@ -14,9 +14,7 @@ use rustc_middle::{
     },
 };
 use rustc_target::abi::{
-    call::{FnAbi, PassMode},
-    Abi, AddressSpace, FieldIdx, FieldsShape, HasDataLayout, PointeeInfo, Primitive, Scalar, Size,
-    TyAndLayout, Variants,
+    call::{FnAbi, PassMode}, Abi, AddressSpace, Align, FieldIdx, FieldsShape, HasDataLayout, Integer, PointeeInfo, Primitive, Scalar, Size, TyAndLayout, Variants
 };
 
 use crate::{
@@ -329,30 +327,45 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
 impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
     pub fn lower_layout(&self, layout: TyAndLayout<'tcx, Ty<'tcx>>) -> TyNVVM<'m> {
         let module = unsafe { &mut *self.module.get() };
+        println!("lower_layout, FieldsShape: {:?}", layout.fields);
+        println!("lower_layout, abi: {:?}", layout.abi);
+        println!("lower_layout, ty: {:?}", layout.ty);
 
         match layout.abi {
             Abi::Scalar(_) | Abi::Vector { .. } => return self.lower_ty(&layout.ty),
-            Abi::ScalarPair(s1, s2) => return self.lower_ty(&layout.ty),
-            Abi::Uninhabited | Abi::Aggregate { .. } => match layout.fields {
-                FieldsShape::Primitive => return self.lower_ty(&layout.ty),
-                FieldsShape::Union(_) => return self.lower_ty(&layout.ty),
-                FieldsShape::Array { .. } => return self.lower_ty(&layout.ty),
-                FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
-                    let (llfields, packed) = struct_llfields(self, layout);
-                    return self.type_struct(&llfields, packed);
-                }
-            },
+            Abi::ScalarPair(s1, s2) => {
+                let ty1 = self.scalar_type_at(s1);
+                let ty2 = self.scalar_type_at(s2);
+                return self.type_struct(&[ty1, ty2], false);
+            }
+            Abi::Uninhabited | Abi::Aggregate { .. } => {},
         }
 
+
         match layout.fields {
-            FieldsShape::Primitive | FieldsShape::Union(_) | FieldsShape::Array { .. } => {
+            FieldsShape::Array { .. } => {
                 self.lower_ty(&layout.ty)
             }
             FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
                 let (llfields, packed) = struct_llfields(self, layout);
                 self.type_struct(&llfields, packed)
             }
+            FieldsShape::Primitive | FieldsShape::Union(_) => {
+                let fill = self.type_padding_filler(layout.size, layout.align.abi);
+                let packed = false;
+                self.type_struct(&[fill], packed)
+            }
         }
+    }
+
+    /// Return an LLVM type that has at most the required alignment,
+    /// and exactly the required size, as a best-effort padding array.
+    pub(crate) fn type_padding_filler(&self, size: Size, align: Align) -> TyNVVM<'m> {
+        let unit = Integer::approximate_align(self, align);
+        let size = size.bytes();
+        let unit_size = unit.size().bytes();
+        assert_eq!(size % unit_size, 0);
+        self.type_array(self.type_from_integer(unit), size / unit_size)
     }
 
     pub fn lower_ty(&self, ty: &Ty<'tcx>) -> TyNVVM<'m> {
@@ -424,6 +437,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
             ty::Adt(adtdef, gargs) if adtdef.is_enum() => {
                 // enums are represented as a struct with an index, and a union over the different variants
+                // TODO: could be optimized, right now we do ty_from_type twice for each variant
                 let mut tys = Vec::new();
                 let index = module.ty_from_type(crate::ty::TypeNVVM::I(8));
                 for variant in adtdef.variants().iter() {
@@ -437,7 +451,25 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                     tys.push(struc);
                 }
 
-                module.ty_from_type(crate::ty::TypeNVVM::Union(tys))
+                // because all types in a union need to have the same size, we need to pad the
+                // variants to the size of the largest variant
+                let max_size = tys.iter().map(|ty| ty.size(module)).max().unwrap_or(0);
+                let mut padded_tys = Vec::new();
+                for ty in tys.iter() {
+                    let size = ty.size(module);
+                    if size < max_size {
+                        let padding = module.ty_from_type(crate::ty::TypeNVVM::Array(
+                            index,
+                            (max_size - size) as usize,
+                        ));
+                        let padded = module.ty_from_type(crate::ty::TypeNVVM::Struct(vec![*ty, padding]));
+                        padded_tys.push(padded);
+                    } else {
+                        padded_tys.push(*ty);
+                    }
+                }
+
+                module.ty_from_type(crate::ty::TypeNVVM::Union(padded_tys))
             }
 
             ty::Adt(adtdef, gargs) if adtdef.is_box() => {
