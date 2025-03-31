@@ -180,34 +180,31 @@ itself back on after some time).
 you can clone the sample project setup found on the [rust-kernels](https://github.com/NiekAukes/rust-kernels) repository, Preferably outside the compiler folder to avoid confusion.
 In rust-kernels, there is the sample folder, and 3 dependencies to execute the code on the GPU.
 
-## Linking the compiler to rustup
+## Linking the compiler
 
 There are 2 methods to install the compiler.
 
-1. Link a new toolchain via rustup (recommended):
+### 1. Link a new toolchain via rustup (recommended):
 
-    ```sh
-    rustup toolchain link rust-gpuhc [path-to-compiler]/rust-gpuhc
-    ```
+```sh
+rustup toolchain link rust-gpuhc [path-to-compiler]/rust-gpuhc
+```
 
-    or when building from source:
+or when building from source:
 
-    ```sh
-    rustup toolchain link rust-gpuhc [path-to-compiler]/build/host/stage1
-    ```
+```sh
+rustup toolchain link rust-gpuhc [path-to-compiler]/build/host/stage1
+```
 
-    this links a toolchain to the compiler version that was just built. Note that it may be necessary to change `x86_64-unknown-linux-gnu` in the command.
+<!-- Then in the sample folder, create a new file called `rust-toolchain` (without file extension), and paste in `rust-gpuhc`. Cargo should now know to compile the project with the modified compiler -->
 
-    Then in the sample project, create a new file called `rust-toolchain` (without file extension), and paste in `rust-gpuhc`. Cargo should now know to compile the project with the modified compiler
+### 2. Link via cargo:
 
-2. Link via cargo:
-   in the sample project, create a new folder called `.cargo` and in that folder a file `config.toml`. This file should have contents similar to
-    ```
-    [build]
+in the sample project, create a new folder called `.cargo` and in that folder a file `config.toml`. This file should have contents similar to
+`[build]
     rustc = "[path-to-compiler]/rust-gpuhc/bin/rustc"
     // or when building from source
-    rustc = "[path-to-compiler]/build/host/stage1/bin/rustc"
-    ```
+    rustc = "[path-to-compiler]/build/host/stage1/bin/rustc"`
 
 please note that rust-analyzer is not used to this compiler and may give faulty feedback. please refer to the compiler output for potential syntax errors.
 
@@ -252,35 +249,13 @@ This constraint is not directly enforced by the compiler. However, the interface
 
 ### Supported language features
 
-Unfortunately not all language features are supported by the compiler, and some care should be taken when writing code. A very stringent limitation is that the compiler cannot use features defined in the `std` library, even if they can be defined for non-std use cases. Examples of this are ranges and iterators. The compiler does not support these features, and will crash when you use them.
-
-As alternatives, use while loops with a counter, or manually iterate over the array.
-
-```rust
-// non-conforming code
-#[kernel]
-unsafe fn add2_wrong(a: &[i32], b: &[i32], mut out: Buffer<i32>) {
-    for i in 0..a.len() {
-        out.set(i, a[i] + b[i]);
-    }
-}
-
-// conforming code
-#[kernel]
-unsafe fn add2_right(a: &[i32], b: &[i32], mut out: Buffer<i32>) {
-    let mut i = 0;
-    while i < a.len() {
-        out.set(i, a[i] + b[i]);
-        i += 1;
-    }
-}
-```
+Unfortunately not all language features are supported by the compiler, and some care should be taken when writing code. A very stringent limitation is that the compiler cannot use features defined in the `std` library, even if they can be defined for non-std use cases. Examples of this are panics and (dynamic) memory allocation. The compiler does not support these features, and will crash when you use them.
 
 ### Specifying an engine
 
 To make a program compilable, an engine must be specified. This is done by adding the `#![engine(cuda::engine)]` attribute to the crate root. This attribute is required for the compiler to know where to store the compiled code.
 
-For devices that don't support CUDA, the `#![engine(placeholder)]` attribute can be used. This engine will compile the code, but won't provide any functionality to run it.
+<!-- For devices that don't support CUDA, the `#![engine(placeholder)]` attribute can be used. This engine will compile the code, but won't provide any functionality to run it. -->
 
 ## Running code
 
