@@ -18,7 +18,6 @@ continue with [Linking the compiler](#linking-the-compiler)
 # Installing this compiler from source
 
 **Note: This document is modified from INSTALL.md and describes _building_ Rust _from source_.
-Prebuilt binaries are not available for this modified rust compiler.
 **
 
 Make sure you have installed the following build dependencies:
