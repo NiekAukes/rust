@@ -1,13 +1,19 @@
-# Downloading this compiler
+
+# General Dependencies
 
 Make sure you have the required hardware and software to run CUDA programs:
 
 -   A CUDA-enabled GPU with [compute capability](https://developer.nvidia.com/cuda-gpus) >= 5
--   `cuda-toolkit` version 12.x
+-   [cuda-toolkit](https://developer.nvidia.com/cuda-toolkit) version 12.x
 -   An appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
+-   [Rustup](https://rustup.rs/)
 
-Then download the compiler from the [releases page](https://github.com/NiekAukes/rust/releases/) and unpack it.
+# Downloading this compiler
+
+Download the compiler from the [releases page](https://github.com/NiekAukes/rust/releases/) and unpack it.
 (or directly download for [windows](http://aukespot.com/rust-gpuhc/rust-gpuhc-windows.zip) or [linux](http://aukespot.com/rust-gpuhc/rust-gpuhc-linux.zip))
+
+continue with [Linking the compiler](#linking-the-compiler)
 
 # Installing this compiler from source
 
@@ -15,15 +21,7 @@ Then download the compiler from the [releases page](https://github.com/NiekAukes
 Prebuilt binaries are not available for this modified rust compiler.
 **
 
-## Dependencies
-
-Make sure you have the required hardware and software to run CUDA programs:
-
--   A CUDA-enabled GPU with [compute capability](https://developer.nvidia.com/cuda-gpus) >= 5
--   `cuda-toolkit` version 12.x
--   An appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
-
-And make sure you have installed the dependencies:
+Make sure you have installed the following build dependencies:
 
 -   `python` 3 or 2.7
 -   `git`
@@ -116,63 +114,6 @@ the bootstrap.
 CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
 python x.py build
 ```
-
-### MinGW
-
-[MSYS2][msys2] can be used to easily build Rust on Windows:
-
-[msys2]: https://www.msys2.org/
-
-1. Download the latest [MSYS2 installer][msys2] and go through the installer.
-
-2. Download and install [Git for Windows](https://git-scm.com/download/win).
-   Make sure that it's in your Windows PATH. To enable access to it from within
-   MSYS2, edit the relevant `mingw[32|64].ini` file in your MSYS2 installation
-   directory and uncomment the line `MSYS2_PATH_TYPE=inherit`.
-
-    You could install and use MSYS2's version of git instead with `pacman`,
-    however this is not recommended as it's excruciatingly slow, and not frequently
-    tested for compatibility.
-
-3. Start a MINGW64 or MINGW32 shell (depending on whether you want 32-bit
-   or 64-bit Rust) either from your start menu, or by running `mingw64.exe`
-   or `mingw32.exe` from your MSYS2 installation directory (e.g. `C:\msys64`).
-
-4. From this terminal, install the required tools:
-
-    ```sh
-    # Update package mirrors (may be needed if you have a fresh install of MSYS2)
-    pacman -Sy pacman-mirrors
-
-    # Install build tools needed for Rust. If you're building a 32-bit compiler,
-    # then replace "x86_64" below with "i686".
-    # Note that it is important that you do **not** use the 'python2', 'cmake',
-    # and 'ninja' packages from the 'msys2' subsystem.
-    # The build has historically been known to fail with these packages.
-    pacman -S make \
-                diffutils \
-                tar \
-                mingw-w64-x86_64-python \
-                mingw-w64-x86_64-cmake \
-                mingw-w64-x86_64-gcc \
-                mingw-w64-x86_64-ninja
-    ```
-
-5. Navigate to Rust's source code (or clone it), then build it:
-
-    ```sh
-    python x.py setup dist && python x.py build && python x.py install
-    ```
-
-If you want to try the native Windows versions of Python or CMake, you can remove
-them from the above pacman command and install them from another source. Follow
-the instructions in step 2 to get them on PATH.
-
-Using Windows native Python can be helpful if you get errors when building LLVM.
-You may also want to use Git for Windows, as it is often _much_ faster. Turning
-off real-time protection in the Windows Virus & Threat protections settings can
-also help with long run times (although note that it will automatically turn
-itself back on after some time).
 
 # Using this compiler with the sample project
 
