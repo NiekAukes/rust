@@ -13,7 +13,7 @@ Make sure you have the required hardware and software to run CUDA programs:
 Download the compiler from the [releases page](https://github.com/NiekAukes/rust/releases/) and unpack it.
 (or directly download for [windows](http://aukespot.com/rust-gpuhc/rust-gpuhc-windows.zip) or [linux](http://aukespot.com/rust-gpuhc/rust-gpuhc-linux.zip))
 
-continue with [Linking the compiler](#linking-the-compiler)
+continue with [Linking the compiler and cloning the sample project](#using-this-compiler-with-the-sample-project)
 
 # Installing this compiler from source
 
