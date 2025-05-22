@@ -379,6 +379,10 @@ language_item_table! {
 
     String,                  sym::String,              string,                     Target::Struct,         GenericRequirement::None;
     CStr,                    sym::CStr,                c_str,                      Target::Struct,         GenericRequirement::None;
+
+    // Kernel lang items
+    KernelPanicImpl,         sym::kernel_panic_impl,     kernel_panic_impl,        Target::Fn,             GenericRequirement::None; 
+    KernelPanicFmtImpl,      sym::kernel_panic_fmt_impl, kernel_panic_fmt_impl,    Target::Fn,             GenericRequirement::None;
 }
 
 pub enum GenericRequirement {

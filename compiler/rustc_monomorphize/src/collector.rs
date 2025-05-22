@@ -1343,7 +1343,11 @@ fn collect_items_of_instance<'tcx>(
     mode: CollectionMode,
     is_in_kernel: bool,
 ) {
-    let body = tcx.instance_mir(instance.def);
+    let body = if is_in_kernel {
+        tcx.instance_device_mir(instance.def)
+    } else {
+        tcx.instance_mir(instance.def)
+    };
     // Naively, in "used" collection mode, all functions get added to *both* `used_items` and
     // `mentioned_items`. Mentioned items processing will then notice that they have already been
     // visited, but at that point each mentioned item has been monomorphized, added to the

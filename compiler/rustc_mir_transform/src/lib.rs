@@ -113,6 +113,9 @@ mod sroa;
 mod unreachable_enum_branching;
 mod unreachable_prop;
 
+use crate::kernel_lang_item_swap::KernelLangItemSwap;
+pub mod kernel_lang_item_swap;
+
 use rustc_const_eval::transform::check_consts::{self, ConstCx};
 use rustc_const_eval::transform::validate;
 use rustc_mir_dataflow::rustc_peek;
@@ -678,6 +681,9 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
 fn optimized_kernel_mir<'tcx>(tcx: TyCtxt<'tcx>, did: DefId) -> &'tcx Body<'tcx> {
     // get the normal optimized mir
     let mut body = tcx.optimized_mir(did).clone();
+    
+    let kernel_swap_pass = KernelLangItemSwap::new(tcx);
+    kernel_swap_pass.run_pass(tcx, &mut body);
 
     AbortUnwindingCalls.run_pass_for_device_code(tcx, &mut body);
 
