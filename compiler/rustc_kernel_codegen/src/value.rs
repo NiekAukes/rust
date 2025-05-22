@@ -463,7 +463,11 @@ impl<'m> Const {
             Const::Lit(_) => module.ty_from_type(TypeNVVM::I(8)),
             Const::Undef => module.ty_from_type(TypeNVVM::Zst),
             Const::Arr(l) => {
-                let ty = l[0].get_ty(module);
+                let ty = if l.is_empty() {
+                    module.ty_from_type(TypeNVVM::Zst)
+                } else {
+                    l[0].get_ty(module)
+                };
                 module.ty_from_type(TypeNVVM::Array(ty, l.len()))
             }
         }
