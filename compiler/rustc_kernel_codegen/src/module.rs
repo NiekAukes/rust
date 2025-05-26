@@ -2,7 +2,10 @@ use std::iter::Map;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::DefId;
-use rustc_middle::{mir::interpret::AllocId, ty::Ty};
+use rustc_middle::{
+    mir::{coverage::Op, interpret::AllocId},
+    ty::Ty,
+};
 
 use crate::{
     function::FunctionNVVM,
@@ -24,6 +27,7 @@ pub struct ModuleNVVM<'m> {
 
     pub globals: FxHashMap<DefId, Global<'m>>,
     pub allocs: FxHashMap<Global<'m>, Val<'m>>,
+    pub const_vals: FxHashMap<Val<'m>, String>,
 
     pub types: Vec<TyNVVM<'m>>,
     pub values: Vec<Val<'m>>,
@@ -47,6 +51,7 @@ impl<'m> ModuleNVVM<'m> {
             intrinsics: FxHashMap::default(),
             globals: FxHashMap::default(),
             allocs: FxHashMap::default(),
+            const_vals: FxHashMap::default(),
             metadata: Metadata { version: (1, 0), kernel: None, entries: FxHashMap::default() },
             types: Vec::new(),
             values: Vec::new(),
@@ -91,6 +96,13 @@ impl<'m> ModuleNVVM<'m> {
 
         self.allocs.insert(global, value);
         value
+    }
+
+    pub fn add_const_instruction(&mut self, instr: Val<'m>) {
+        let name = format!("@cinstr{}", self.const_vals.len());
+
+        // check if the instruction is a constant
+        self.const_vals.insert(instr, name);
     }
 
     pub fn add_function(&mut self, symbol_name: String, function: FunctionNVVM<'m>) {
@@ -155,6 +167,21 @@ impl<'m> ModuleNVVM<'m> {
 
         self.values.push(value);
         value
+    }
+
+    pub fn label_of_val(&self, value: Val<'m>, func: Option<&FunctionNVVM<'m>>) -> String {
+        if let Some(f) = func {
+            if let Some(label) = f.label_of_val(value) {
+                return label;
+            }
+        }
+
+        // try to find the label in the global labels
+        if let Some(label) = self.const_vals.get(&value) {
+            return label.clone();
+        }
+
+        panic!("Value does not have a label: {:?}", value);
     }
 
     pub fn set_valtype(&mut self, value: Val<'m>, ty: TyNVVM<'m>) {
@@ -245,9 +272,7 @@ impl<'m> ModuleNVVM<'m> {
 const LIBINTRINSIC: &str = include_str!("libintrinsics.ll");
 
 pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
-
     module.use_intrinsic("llvm.trap");
-
 
     let mut s = format!("; NVVM IR version {}\n", module.metadata.version.0);
     s.push_str("target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n");
@@ -290,6 +315,15 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
         let g = global.0.assemble(module) + "\n";
         s.push_str(&g);
     }
+
+    let const_vals = module.const_vals.clone();
+    for (val, name) in const_vals.iter() {
+        let ty = *module.valtypes.get(val).unwrap();
+        let ty_str = ty.assemble(module);
+        let val_str = val.assemble(module, None, val);
+        s.push_str(&format!("{} = {}\n", name, val_str));
+    }
+
     s.push_str("\n");
 
     let fns = module.functions.clone();

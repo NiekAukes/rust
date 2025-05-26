@@ -3,7 +3,7 @@ use rustc_middle::{bug, mir::interpret::{AllocId, AllocRange, ConstAllocation, G
 use rustc_target::abi::{self, Size};
 
 use crate::{
-    ty::TyNVVM,
+    ty::{TyNVVM, TypeNVVM},
     value::{Const, Instruction, Val, ValueNVVM},
     GlobalNVVM,
 };
@@ -223,12 +223,41 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
         offset: rustc_target::abi::Size,
     ) -> Self::Value {
         let mut module = self.get_module_mut();
-        let instr = Instruction::InBoundsGep { 
-            ty: self.type_i8(), 
-            ptr: val,
-            indices: vec![self.const_usize(offset.bytes())],
+        // infer the type of the operation, in practice the val is almost always a pointer
+        let val_ty = module.valtypes.get(&val).unwrap();
+        let rty = match val_ty.0 {
+            TypeNVVM::Pointer(ty) => {
+                match ty.0 {
+                    TypeNVVM::Array(inner_ty, _) => {
+                        // if the pointer is an array, we need to get the element type
+                        *inner_ty
+                    }
+                    TypeNVVM::Pointer(inner_ty) => {
+                        // if the pointer is a pointer, we need to get the inner type
+                        *inner_ty
+                    }
+                    _ => {
+                        // if the pointer is not an array or a pointer, we need to get the type
+                        // this is a bug in the codegen
+                        panic!("const_ptr_byte_offset called on non-pointer value: {:?}", val);
+                    }
+                }
+            }
+            _ => {
+                // if the value is not a pointer, we can't do pointer arithmetic
+                // this is a bug in the codegen
+                panic!("const_ptr_byte_offset called on non-pointer value: {:?}", val);
+            }
         };
-        module.create_val(ValueNVVM::Instr(instr), Some(self.type_i8()))
+
+        let instr = Instruction::InBoundsGep {
+            ty: rty,
+            ptr: val,
+            indices: vec![self.const_usize(0), self.const_usize(offset.bytes())],
+        };
+        let v = module.create_val(ValueNVVM::Instr(instr), Some(rty));
+        module.add_const_instruction(v);
+        v
     }
 }
 

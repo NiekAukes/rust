@@ -8,7 +8,6 @@ use crate::ty::TypeNVVM;
 use crate::value::{Val, ValueNVVM};
 use crate::{basic_block::BasicBlock, ty::TyNVVM};
 
-
 #[derive(Debug)]
 pub struct FunctionNVVM<'m> {
     pub is_kernel: bool,
@@ -98,12 +97,12 @@ impl<'m> FunctionNVVM<'m> {
         unsafe { !(*self.basic_blocks.get()).is_empty() }
     }
 
-    pub fn label_of_val(&self, val: Val<'m>) -> String {
+    pub fn label_of_val(&self, val: Val<'m>) -> Option<String> {
         unsafe {
             if let Some(label) = (*self.val_labels.get()).get(&val) {
-                label.clone()
+                Some(label.clone())
             } else {
-                bug!("No label for value: {:?}", val);
+                None
             }
         }
     }
@@ -148,7 +147,7 @@ impl<'m> FunctionNVVM<'m> {
                 if i != 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&format!("{}", arg_inner.assemble(module, &self, arg)));
+                s.push_str(&format!("{}", arg_inner.assemble(module, Some(&self), arg)));
             }
         }
         s.push_str(") {\n");
@@ -172,7 +171,7 @@ impl<'m> FunctionNVVM<'m> {
             // }
             for instr in bb.instrs() {
                 let instr_inner = instr.0;
-                s.push_str(&format!("  {}\n", instr_inner.assemble(module, &self, &instr)));
+                s.push_str(&format!("  {}\n", instr_inner.assemble(module, Some(&self), &instr)));
             }
         }
 
@@ -211,7 +210,7 @@ impl<'m> FunctionNVVM<'m> {
                 if i != 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&format!("{}", arg_inner.assemble(module, &self, arg)));
+                s.push_str(&format!("{}", arg_inner.assemble(module, Some(&self), arg)));
             }
         }
         s.push_str(");\n");

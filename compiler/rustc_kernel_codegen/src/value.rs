@@ -16,6 +16,7 @@ pub trait ToVal<'m> {
 
 pub trait AssembleVal<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String;
+    fn assemble_const(&self, module: &mut ModuleNVVM<'m>) -> String;
 }
 
 #[derive(Debug)]
@@ -336,9 +337,16 @@ const PARAM_LABELS: [&str; 26] = [
 impl<'m> AssembleVal<'m> for Val<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String {
         match self.0 {
-            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => func.label_of_val(*self).to_string(),
+            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => module.label_of_val(*self, Some(func)),
 
-            _ => self.0.assemble(module, func, self),
+            _ => self.0.assemble(module, Some(func), self),
+        }
+    }
+    fn assemble_const(&self, module: &mut ModuleNVVM<'m>) -> String {
+        match self.0 {
+            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => module.label_of_val(*self, None),
+
+            _ => self.0.assemble(module, None, self),
         }
     }
 }
@@ -347,15 +355,15 @@ impl<'m> ValueNVVM<'m> {
     pub fn assemble(
         &self,
         module: &mut ModuleNVVM<'m>,
-        func: &FunctionNVVM<'m>,
+        function: Option<&FunctionNVVM<'m>>,
         value: &Val<'m>,
     ) -> String {
-        match self {
-            ValueNVVM::Param { func_name, idx, ty } => {
+        match (self, function) {
+            (ValueNVVM::Param { func_name, idx, ty }, Some(func)) => {
                 func.create_val_label(*value, PARAM_LABELS[*idx].to_string());
                 format!("{} {}", ty.assemble(module), PARAM_LABELS[*idx])
             }
-            ValueNVVM::Instr(instr) => {
+            (ValueNVVM::Instr(instr), Some(func)) => {
                 if instr.has_ret() {
                     let label = func.assign_label_to_val(*value);
                     let instr = instr.assemble(module, func, value);
@@ -364,15 +372,22 @@ impl<'m> ValueNVVM<'m> {
                     instr.assemble(module, func, value)
                 }
             }
-            ValueNVVM::Constant(c) => c.assemble(module),
-            ValueNVVM::Type(ty) => ty.assemble(module),
+            (ValueNVVM::Instr(instr), None) => {
+                // if there is no function, we cannot assign a label
+                return instr.assemble_global(module);
+            }
+            (ValueNVVM::Constant(c), _) => c.assemble(module),
+            (ValueNVVM::Type(ty), _) => ty.assemble(module),
 
-            ValueNVVM::FnRef(name) => {
+            (ValueNVVM::FnRef(name), _) => {
                 format!("@{}", name)
             }
 
-            ValueNVVM::Global(g) => {
+            (ValueNVVM::Global(g), _) => {
                 format!("@{}", g.name)
+            }
+            (_, f) => {
+                panic!("Invalid value: {:#?}, {:#?}", self, f);
             }
         }
     }
@@ -533,7 +548,7 @@ impl<'m> Instruction<'m> {
         val: &Val<'m>,
     ) -> String {
         match self {
-            Instruction::Alloca{ty, size, align} => {
+            Instruction::Alloca { ty, size, align } => {
                 format!("alloca {}, i64 {}, align {}", ty.assemble(module), size, align)
             }
             Instruction::ExtractValue(ty, val, idx) => {
@@ -979,6 +994,27 @@ impl<'m> Instruction<'m> {
             Instruction::LifetimeEnd(_, _) => {
                 panic!("Lifetime is a temporary instruction")
             }
+        }
+    }
+
+    pub fn assemble_global(&self, module: &mut ModuleNVVM<'m>) -> String {
+        match self {
+            Instruction::InBoundsGep { ty, ptr, indices } => {
+                let ty_str = ty.assemble(module);
+                let ptr_ty = *module.valtypes.get(ptr).unwrap();
+                let ptr_ty_str = ptr_ty.assemble(module);
+                let ptr_label = ptr.assemble_const(module);
+                let mut s =
+                    format!("getelementptr inbounds {}, {} {}", ty_str, ptr_ty_str, ptr_label);
+                for (i, idx) in indices.iter().enumerate() {
+                    let ty = *module.valtypes.get(idx).unwrap();
+                    let ty_str = ty.assemble(module);
+                    let label = idx.assemble_const(module);
+                    s.push_str(&format!(",{} {}", ty_str, label));
+                }
+                s
+            }
+            _ => panic!("Invalid instruction for global: {:?}", self),
         }
     }
 }
