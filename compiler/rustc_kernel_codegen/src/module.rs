@@ -16,8 +16,8 @@ pub trait Assemble<'m> {
 }
 
 pub struct ModuleNVVM<'m> {
-    pub functions: FxHashMap<DefId, &'m FunctionNVVM<'m>>,
-    pub defrefs: FxHashMap<DefId, Val<'m>>,
+    pub functions: FxHashMap<String, &'m FunctionNVVM<'m>>,
+    pub defrefs: FxHashMap<String, Val<'m>>,
 
     declared_intrinsics: FxHashSet<String>,
     pub intrinsics: FxHashMap<String, Val<'m>>,
@@ -93,9 +93,9 @@ impl<'m> ModuleNVVM<'m> {
         value
     }
 
-    pub fn add_function(&mut self, def_id: DefId, function: FunctionNVVM<'m>) {
+    pub fn add_function(&mut self, symbol_name: String, function: FunctionNVVM<'m>) {
         let function = self.arena.dropless.alloc(function);
-        self.functions.insert(def_id, function);
+        self.functions.insert(symbol_name, function);
     }
 
     pub fn ty_from_type(&mut self, ty: TypeNVVM<'m>) -> TyNVVM<'m> {

@@ -1,18 +1,18 @@
-use std::borrow::BorrowMut;
+use std::{borrow::BorrowMut, cell::RefCell};
 
 use rustc_codegen_ssa::traits::{MiscMethods, PreDefineMethods, TypeMembershipMethods};
 use rustc_data_structures::fx::FxHashMap;
-use rustc_middle::ty::{layout::HasTyCtxt, Instance, List, ParamEnv, Ty};
+use rustc_middle::ty::{layout::HasTyCtxt, Instance, List, ParamEnv, PolyExistentialTraitRef, Ty};
 
 use crate::{function::FunctionNVVM, value::{Val, ValueNVVM}};
 
-use super::CodegenCx;
+use super::{declare::fix_ptx_name, CodegenCx};
 
-impl<'tcx> MiscMethods<'tcx> for CodegenCx<'_, 'tcx> {
+impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
     fn vtables(
         &self,
-    ) -> &std::cell::RefCell<FxHashMap<(Ty<'tcx>, Option<rustc_middle::ty::PolyExistentialTraitRef<'tcx>>), Self::Value>> {
-        todo!()
+    ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), Self::Value>> {
+        &self.vtables
     }
 
     fn check_overflow(&self) -> bool {
@@ -26,14 +26,17 @@ impl<'tcx> MiscMethods<'tcx> for CodegenCx<'_, 'tcx> {
         //if (self.tcx().is_kernel(instance.def_id())) {
             // pass the instance to the kernel fn generator
         //}
-        module.functions.get(&instance.def_id()).unwrap()
+        let symbol_name = self.tcx.symbol_name(instance).name.to_string();
+
+        module.functions.get(&symbol_name).unwrap()
     }
 
     fn get_fn_addr(&self, instance: rustc_middle::ty::Instance<'tcx>) -> Self::Value {
         //should return @function_name
         let module = unsafe { &mut *self.module.get() };
-        //println!("get_fn_addr: {:?}", instance);
-        match module.defrefs.get(&instance.def_id()) {
+        let symbol_name = self.tcx.symbol_name(instance).name.to_string();
+
+        match module.defrefs.get(&symbol_name) {
             Some(val) => *val,
             None => {
                 // maybe an extern call
@@ -122,6 +125,7 @@ fn generate_extern_decl<'m, 'tcx>(cx: &CodegenCx<'m, 'tcx>, instance: rustc_midd
         rustc_middle::mir::mono::Linkage::Common, 
         rustc_middle::mir::mono::Visibility::Default, 
         name);
-    let val = module.defrefs.get(&instance.def_id()).unwrap();
+    let symbol_name = name.to_string();
+    let val = module.defrefs.get(&symbol_name).unwrap();
     *val
 }

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
@@ -12,6 +13,8 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::intern::Interned;
 use rustc_middle::ty::layout::HasParamEnv;
 use rustc_middle::ty::layout::HasTyCtxt;
+use rustc_middle::ty::ExistentialTraitRef;
+use rustc_middle::ty::PolyExistentialTraitRef;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::TyCtxt;
 use rustc_target::abi::VariantIdx;
@@ -39,6 +42,8 @@ pub struct CodegenCx<'m, 'tcx> {
 
     pub(crate) typecache: UnsafeCell<FxHashMap<Ty<'tcx>, TyNVVM<'m>>>,
 
+    pub vtables: RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), Val<'m>>>,
+    
     //session: &'tcx rustc_session::Session,
     pub(crate) eh_personality: Cell<Option<Val<'m>>>,
 
@@ -105,6 +110,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
             typecache: UnsafeCell::new(FxHashMap::default()),
             eh_personality: Cell::new(None),
             target: t,
+            vtables: RefCell::new(FxHashMap::default()),
         }
     }
 

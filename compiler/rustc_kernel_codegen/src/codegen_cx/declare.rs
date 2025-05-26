@@ -32,7 +32,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         instance: rustc_middle::ty::Instance<'tcx>,
         linkage: rustc_middle::mir::mono::Linkage,
         visibility: rustc_middle::mir::mono::Visibility,
-        symbol_name: &str,
+        init_symbol_name: &str,
     ) {
         // because of how the function is defined,
         // we need to unsafely get the codegen_cx as mut
@@ -54,7 +54,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         };
 
         // fix the symbol name for ptx
-        let symbol_name = fix_ptx_name(symbol_name);
+        let symbol_name = fix_ptx_name(init_symbol_name);
 
         let mut arg_count = 0;
 
@@ -161,9 +161,9 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         let mut f = FunctionNVVM::new(symbol_name.to_string(), is_kernel, ret, args, ty);
 
         // we need to add the function to the module
-        module.add_function(instance.def_id(), f);
+        module.add_function(init_symbol_name.to_string(), f);
         let val = module.create_val(ValueNVVM::FnRef(symbol_name.to_string()), Some(ty));
-        module.defrefs.insert(instance.def_id(), val);
+        module.defrefs.insert(init_symbol_name.to_string(), val);
 
         // if the function is a kernel, add a kernel interface
     }

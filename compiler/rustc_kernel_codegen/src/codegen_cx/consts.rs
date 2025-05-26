@@ -1,5 +1,5 @@
 use rustc_codegen_ssa::traits::{BaseTypeMethods, ConstMethods};
-use rustc_middle::mir::interpret::{AllocId, AllocRange, ConstAllocation, GlobalAlloc, Scalar};
+use rustc_middle::{bug, mir::interpret::{AllocId, AllocRange, ConstAllocation, GlobalAlloc, Scalar}};
 use rustc_target::abi::{self, Size};
 
 use crate::{
@@ -188,7 +188,22 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
                         let alloc = self.tcx.eval_static_initializer(def_id).unwrap();
                         return self.const_data_from_alloc(alloc);
                     }
-                    GlobalAlloc::VTable(_, _) => todo!(),
+                    GlobalAlloc::VTable(ty, binder) => {
+                        let key = (ty, binder);
+                        let alloc_id = self.tcx.vtable_allocation(key);
+                        match self.tcx.global_alloc(alloc_id) {
+                            GlobalAlloc::Memory(alloc) => {
+                                let val = self.const_data_from_alloc(alloc);
+                                return val;
+                            }
+                            _ => {
+                                bug!(
+                                    "vtable allocation for {:?} is not a memory allocation",
+                                    key
+                                );
+                            }
+                        }
+                    }
                 }
                 todo!()
             }

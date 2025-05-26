@@ -91,7 +91,8 @@ impl<'m> Assemble<'m> for GlobalNVVM<'m> {
                 format!("@{} = constant {} {}", self.name, ty_str, data_str)
             }
             None => {
-                todo!()
+                // DUMMY
+                format!("@{} = dummy global", self.name)            
             }
         }
     }
