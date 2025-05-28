@@ -433,7 +433,7 @@ impl<'m> Const {
                 s
             }
 
-            Const::FnRef(name) => format!("@{}", fix_ptx_name(name)),
+            Const::FnRef(name) => format!("@{}", name),
         }
     }
     pub fn assemble_for_const(&self, module: &mut ModuleNVVM<'m>) -> String {
@@ -480,7 +480,7 @@ impl<'m> Const {
                 format!("{} {}", ty, s)
             }
             Const::FnRef(name) => {
-                format!("{} @{}", ty, fix_ptx_name(name))
+                format!("{} @{}", ty, name)
             }
         }
     }
@@ -1039,8 +1039,3 @@ impl<'m> Instruction<'m> {
     }
 }
 
-pub fn fix_ptx_name(name: &str) -> String {
-    // replace all dots with underscores
-    // because PTX doesn't allow dots in names
-    name.replace(".", "_")
-}

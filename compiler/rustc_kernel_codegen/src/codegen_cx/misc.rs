@@ -2,14 +2,14 @@ use std::{borrow::BorrowMut, cell::RefCell};
 
 use rustc_codegen_ssa::traits::{MiscMethods, PreDefineMethods, TypeMembershipMethods};
 use rustc_data_structures::fx::FxHashMap;
-use rustc_middle::ty::{layout::HasTyCtxt, Instance, List, ParamEnv, PolyExistentialTraitRef, Ty};
+use rustc_middle::{query::queries::symbol_name, ty::{layout::HasTyCtxt, Instance, List, ParamEnv, PolyExistentialTraitRef, Ty}};
 
 use crate::{
     function::FunctionNVVM,
     value::{Val, ValueNVVM},
 };
 
-use super::CodegenCx;
+use super::{declare::fix_ptx_name, CodegenCx};
 
 impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
     fn vtables(
@@ -30,6 +30,7 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
         // pass the instance to the kernel fn generator
         //}
         let symbol_name = self.tcx.symbol_name(instance).name.to_string();
+        let symbol_name = fix_ptx_name(&symbol_name);
 
         module.functions.get(&symbol_name).unwrap()
     }
@@ -38,6 +39,7 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
         //should return @function_name
         let module = unsafe { &mut *self.module.get() };
         let symbol_name = self.tcx.symbol_name(instance).name.to_string();
+        let symbol_name = fix_ptx_name(&symbol_name);
 
         match module.defrefs.get(&symbol_name) {
             Some(val) => *val,

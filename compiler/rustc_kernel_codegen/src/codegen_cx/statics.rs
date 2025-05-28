@@ -1,11 +1,10 @@
 use rustc_codegen_ssa::traits::StaticMethods;
 
 use crate::{
-    global::GlobalNVVM,
-    value::{Const, Val, ValueNVVM},
+     global::GlobalNVVM, value::{Const, Val, ValueNVVM}
 };
 
-use super::CodegenCx;
+use super::{declare::fix_ptx_name, CodegenCx};
 
 impl<'m> StaticMethods for CodegenCx<'m, '_> {
     fn static_addr_of(
@@ -54,10 +53,11 @@ impl<'m> StaticMethods for CodegenCx<'m, '_> {
     }
 }
 
-impl<'m> CodegenCx<'m, '_> {
+impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
     fn get_next_static_id(&self) -> usize {
         let next_id = self.next_static_id.get();
         self.next_static_id.set(next_id + 1);
         next_id
     }
 }
+

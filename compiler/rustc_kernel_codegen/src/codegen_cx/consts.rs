@@ -11,9 +11,7 @@ use rustc_middle::{
 use rustc_target::abi::{self, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
 
 use crate::{
-    global::GlobalNVVM,
-    ty::{TyNVVM, TypeNVVM},
-    value::{Const, Instruction, Val, ValueNVVM},
+    codegen_cx::declare::fix_ptx_name, global::GlobalNVVM, ty::{TyNVVM, TypeNVVM}, value::{Const, Instruction, Val, ValueNVVM}
 };
 
 use super::CodegenCx;
@@ -270,6 +268,8 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
         }
 
         self.const_struct(&llvals, true)
+
+
     }
 
     fn scalar_to_backend(
@@ -299,6 +299,7 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
                     GlobalAlloc::Function(instance) => {
                         // make an fnref to the function
                         let symbol_name = self.tcx.symbol_name(instance).name.to_string();
+                        let symbol_name = fix_ptx_name(&symbol_name);
 
                         // get the module
                         let module = self.get_module();

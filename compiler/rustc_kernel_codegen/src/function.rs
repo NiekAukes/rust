@@ -5,7 +5,7 @@ use rustc_middle::bug;
 
 use crate::module::{Assemble, ModuleNVVM};
 use crate::ty::TypeNVVM;
-use crate::value::{fix_ptx_name, Val, ValueNVVM};
+use crate::value::{Val, ValueNVVM};
 use crate::{basic_block::BasicBlock, ty::TyNVVM};
 
 #[derive(Debug)]
@@ -90,6 +90,7 @@ impl<'m> FunctionNVVM<'m> {
             } else {
                 (*self.basic_blocks.get()).push(bb);
             }
+            // (*self.basic_blocks.get()).push(bb);
         }
     }
 
@@ -138,7 +139,7 @@ impl<'m> FunctionNVVM<'m> {
         // return type
         s.push_str(&format!("{} ", self.ret.assemble(module)));
         // function name
-        let fn_name = fix_ptx_name(self.name.as_str());
+        let fn_name = self.name.as_str();
         s.push_str(&format!("@{}(", fn_name));
 
         // arguments
@@ -156,20 +157,6 @@ impl<'m> FunctionNVVM<'m> {
         // basic blocks
         for bb in unsafe { &*self.basic_blocks.get() } {
             s.push_str(&format!("{}:\n", bb.name));
-            // if bb.name == "panic" {
-            //     // custom handle panic blocks, we need to do this due to some
-            //     // limitations in the current implementation
-            //     // the normal panic handler expects panic functions to be defined
-            //     // but they aren't in the kernel, and we don't want to define them
-
-            //     // so, we just skip the panic block skip the entire function
-            //     // we do this by calling the llvm.trap intrinsic
-            //     s.push_str("  call void @llvm.trap()\n");
-            //     module.use_intrinsic("llvm.trap");
-            //     //println!("using intrinsic llvm.trap");
-            //     s.push_str("  unreachable\n");
-            //     continue;
-            // }
             for instr in bb.instrs() {
                 let instr_inner = instr.0;
                 s.push_str(&format!("  {}\n", instr_inner.assemble(module, &self, &instr)));
@@ -190,6 +177,7 @@ impl<'m> FunctionNVVM<'m> {
                 module.use_intrinsic("llvm.trap");
                 //println!("using intrinsic llvm.trap");
                 s.push_str("  unreachable\n");
+                
             }
         }
 
@@ -218,3 +206,5 @@ impl<'m> FunctionNVVM<'m> {
         s
     }
 }
+
+

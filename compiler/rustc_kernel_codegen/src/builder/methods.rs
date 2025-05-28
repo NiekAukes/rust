@@ -8,6 +8,7 @@ use crate::{
     value::{Comp, Const, Instruction, Val, ValueNVVM},
 };
 use rustc_codegen_ssa::common::IntPredicate;
+use rustc_codegen_ssa::traits::StaticMethods;
 use rustc_codegen_ssa::{
     mir::{
         operand::{OperandRef, OperandValue},
@@ -544,6 +545,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             return OperandRef::zero_sized(place.layout);
         }
 
+        println!("Loading operand: {:?}", place);
+
         let val = if let Some(_) = place.val.llextra {
             // FIXME: Merge with the `else` below?
             OperandValue::Ref(place.val)
@@ -552,7 +555,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             let llty = self.cx().backend_type(place.layout);
             /*unsafe {
                 if let Some(global) = llvm::LLVMIsAGlobalVariable(place.val.llval) {
-                    if llvm::LLVMIsGlobalConstant(global) == llvm::True {
+                    if llvm::LLVMIsGlobalConstant(global) == llvm::True {S
                         if let Some(init) = llvm::LLVMGetInitializer(global) {
                             if self.val_ty(init) == llty {
                                 const_llval = Some(init);
@@ -561,6 +564,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
                     }
                 }
             }*/
+            // to replicate the code above, we use a bit of a trick:
+            // we check if the value is a struct or array constant, if it is, we must use it as a global variable
+            if let ValueNVVM::Constant(Const::Arr(_) | Const::Struct(_)) = place.val.llval.0 {
+                // get the static address of the constant
+                const_llval = Some(self.cx().static_addr_of(place.val.llval, place.val.align, None));
+            }
             let llval = const_llval.unwrap_or_else(|| {
                 let load = self.load(llty, place.val.llval, place.val.align);
                 // if let Abi::Scalar(scalar) = place.layout.abi {
@@ -1121,6 +1130,11 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             _ => panic!("Expected function type, found {:?}", fn_decl_ty),
         };
 
+        println!(
+            "Call function: {:?}, args: {:?}, ret: {:?}",
+            llfn, args, ret
+        );
+
         // check if all function parameters have the correct type
         for (i, (arg, expected_ty)) in args.iter().zip(unpacked_fn_abi.iter()).enumerate() {
             //let ty = self.cx().backend_type(*expected_ty);
@@ -1196,6 +1210,14 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
 
         let module = self.cx().get_module();
 
+        // if the arg is a struct or array constant, we need to get the static address of the constant
+        if let ValueNVVM::Constant(Const::Arr(_) | Const::Struct(_)) = arg.0 {
+            // get the static address of the constant
+            // TODO alignment is not considered here
+            let s_addr = self.cx().static_addr_of(arg, Align::from_bytes(8).unwrap(), None);
+            return self.convert_argument(s_addr, to_ty);
+        }
+
         // if the target type has the same amount of bits as the source type
         // then a bitcast is sufficient
         let from_size = from_ty.size(module);
@@ -1232,11 +1254,12 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
                 return self.cx().const_undef(to_ty);
             } else {
                 bug!(
-                    "convert_argument: unsupported conversion from {:#?} to {:#?}. with the value being: {:#?}",
+                    "convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}",
                     from_ty,
                     to_ty,
                     arg
                 );
+                return arg; // return the original value
             }
         }
 
