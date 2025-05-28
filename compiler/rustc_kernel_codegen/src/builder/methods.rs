@@ -497,11 +497,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         // create a new alloca instruction
         let ty = self.cx().type_i8();
         let ptr_ty = self.cx().type_pointer(ty);
-        let alloca = ValueNVVM::Instr(Instruction::Alloca {
-            ty, 
-            size: size.bytes(), 
-            align: align.bytes()
-        });
+        let alloca =
+            ValueNVVM::Instr(Instruction::Alloca { ty, size: size.bytes(), align: align.bytes() });
         let v = self.cx().get_module_mut().create_val(alloca, Some(ptr_ty)); // the type of the alloca is not known
 
         // add the alloca instruction to the current basic block
@@ -808,12 +805,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         //     _ => panic!("Invalid type for bitcast for type: {:#?}", dest_ty),
         // }
 
-        
-
-
         // build a bitcast instruction
         let ty = self.cx().val_ty(val);
-
 
         let instr = Instruction::BitCast { ty, val, to: dest_ty };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
@@ -1239,7 +1232,7 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
                 return self.cx().const_undef(to_ty);
             } else {
                 bug!(
-                    "convert_argument: unsupported conversion from {:?} to {:?}. with the value being: {:?}",
+                    "convert_argument: unsupported conversion from {:#?} to {:#?}. with the value being: {:#?}",
                     from_ty,
                     to_ty,
                     arg

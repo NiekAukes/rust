@@ -4,9 +4,12 @@ use rustc_codegen_ssa::traits::{MiscMethods, PreDefineMethods, TypeMembershipMet
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::{layout::HasTyCtxt, Instance, List, ParamEnv, PolyExistentialTraitRef, Ty};
 
-use crate::{function::FunctionNVVM, value::{Val, ValueNVVM}};
+use crate::{
+    function::FunctionNVVM,
+    value::{Val, ValueNVVM},
+};
 
-use super::{declare::fix_ptx_name, CodegenCx};
+use super::CodegenCx;
 
 impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
     fn vtables(
@@ -24,7 +27,7 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
         let module = unsafe { &mut *self.module.get() };
         // very first thing to do: check if this is a kernel function
         //if (self.tcx().is_kernel(instance.def_id())) {
-            // pass the instance to the kernel fn generator
+        // pass the instance to the kernel fn generator
         //}
         let symbol_name = self.tcx.symbol_name(instance).name.to_string();
 
@@ -65,8 +68,8 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
                 // no personality function
                 // return a null pointer
                 // let ty = self.type_of(self.tcx.mk_fn_ptr(self.tcx.mk_fn_sig(
-                //     &[], 
-                //     self.tcx.mk_unit(), 
+                //     &[],
+                //     self.tcx.mk_unit(),
                 //     false
                 // )));
                 // let llfn = module.define_function("eh_personality", ty);
@@ -101,7 +104,10 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
     }
 }
 
-fn generate_extern_decl<'m, 'tcx>(cx: &CodegenCx<'m, 'tcx>, instance: rustc_middle::ty::Instance<'tcx>) -> Val<'m> {
+fn generate_extern_decl<'m, 'tcx>(
+    cx: &CodegenCx<'m, 'tcx>,
+    instance: rustc_middle::ty::Instance<'tcx>,
+) -> Val<'m> {
     let module = cx.get_module_mut();
     let name = cx.tcx.symbol_name(instance).name;
 
@@ -113,18 +119,20 @@ fn generate_extern_decl<'m, 'tcx>(cx: &CodegenCx<'m, 'tcx>, instance: rustc_midd
             todo!()
         },
     };
-    
+
     let ty = cx.backend_type(abi.ret.layout);
-    
+
 
     // create the function address
     let funcaddr = ValueNVVM::FnRef(name.to_string());
     module.create_val(funcaddr, Some(ty))*/
 
-    cx.predefine_fn(instance, 
-        rustc_middle::mir::mono::Linkage::Common, 
-        rustc_middle::mir::mono::Visibility::Default, 
-        name);
+    cx.predefine_fn(
+        instance,
+        rustc_middle::mir::mono::Linkage::Common,
+        rustc_middle::mir::mono::Visibility::Default,
+        name,
+    );
     let symbol_name = name.to_string();
     let val = module.defrefs.get(&symbol_name).unwrap();
     *val

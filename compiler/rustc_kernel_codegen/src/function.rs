@@ -5,7 +5,7 @@ use rustc_middle::bug;
 
 use crate::module::{Assemble, ModuleNVVM};
 use crate::ty::TypeNVVM;
-use crate::value::{Val, ValueNVVM};
+use crate::value::{fix_ptx_name, Val, ValueNVVM};
 use crate::{basic_block::BasicBlock, ty::TyNVVM};
 
 #[derive(Debug)]
@@ -138,7 +138,8 @@ impl<'m> FunctionNVVM<'m> {
         // return type
         s.push_str(&format!("{} ", self.ret.assemble(module)));
         // function name
-        s.push_str(&format!("@{}(", self.name));
+        let fn_name = fix_ptx_name(self.name.as_str());
+        s.push_str(&format!("@{}(", fn_name));
 
         // arguments
         for (i, arg) in self.args.iter().enumerate() {
@@ -147,7 +148,7 @@ impl<'m> FunctionNVVM<'m> {
                 if i != 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&format!("{}", arg_inner.assemble(module, Some(&self), arg)));
+                s.push_str(&format!("{}", arg_inner.assemble(module, &self, arg)));
             }
         }
         s.push_str(") {\n");
@@ -171,7 +172,7 @@ impl<'m> FunctionNVVM<'m> {
             // }
             for instr in bb.instrs() {
                 let instr_inner = instr.0;
-                s.push_str(&format!("  {}\n", instr_inner.assemble(module, Some(&self), &instr)));
+                s.push_str(&format!("  {}\n", instr_inner.assemble(module, &self, &instr)));
             }
         }
 
@@ -210,7 +211,7 @@ impl<'m> FunctionNVVM<'m> {
                 if i != 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&format!("{}", arg_inner.assemble(module, Some(&self), arg)));
+                s.push_str(&format!("{}", arg_inner.assemble(module, &self, arg)));
             }
         }
         s.push_str(");\n");

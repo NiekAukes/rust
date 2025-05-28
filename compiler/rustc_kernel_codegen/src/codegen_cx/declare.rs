@@ -8,7 +8,7 @@ use rustc_target::abi::{
 use crate::{
     function::FunctionNVVM,
     ty::{TyNVVM, TypeNVVM},
-    value::{Val, ValueNVVM},
+    value::{Const, Val, ValueNVVM},
 };
 
 use super::{
@@ -32,7 +32,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         instance: rustc_middle::ty::Instance<'tcx>,
         linkage: rustc_middle::mir::mono::Linkage,
         visibility: rustc_middle::mir::mono::Visibility,
-        init_symbol_name: &str,
+        symbol_name: &str,
     ) {
         // because of how the function is defined,
         // we need to unsafely get the codegen_cx as mut
@@ -52,9 +52,6 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
                 todo!()
             }
         };
-
-        // fix the symbol name for ptx
-        let symbol_name = fix_ptx_name(init_symbol_name);
 
         let mut arg_count = 0;
 
@@ -142,7 +139,6 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
             self.backend_type(abi.ret.layout)
         };
 
-
         // build the type
         let ty = module.ty_from_type(TypeNVVM::Fn(
             args.iter()
@@ -161,9 +157,10 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         let mut f = FunctionNVVM::new(symbol_name.to_string(), is_kernel, ret, args, ty);
 
         // we need to add the function to the module
-        module.add_function(init_symbol_name.to_string(), f);
-        let val = module.create_val(ValueNVVM::FnRef(symbol_name.to_string()), Some(ty));
-        module.defrefs.insert(init_symbol_name.to_string(), val);
+        module.add_function(symbol_name.to_string(), f);
+        let val =
+            module.create_val(ValueNVVM::Constant(Const::FnRef(symbol_name.to_string())), Some(ty));
+        module.defrefs.insert(symbol_name.to_string(), val);
 
         // if the function is a kernel, add a kernel interface
     }
@@ -230,10 +227,4 @@ impl<'m, 'tcx> NVVMType<'m, 'tcx> for Reg {
             _ => panic!("Unsupported register kind"),
         }
     }
-}
-
-pub fn fix_ptx_name(name: &str) -> String {
-    // replace all dots with underscores
-    // because PTX doesn't allow dots in names
-    name.replace(".", "_")
 }

@@ -4,6 +4,13 @@ use std::cell::RefCell;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
+use crate::basic_block::BasicBlock;
+use crate::function::FunctionNVVM;
+use crate::module::ModuleNVVM;
+use crate::ty::{TyNVVM, TypeNVVM};
+use crate::value::Const;
+use crate::value::Val;
+use crate::value::ValueNVVM;
 use rustc_codegen_ssa::traits::AsmMethods;
 use rustc_codegen_ssa::traits::BackendTypes;
 use rustc_codegen_ssa::traits::BaseTypeMethods;
@@ -20,19 +27,13 @@ use rustc_middle::ty::TyCtxt;
 use rustc_target::abi::VariantIdx;
 use rustc_target::spec::HasTargetSpec;
 use rustc_target::spec::Target;
-use crate::function::FunctionNVVM;
-use crate::module::ModuleNVVM;
-use crate::ty::{TyNVVM, TypeNVVM};
-use crate::basic_block::BasicBlock;
-use crate::value::Val;
-use crate::value::ValueNVVM;
 
-mod declare;
-mod consts;
-mod statics;
-mod debug;
-mod misc;
 pub mod abi;
+mod consts;
+mod debug;
+mod declare;
+mod misc;
+mod statics;
 
 pub struct CodegenCx<'m, 'tcx> {
     // ...
@@ -43,7 +44,12 @@ pub struct CodegenCx<'m, 'tcx> {
     pub(crate) typecache: UnsafeCell<FxHashMap<Ty<'tcx>, TyNVVM<'m>>>,
 
     pub vtables: RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), Val<'m>>>,
-    
+
+    // map of a value
+    pub globals: RefCell<FxHashMap<Val<'m>, Val<'m>>>,
+    // next static id, used to generate unique names for statics
+    next_static_id: Cell<usize>,
+
     //session: &'tcx rustc_session::Session,
     pub(crate) eh_personality: Cell<Option<Val<'m>>>,
 
@@ -84,7 +90,6 @@ impl<'tcx> AsmMethods<'tcx> for CodegenCx<'_, 'tcx> {
     }
 }
 
-
 impl<'tcx> HasParamEnv<'tcx> for CodegenCx<'_, 'tcx> {
     fn param_env(&self) -> rustc_middle::ty::ParamEnv<'tcx> {
         rustc_middle::ty::ParamEnv::reveal_all()
@@ -96,7 +101,6 @@ impl<'tcx> HasTyCtxt<'tcx> for CodegenCx<'_, 'tcx> {
         self.tcx
     }
 }
-
 
 impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>, module: ModuleNVVM<'m>) -> Self {
@@ -111,6 +115,8 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
             eh_personality: Cell::new(None),
             target: t,
             vtables: RefCell::new(FxHashMap::default()),
+            globals: RefCell::new(FxHashMap::default()),
+            next_static_id: Cell::new(0),
         }
     }
 
@@ -131,7 +137,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         macro_rules! ifn {
             ($($name:literal)|*, fn($($arg:expr),*) -> $ret:expr) => {
                 for name in &[$($name),*] {
-                    let value = ValueNVVM::FnRef(name.to_string());
+                    let value = ValueNVVM::Constant(Const::FnRef(name.to_string()));
                     let args = &[$($arg),*];
                     let ty = self.type_func(args, $ret);
                     let val = module.create_val(value, Some(ty));
@@ -157,7 +163,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         let t_i64_i1 = self.type_struct(&[t_i64, i1], false);
 
         let voidp = self.type_voidptr();
-        
+
         ifn!("llvm.trap" | "llvm.sideeffect", fn() -> void);
         ifn!("llvm.assume", fn(i1) -> void);
         ifn!("llvm.prefetch", fn(i8p, t_i32, t_i32, t_i32) -> void);
@@ -203,7 +209,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
         }*/
 
-        /* 
+        /*
         let i128_saturating_ops = [
             "llvm.sadd.sat.i128",
             "llvm.uadd.sat.i128",
@@ -300,7 +306,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         ifn!("llvm.va_end", fn(i8p) -> void);
         ifn!("llvm.va_copy", fn(i8p, i8p) -> void);
 
-        /* 
+        /*
         if self.tcx.sess.opts.debuginfo != DebugInfo::None {
             ifn!("llvm.dbg.declare", fn(self.type_metadata(), self.type_metadata()) -> void);
             ifn!("llvm.dbg.value", fn(self.type_metadata(), t_i64, self.type_metadata()) -> void);
@@ -328,216 +334,188 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
         // f64 -> f64 intrinsics
         ifn!(
-            "__nv_acos" |
-            "__nv_acosh" |
-            "__nv_asin" |
-            "__nv_asinh" |
-            "__nv_atan" |
-            "__nv_atanh" |
-            "__nv_cbrt" |
-            "__nv_ceil" |
-            "__nv_cos" |
-            "__nv_cosh" |
-            "__nv_cospi" |
-            "__nv_drcp_rd" |
-            "__nv_drcp_rn" |
-            "__nv_drcp_ru" |
-            "__nv_drcp_rz" |
-            "__nv_dsqrt_rd" |
-            "__nv_dsqrt_rn" |
-            "__nv_dsqrt_ru" |
-            "__nv_dsqrt_rz" |
-            "__nv_erf" |
-            "__nv_erfc" |
-            "__nv_erfcinv" |
-            "__nv_erfcx" |
-            "__nv_erfinv" |
-            "__nv_exp" |
-            "__nv_exp10" |
-            "__nv_exp2" |
-            "__nv_expm1" |
-            "__nv_fabs" |
-            "__nv_floor" |
-            "__nv_j0" |
-            "__nv_j1" |
-            "__nv_lgamma" |
-            "__nv_log" |
-            "__nv_log10" |
-            "__nv_log1p" |
-            "__nv_log2" |
-            "__nv_logb" |
-            "__nv_nearbyint" |
-            "__nv_normcdf" |
-            "__nv_normcdfinv" |
-            "__nv_rcbrt" |
-            "__nv_rint" |
-            "__nv_round" |
-            "__nv_rsqrt" |
-            "__nv_sin" |
-            "__nv_sinh" |
-            "__nv_sinpi" |
-            "__nv_sqrt" |
-            "__nv_tan" |
-            "__nv_tanh" |
-            "__nv_tgamma" |
-            "__nv_trunc" |
-            "__nv_y0" |
-            "__nv_y1",
+            "__nv_acos"
+                | "__nv_acosh"
+                | "__nv_asin"
+                | "__nv_asinh"
+                | "__nv_atan"
+                | "__nv_atanh"
+                | "__nv_cbrt"
+                | "__nv_ceil"
+                | "__nv_cos"
+                | "__nv_cosh"
+                | "__nv_cospi"
+                | "__nv_drcp_rd"
+                | "__nv_drcp_rn"
+                | "__nv_drcp_ru"
+                | "__nv_drcp_rz"
+                | "__nv_dsqrt_rd"
+                | "__nv_dsqrt_rn"
+                | "__nv_dsqrt_ru"
+                | "__nv_dsqrt_rz"
+                | "__nv_erf"
+                | "__nv_erfc"
+                | "__nv_erfcinv"
+                | "__nv_erfcx"
+                | "__nv_erfinv"
+                | "__nv_exp"
+                | "__nv_exp10"
+                | "__nv_exp2"
+                | "__nv_expm1"
+                | "__nv_fabs"
+                | "__nv_floor"
+                | "__nv_j0"
+                | "__nv_j1"
+                | "__nv_lgamma"
+                | "__nv_log"
+                | "__nv_log10"
+                | "__nv_log1p"
+                | "__nv_log2"
+                | "__nv_logb"
+                | "__nv_nearbyint"
+                | "__nv_normcdf"
+                | "__nv_normcdfinv"
+                | "__nv_rcbrt"
+                | "__nv_rint"
+                | "__nv_round"
+                | "__nv_rsqrt"
+                | "__nv_sin"
+                | "__nv_sinh"
+                | "__nv_sinpi"
+                | "__nv_sqrt"
+                | "__nv_tan"
+                | "__nv_tanh"
+                | "__nv_tgamma"
+                | "__nv_trunc"
+                | "__nv_y0"
+                | "__nv_y1",
             fn(t_f64) -> t_f64
         );
 
         // f32 -> f32 intrinsics
         ifn!(
-            "__nv_acosf" |
-            "__nv_acoshf" |
-            "__nv_asinf" |
-            "__nv_asinhf" |
-            "__nv_atanf" |
-            "__nv_atanhf" |
-            "__nv_cbrtf" |
-            "__nv_ceilf" |
-            "__nv_cosf" |
-            "__nv_coshf" |
-            "__nv_cospif" |
-            "__nv_erff" |
-            "__nv_erfcf" |
-            "__nv_erfcinvf" |
-            "__nv_erfcxf" |
-            "__nv_erfinvf" |
-            "__nv_expf" |
-            "__nv_exp10f" |
-            "__nv_exp2f" |
-            "__nv_expm1f" |
-            "__nv_fabsf" |
-            "__nv_floorf" |
-            "__nv_j0f" |
-            "__nv_j1f" |
-            "__nv_lgammaf" |
-            "__nv_logf" |
-            "__nv_log10f" |
-            "__nv_log1pf" |
-            "__nv_log2f" |
-            "__nv_logbf" |
-            "__nv_nearbyintf" |
-            "__nv_normcdff" |
-            "__nv_normcdfinvf" |
-            "__nv_rcbrtf" |
-            "__nv_rintf" |
-            "__nv_roundf" |
-            "__nv_rsqrtf" |
-            "__nv_sinf" |
-            "__nv_sinhf" |
-            "__nv_sinpif" |
-            "__nv_sqrtf" |
-            "__nv_tanf" |
-            "__nv_tanhf" |
-            "__nv_tgammaf" |
-            "__nv_truncf" |
-            "__nv_y0f" |
-            "__nv_y1f",
+            "__nv_acosf"
+                | "__nv_acoshf"
+                | "__nv_asinf"
+                | "__nv_asinhf"
+                | "__nv_atanf"
+                | "__nv_atanhf"
+                | "__nv_cbrtf"
+                | "__nv_ceilf"
+                | "__nv_cosf"
+                | "__nv_coshf"
+                | "__nv_cospif"
+                | "__nv_erff"
+                | "__nv_erfcf"
+                | "__nv_erfcinvf"
+                | "__nv_erfcxf"
+                | "__nv_erfinvf"
+                | "__nv_expf"
+                | "__nv_exp10f"
+                | "__nv_exp2f"
+                | "__nv_expm1f"
+                | "__nv_fabsf"
+                | "__nv_floorf"
+                | "__nv_j0f"
+                | "__nv_j1f"
+                | "__nv_lgammaf"
+                | "__nv_logf"
+                | "__nv_log10f"
+                | "__nv_log1pf"
+                | "__nv_log2f"
+                | "__nv_logbf"
+                | "__nv_nearbyintf"
+                | "__nv_normcdff"
+                | "__nv_normcdfinvf"
+                | "__nv_rcbrtf"
+                | "__nv_rintf"
+                | "__nv_roundf"
+                | "__nv_rsqrtf"
+                | "__nv_sinf"
+                | "__nv_sinhf"
+                | "__nv_sinpif"
+                | "__nv_sqrtf"
+                | "__nv_tanf"
+                | "__nv_tanhf"
+                | "__nv_tgammaf"
+                | "__nv_truncf"
+                | "__nv_y0f"
+                | "__nv_y1f",
             fn(t_f32) -> t_f32
         );
 
         // f64, f64 -> f64 intrinsics
         ifn!(
-            
-            "__nv_atan2" |
-            "__nv_copysign" |
-            "__nv_dadd_rd" |
-            "__nv_dadd_rn" |
-            "__nv_dadd_ru" |
-            "__nv_dadd_rz" |
-            "__nv_ddiv_rd" |
-            "__nv_ddiv_rn" |
-            "__nv_ddiv_ru" |
-            "__nv_ddiv_rz" |
-            "__nv_dmul_rd" |
-            "__nv_dmul_rn" |
-            "__nv_dmul_ru" |
-            "__nv_dmul_rz" |
-            "__nv_fdim" |
-            "__nv_fmax" |
-            "__nv_fmin" |
-            "__nv_fmod" |
-            "__nv_hypot" |
-            "__nv_nextafter" |
-            "__nv_pow" |
-            "__nv_remainder",
+            "__nv_atan2"
+                | "__nv_copysign"
+                | "__nv_dadd_rd"
+                | "__nv_dadd_rn"
+                | "__nv_dadd_ru"
+                | "__nv_dadd_rz"
+                | "__nv_ddiv_rd"
+                | "__nv_ddiv_rn"
+                | "__nv_ddiv_ru"
+                | "__nv_ddiv_rz"
+                | "__nv_dmul_rd"
+                | "__nv_dmul_rn"
+                | "__nv_dmul_ru"
+                | "__nv_dmul_rz"
+                | "__nv_fdim"
+                | "__nv_fmax"
+                | "__nv_fmin"
+                | "__nv_fmod"
+                | "__nv_hypot"
+                | "__nv_nextafter"
+                | "__nv_pow"
+                | "__nv_remainder",
             fn(t_f64, t_f64) -> t_f64
         );
 
         // f32, f32 -> f32 intrinsics
         ifn!(
-            
-            "__nv_atan2f" |
-            "__nv_copysignf" |
-            "__nv_fadd_rd" |
-            "__nv_fadd_rn" |
-            "__nv_fadd_ru" |
-            "__nv_fadd_rz" |
-            "__nv_fast_fdividef" |
-            "__nv_fast_powf" |
-            "__nv_fdimf" |
-            "__nv_fdiv_rd" |
-            "__nv_fdiv_rn" |
-            "__nv_fdiv_ru" |
-            "__nv_fdiv_rz" |
-            "__nv_fmaxf" |
-            "__nv_fminf" |
-            "__nv_fmodf" |
-            "__nv_fmul_rd" |
-            "__nv_fmul_rn" |
-            "__nv_fmul_ru" |
-            "__nv_fmul_rz" |
-            "__nv_fsub_rd" |
-            "__nv_fsub_rn" |
-            "__nv_fsub_ru" |
-            "__nv_fsub_rz" |
-            "__nv_hypotf" |
-            "__nv_nextafterf" |
-            "__nv_powf" |
-            "__nv_remainderf",
+            "__nv_atan2f"
+                | "__nv_copysignf"
+                | "__nv_fadd_rd"
+                | "__nv_fadd_rn"
+                | "__nv_fadd_ru"
+                | "__nv_fadd_rz"
+                | "__nv_fast_fdividef"
+                | "__nv_fast_powf"
+                | "__nv_fdimf"
+                | "__nv_fdiv_rd"
+                | "__nv_fdiv_rn"
+                | "__nv_fdiv_ru"
+                | "__nv_fdiv_rz"
+                | "__nv_fmaxf"
+                | "__nv_fminf"
+                | "__nv_fmodf"
+                | "__nv_fmul_rd"
+                | "__nv_fmul_rn"
+                | "__nv_fmul_ru"
+                | "__nv_fmul_rz"
+                | "__nv_fsub_rd"
+                | "__nv_fsub_rn"
+                | "__nv_fsub_ru"
+                | "__nv_fsub_rz"
+                | "__nv_hypotf"
+                | "__nv_nextafterf"
+                | "__nv_powf"
+                | "__nv_remainderf",
             fn(t_f32, t_f32) -> t_f32
         );
 
         // other intrinsics
 
-        ifn!(
-            
-            "__nv_powi",
-            fn(t_f64, t_i32) -> t_f64
-        );
+        ifn!("__nv_powi", fn(t_f64, t_i32) -> t_f64);
 
-        ifn!(
-            
-            "__nv_powif",
-            fn(t_f32, t_i32) -> t_f32
-        );
+        ifn!("__nv_powif", fn(t_f32, t_i32) -> t_f32);
 
-        ifn!(
-            
-            "__nv_fma",
-            fn(t_f64, t_f64, t_f64) -> t_f64
-        );
+        ifn!("__nv_fma", fn(t_f64, t_f64, t_f64) -> t_f64);
 
-        ifn!(
-            
-            "__nv_fmaf",
-            fn(t_f32, t_f32, t_f32) -> t_f32
-        );
+        ifn!("__nv_fmaf", fn(t_f32, t_f32, t_f32) -> t_f32);
 
-        ifn!(
-            
-            "__nv_yn",
-            fn(t_i32, t_f64) -> t_f64
-        );
+        ifn!("__nv_yn", fn(t_i32, t_f64) -> t_f64);
 
-        ifn!(
-            
-            "__nv_ynf",
-            fn(t_i32, t_f32) -> t_f32
-        );
-    
-
+        ifn!("__nv_ynf", fn(t_i32, t_f32) -> t_f32);
     }
 }

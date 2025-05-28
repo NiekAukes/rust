@@ -3,7 +3,7 @@ use std::{cell::UnsafeCell, fmt::Display};
 use crate::{
     basic_block::BasicBlock,
     function::FunctionNVVM,
-    global::{Global, GlobalNVVM},
+    global::GlobalNVVM,
     module::{Assemble, ModuleNVVM},
     ty::{self, TyNVVM, TypeNVVM},
 };
@@ -16,7 +16,6 @@ pub trait ToVal<'m> {
 
 pub trait AssembleVal<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String;
-    fn assemble_const(&self, module: &mut ModuleNVVM<'m>) -> String;
 }
 
 #[derive(Debug)]
@@ -234,7 +233,7 @@ pub enum Instruction<'m> {
     LifetimeEnd(Val<'m>, usize),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Const {
     I8(i8),
     I16(i16),
@@ -251,7 +250,9 @@ pub enum Const {
     Bool(bool),
     Lit(String),
     Arr(Vec<Const>),
+    Struct(Vec<Const>),
     Undef,
+    FnRef(String),
 }
 
 impl Const {
@@ -273,6 +274,8 @@ impl Const {
             Const::Lit(s) => s.as_bytes().len(),
             Const::Undef => 0,
             Const::Arr(l) => l.len(),
+            Const::Struct(l) => l.len(),
+            Const::FnRef(_) => 8, // function references have pointer size
         }
     }
 
@@ -319,9 +322,8 @@ pub enum ValueNVVM<'m> {
     Constant(Const),
     Alias(ConstExpr<'m>),     // a constant expression, e.g. GEP
     ConstExpr(ConstExpr<'m>), // a constant expression, e.g. GEP
-    Global(Global<'m>),       // a pointer to a global
+    Global(GlobalNVVM<'m>),   // a pointer to a global
     Type(TyNVVM<'m>),
-    FnRef(String),
 }
 pub type Val<'m> = Interned<'m, ValueNVVM<'m>>;
 
@@ -344,16 +346,11 @@ const PARAM_LABELS: [&str; 26] = [
 impl<'m> AssembleVal<'m> for Val<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String {
         match self.0 {
-            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => module.label_of_val(*self, Some(func)),
+            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => {
+                func.label_of_val(*self).expect("Value should have a label")
+            }
 
-            _ => self.0.assemble(module, Some(func), self),
-        }
-    }
-    fn assemble_const(&self, module: &mut ModuleNVVM<'m>) -> String {
-        match self.0 {
-            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => module.label_of_val(*self, None),
-
-            _ => self.0.assemble(module, None, self),
+            _ => self.0.assemble(module, func, self),
         }
     }
 }
@@ -362,15 +359,15 @@ impl<'m> ValueNVVM<'m> {
     pub fn assemble(
         &self,
         module: &mut ModuleNVVM<'m>,
-        function: Option<&FunctionNVVM<'m>>,
+        func: &FunctionNVVM<'m>,
         value: &Val<'m>,
     ) -> String {
-        match (self, function) {
-            (ValueNVVM::Param { func_name, idx, ty }, Some(func)) => {
+        match self {
+            ValueNVVM::Param { func_name, idx, ty } => {
                 func.create_val_label(*value, PARAM_LABELS[*idx].to_string());
                 format!("{} {}", ty.assemble(module), PARAM_LABELS[*idx])
             }
-            (ValueNVVM::Instr(instr), Some(func)) => {
+            ValueNVVM::Instr(instr) => {
                 if instr.has_ret() {
                     let label = func.assign_label_to_val(*value);
                     let instr = instr.assemble(module, func, value);
@@ -379,22 +376,14 @@ impl<'m> ValueNVVM<'m> {
                     instr.assemble(module, func, value)
                 }
             }
-            (ValueNVVM::Instr(instr), None) => {
-                // if there is no function, we cannot assign a label
-                return instr.assemble_global(module);
-            }
-            (ValueNVVM::Constant(c), _) => c.assemble(module),
-            (ValueNVVM::Type(ty), _) => ty.assemble(module),
+            ValueNVVM::Constant(c) => c.assemble(module),
+            ValueNVVM::Type(ty) => ty.assemble(module),
 
-            (ValueNVVM::FnRef(name), _) => {
-                format!("@{}", name)
-            }
-
-            (ValueNVVM::Global(g), _) => {
+            ValueNVVM::Global(g) => {
                 format!("@{}", g.name)
             }
-            (_, f) => {
-                panic!("Invalid value: {:#?}, {:#?}", self, f);
+            _ => {
+                panic!("Invalid value: {:#?}", self);
             }
         }
     }
@@ -431,6 +420,20 @@ impl<'m> Const {
                 s.push_str("]");
                 s
             }
+            Const::Struct(l) => {
+                let mut s = format!("{{");
+                for (i, c) in l.iter().enumerate() {
+                    if i != 0 {
+                        s.push_str(", ");
+                    }
+
+                    s.push_str(&c.assemble(module));
+                }
+                s.push_str("}");
+                s
+            }
+
+            Const::FnRef(name) => format!("@{}", fix_ptx_name(name)),
         }
     }
     pub fn assemble_for_const(&self, module: &mut ModuleNVVM<'m>) -> String {
@@ -462,7 +465,22 @@ impl<'m> Const {
                     s.push_str(&c.assemble_for_const(module));
                 }
                 s.push_str("]");
-                s
+                format!("{} {}", ty, s)
+            }
+            Const::Struct(l) => {
+                let mut s = format!("{{");
+                for (i, c) in l.iter().enumerate() {
+                    if i != 0 {
+                        s.push_str(", ");
+                    }
+
+                    s.push_str(&c.assemble_for_const(module));
+                }
+                s.push_str("}");
+                format!("{} {}", ty, s)
+            }
+            Const::FnRef(name) => {
+                format!("{} @{}", ty, fix_ptx_name(name))
             }
         }
     }
@@ -491,6 +509,22 @@ impl<'m> Const {
                     l[0].get_ty(module)
                 };
                 module.ty_from_type(TypeNVVM::Array(ty, l.len()))
+            }
+            Const::Struct(l) => {
+                // struc type
+                let mut tys = Vec::with_capacity(l.len());
+                for c in l {
+                    tys.push(c.get_ty(module));
+                }
+                module.ty_from_type(TypeNVVM::Struct(tys))
+            }
+
+            Const::FnRef(name) => {
+                // get the function from the module
+                let func = *module.functions.get(name).expect("Function not found");
+                let ty = func.ty;
+                let ptr_ty = module.ty_from_type(TypeNVVM::Pointer(ty));
+                ptr_ty
             }
         }
     }
@@ -1003,32 +1037,10 @@ impl<'m> Instruction<'m> {
             }
         }
     }
+}
 
-    pub fn assemble_global(&self, module: &mut ModuleNVVM<'m>) -> String {
-        match self {
-            Instruction::InBoundsGep { ty, ptr, indices } => {
-                let ty_str = ty.assemble(module);
-                let ptr_ty = *module.valtypes.get(ptr).unwrap();
-                let ptr_ty_str = ptr_ty.assemble(module);
-                let ptr_label = ptr.assemble_const(module);
-
-                let ty_in_ptr = module.ty_from_type(TypeNVVM::Pointer(*ty));
-                let ty_in_ptr_str = ty_in_ptr.assemble(module);
-                println!("Assembling global getelementptr: {:?} {:?}", ty_in_ptr, ty_in_ptr_str);
-
-                let mut s = format!(
-                    "global {} getelementptr inbounds {}, {} {}",
-                    ty_in_ptr_str, ty_str, ptr_ty_str, ptr_label
-                );
-                for (i, idx) in indices.iter().enumerate() {
-                    let ty = *module.valtypes.get(idx).unwrap();
-                    let ty_str = ty.assemble(module);
-                    let label = idx.assemble_const(module);
-                    s.push_str(&format!(",{} {}", ty_str, label));
-                }
-                s
-            }
-            _ => panic!("Invalid instruction for global: {:?}", self),
-        }
-    }
+pub fn fix_ptx_name(name: &str) -> String {
+    // replace all dots with underscores
+    // because PTX doesn't allow dots in names
+    name.replace(".", "_")
 }

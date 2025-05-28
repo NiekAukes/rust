@@ -9,9 +9,9 @@ use rustc_middle::{
 
 use crate::{
     function::FunctionNVVM,
-    global::{Global, GlobalNVVM},
+    global::GlobalNVVM,
     ty::{TyNVVM, TypeHints, TypeNVVM},
-    value::{Val, ValueNVVM},
+    value::{Const, Val, ValueNVVM},
     Arena,
 };
 
@@ -26,9 +26,7 @@ pub struct ModuleNVVM<'m> {
     declared_intrinsics: FxHashSet<String>,
     pub intrinsics: FxHashMap<String, Val<'m>>,
 
-    pub globals: FxHashMap<DefId, Global<'m>>,
-    pub allocs: FxHashMap<Global<'m>, Val<'m>>,
-    pub const_vals: FxHashMap<Val<'m>, String>,
+    pub globals: Vec<Val<'m>>,
 
     pub types: Vec<TyNVVM<'m>>,
     pub values: Vec<Val<'m>>,
@@ -50,9 +48,7 @@ impl<'m> ModuleNVVM<'m> {
             defrefs: FxHashMap::default(),
             declared_intrinsics: FxHashSet::default(),
             intrinsics: FxHashMap::default(),
-            globals: FxHashMap::default(),
-            allocs: FxHashMap::default(),
-            const_vals: FxHashMap::default(),
+            globals: Vec::new(),
             metadata: Metadata { version: (1, 0), kernel: None, entries: FxHashMap::default() },
             types: Vec::new(),
             values: Vec::new(),
@@ -67,44 +63,37 @@ impl<'m> ModuleNVVM<'m> {
         s
     }
 
-    pub fn add_allocation(&mut self, alloc: GlobalNVVM<'m>) -> Val<'m> {
-        // amend alloc with a new unique name
-        let mut alloc = alloc;
-        alloc.name = format!("global{}", self.allocs.len());
+    // pub fn add_allocation(&mut self, alloc: GlobalNVVM<'m>) -> Val<'m> {
+    //     // amend alloc with a new unique name
+    //     let mut alloc = alloc;
+    //     alloc.name = format!("global{}", self.allocs.len());
 
-        let alloc = self.arena.dropless.alloc(alloc);
+    //     let alloc = self.arena.dropless.alloc(alloc);
 
-        // create a value for the allocation
-        let ty = if let Some(ty) = alloc.ty {
-            ty
-        } else if let Some(val) = &alloc.val {
-            // let ty_u8 = self.ty_from_type(TypeNVVM::I(8));
-            // self.ty_from_type(TypeNVVM::Pointer(ty_u8))
-            match val {
-                ValueNVVM::Constant(c) => {
-                    let size = c.size();
-                    let ty_i8 = self.ty_from_type(TypeNVVM::I(8));
-                    self.ty_from_type(TypeNVVM::Array(ty_i8, size))
-                }
-                _ => todo!(),
-            }
-        } else {
-            todo!()
-        };
-        let global = Global::new_unchecked(alloc);
-        let ty_ptr = self.ty_from_type(TypeNVVM::Pointer(ty));
-        let value = self.create_val(ValueNVVM::Global(global), Some(ty_ptr));
+    //     // create a value for the allocation
+    //     let ty = if let Some(ty) = alloc.ty {
+    //         ty
+    //     } else if let Some(val) = &alloc.val {
+    //         // let ty_u8 = self.ty_from_type(TypeNVVM::I(8));
+    //         // self.ty_from_type(TypeNVVM::Pointer(ty_u8))
+    //         match val.0 {
+    //             ValueNVVM::Constant(c) => {
+    //                 let size = c.size();
+    //                 let ty_i8 = self.ty_from_type(TypeNVVM::I(8));
+    //                 self.ty_from_type(TypeNVVM::Array(ty_i8, size))
+    //             }
+    //             _ => todo!(),
+    //         }
+    //     } else {
+    //         todo!()
+    //     };
+    //     let global = Global::new_unchecked(alloc);
+    //     let ty_ptr = self.ty_from_type(TypeNVVM::Pointer(ty));
+    //     let value = self.create_val(ValueNVVM::Global(global), Some(ty_ptr));
 
-        self.allocs.insert(global, value);
-        value
-    }
-
-    pub fn add_const_instruction(&mut self, instr: Val<'m>) {
-        let name = format!("@cinstr{}", self.const_vals.len());
-
-        // check if the instruction is a constant
-        self.const_vals.insert(instr, name);
-    }
+    //     self.allocs.insert(global, value);
+    //     value
+    // }
 
     pub fn add_function(&mut self, symbol_name: String, function: FunctionNVVM<'m>) {
         let function = self.arena.dropless.alloc(function);
@@ -170,21 +159,6 @@ impl<'m> ModuleNVVM<'m> {
         value
     }
 
-    pub fn label_of_val(&self, value: Val<'m>, func: Option<&FunctionNVVM<'m>>) -> String {
-        if let Some(f) = func {
-            if let Some(label) = f.label_of_val(value) {
-                return label;
-            }
-        }
-
-        // try to find the label in the global labels
-        if let Some(label) = self.const_vals.get(&value) {
-            return label.clone();
-        }
-
-        panic!("Value does not have a label: {:?}", value);
-    }
-
     pub fn set_valtype(&mut self, value: Val<'m>, ty: TyNVVM<'m>) {
         self.valtypes.insert(value, ty);
     }
@@ -210,21 +184,9 @@ impl<'m> ModuleNVVM<'m> {
         self.tylabels.get(&ty)
     }
 
-    /*pub fn create_typehint(&mut self, value: Val<'m>, size: usize) {
-        self.valtypehints.insert(value, TypeHints::new(size));
+    pub fn add_global(&mut self, global: Val<'m>) {
+        self.globals.push(global);
     }
-
-    pub fn add_struct_hint(&mut self, value: Val<'m>, offset: usize, size: usize) {
-        if let Some(hint) = self.valtypehints.get_mut(&value) {
-            hint.struct_hint(offset, size);
-        }
-    }
-
-    pub fn add_type_hint(&mut self, value: Val<'m>, offset: usize, size: usize, ty: TyNVVM<'m>) {
-        if let Some(hint) = self.valtypehints.get_mut(&value) {
-            hint.layout_hint(offset, size, ty);
-        }
-    }*/
 
     pub fn get_intrinsic(&self, name: &str) -> Option<Val<'m>> {
         self.intrinsics.get(name).copied()
@@ -236,7 +198,7 @@ impl<'m> ModuleNVVM<'m> {
 
     pub fn declare_intrinsic(&mut self, name: &str, args: Vec<TyNVVM<'m>>, ret: TyNVVM<'m>) {
         let ty = self.ty_from_type(TypeNVVM::Fn(args, ret));
-        let val = self.create_val(ValueNVVM::FnRef(name.to_string()), Some(ty));
+        let val = self.create_val(ValueNVVM::Constant(Const::FnRef(name.to_string())), Some(ty));
         self.intrinsics.insert(name.to_string(), val);
     }
 
@@ -308,21 +270,14 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
 
     // define the globals used in the module
     let globals = module.globals.clone();
-    for (_, global) in globals.iter() {
-        todo!()
-    }
-    let allocs = module.allocs.clone();
-    for (global, val) in allocs.iter() {
-        let g = global.0.assemble(module) + "\n";
-        s.push_str(&g);
-    }
-
-    let const_vals = module.const_vals.clone();
-    for (val, name) in const_vals.iter() {
-        let ty = *module.valtypes.get(val).unwrap();
-        let ty_str = ty.assemble(module);
-        let val_str = val.assemble(module, None, val);
-        s.push_str(&format!("{} = {}\n", name, val_str));
+    for global in globals {
+        match global.0 {
+            ValueNVVM::Global(g) => {
+                let global_str = g.assemble(module);
+                s.push_str(&format!("{}\n", global_str));
+            }
+            _ => panic!("Global must be a GlobalNVVM"),
+        }
     }
 
     s.push_str("\n");
