@@ -3,9 +3,9 @@ use std::{cell::UnsafeCell, fmt::Display};
 use crate::{
     basic_block::BasicBlock,
     function::FunctionNVVM,
+    global::{Global, GlobalNVVM},
     module::{Assemble, ModuleNVVM},
     ty::{self, TyNVVM, TypeNVVM},
-    Global, GlobalNVVM,
 };
 use rustc_data_structures::intern::Interned;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
@@ -308,11 +308,18 @@ impl Const {
 }
 
 #[derive(Debug)]
+pub enum ConstExpr<'m> {
+    GEP { ty: TyNVVM<'m>, ptr: Val<'m>, indices: Vec<Const> },
+}
+
+#[derive(Debug)]
 pub enum ValueNVVM<'m> {
     Param { func_name: String, idx: usize, ty: TyNVVM<'m> },
     Instr(Instruction<'m>),
     Constant(Const),
-    Global(Global<'m>), // a pointer to a global
+    Alias(ConstExpr<'m>),     // a constant expression, e.g. GEP
+    ConstExpr(ConstExpr<'m>), // a constant expression, e.g. GEP
+    Global(Global<'m>),       // a pointer to a global
     Type(TyNVVM<'m>),
     FnRef(String),
 }
@@ -1004,8 +1011,15 @@ impl<'m> Instruction<'m> {
                 let ptr_ty = *module.valtypes.get(ptr).unwrap();
                 let ptr_ty_str = ptr_ty.assemble(module);
                 let ptr_label = ptr.assemble_const(module);
-                let mut s =
-                    format!("getelementptr inbounds {}, {} {}", ty_str, ptr_ty_str, ptr_label);
+
+                let ty_in_ptr = module.ty_from_type(TypeNVVM::Pointer(*ty));
+                let ty_in_ptr_str = ty_in_ptr.assemble(module);
+                println!("Assembling global getelementptr: {:?} {:?}", ty_in_ptr, ty_in_ptr_str);
+
+                let mut s = format!(
+                    "global {} getelementptr inbounds {}, {} {}",
+                    ty_in_ptr_str, ty_str, ptr_ty_str, ptr_label
+                );
                 for (i, idx) in indices.iter().enumerate() {
                     let ty = *module.valtypes.get(idx).unwrap();
                     let ty_str = ty.assemble(module);

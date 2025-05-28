@@ -9,9 +9,10 @@ use rustc_middle::{
 
 use crate::{
     function::FunctionNVVM,
+    global::{Global, GlobalNVVM},
     ty::{TyNVVM, TypeHints, TypeNVVM},
     value::{Val, ValueNVVM},
-    Arena, Global, GlobalNVVM,
+    Arena,
 };
 
 pub trait Assemble<'m> {

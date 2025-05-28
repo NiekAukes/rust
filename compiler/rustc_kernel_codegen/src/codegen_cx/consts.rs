@@ -1,11 +1,14 @@
 use rustc_codegen_ssa::traits::{BaseTypeMethods, ConstMethods};
-use rustc_middle::{bug, mir::interpret::{AllocId, AllocRange, ConstAllocation, GlobalAlloc, Scalar}};
+use rustc_middle::{
+    bug,
+    mir::interpret::{AllocId, AllocRange, ConstAllocation, GlobalAlloc, Scalar},
+};
 use rustc_target::abi::{self, Size};
 
 use crate::{
+    global::GlobalNVVM,
     ty::{TyNVVM, TypeNVVM},
     value::{Const, Instruction, Val, ValueNVVM},
-    GlobalNVVM,
 };
 
 use super::CodegenCx;
@@ -197,10 +200,7 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
                                 return val;
                             }
                             _ => {
-                                bug!(
-                                    "vtable allocation for {:?} is not a memory allocation",
-                                    key
-                                );
+                                bug!("vtable allocation for {:?} is not a memory allocation", key);
                             }
                         }
                     }
@@ -255,7 +255,8 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
             ptr: val,
             indices: vec![self.const_usize(0), self.const_usize(offset.bytes())],
         };
-        let v = module.create_val(ValueNVVM::Instr(instr), Some(rty));
+        let ptr_ty = module.ty_from_type(TypeNVVM::Pointer(rty));
+        let v = module.create_val(ValueNVVM::Instr(instr), Some(ptr_ty));
         module.add_const_instruction(v);
         v
     }
