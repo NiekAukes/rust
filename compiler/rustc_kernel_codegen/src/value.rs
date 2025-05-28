@@ -3,7 +3,7 @@ use std::{cell::UnsafeCell, fmt::Display};
 use crate::{
     basic_block::BasicBlock,
     function::FunctionNVVM,
-    global::GlobalNVVM,
+    global::{ConstExpr, GlobalNVVM},
     module::{Assemble, ModuleNVVM},
     ty::{self, TyNVVM, TypeNVVM},
 };
@@ -311,16 +311,10 @@ impl Const {
 }
 
 #[derive(Debug)]
-pub enum ConstExpr<'m> {
-    GEP { ty: TyNVVM<'m>, ptr: Val<'m>, indices: Vec<Const> },
-}
-
-#[derive(Debug)]
 pub enum ValueNVVM<'m> {
     Param { func_name: String, idx: usize, ty: TyNVVM<'m> },
     Instr(Instruction<'m>),
     Constant(Const),
-    Alias(ConstExpr<'m>),     // a constant expression, e.g. GEP
     ConstExpr(ConstExpr<'m>), // a constant expression, e.g. GEP
     Global(GlobalNVVM<'m>),   // a pointer to a global
     Type(TyNVVM<'m>),
@@ -382,6 +376,7 @@ impl<'m> ValueNVVM<'m> {
             ValueNVVM::Global(g) => {
                 format!("@{}", g.name)
             }
+
             _ => {
                 panic!("Invalid value: {:#?}", self);
             }

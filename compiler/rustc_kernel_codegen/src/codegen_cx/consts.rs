@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use rustc_codegen_ssa::traits::{BaseTypeMethods, ConstMethods, MiscMethods};
+use rustc_codegen_ssa::traits::{BaseTypeMethods, ConstMethods, MiscMethods, StaticMethods};
 use rustc_middle::{
     bug,
     mir::interpret::{
@@ -8,15 +8,15 @@ use rustc_middle::{
         Pointer, Scalar as InterpScalar,
     },
 };
-use rustc_target::abi::{self, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
+use rustc_target::abi::{self, Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
 
 use crate::{
-    codegen_cx::declare::fix_ptx_name, global::GlobalNVVM, ty::{TyNVVM, TypeNVVM}, value::{Const, Instruction, Val, ValueNVVM}
+    codegen_cx::declare::fix_ptx_name, global::{ConstExpr, GlobalNVVM}, ty::{TyNVVM, TypeNVVM}, value::{Const, Instruction, Val, ValueNVVM}
 };
 
 use super::CodegenCx;
 
-impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
+impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn const_null(&self, t: Self::Type) -> Self::Value {
         todo!()
     }
@@ -330,48 +330,64 @@ impl<'tcx> ConstMethods<'tcx> for CodegenCx<'_, 'tcx> {
         value
     }
 
-    fn const_bitcast(&self, val: Self::Value, ty: Self::Type) -> Self::Value {
-        //self.
-        todo!()
+    fn const_bitcast(&self, val: Val<'m>, ty: TyNVVM<'m>) -> Val<'m> {
+        // create a bitcast instruction
+        let expr = ConstExpr::BitCast { val, ty };
+        let value = ValueNVVM::ConstExpr(expr);
+        let val = self.get_module_mut().create_val(value, Some(ty));
+
+        self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
     }
 
     fn const_ptr_byte_offset(
         &self,
-        val: Self::Value,
+        val: Val<'m>,
         offset: rustc_target::abi::Size,
-    ) -> Self::Value {
+    ) -> Val<'m> {
         let mut module = self.get_module_mut();
         // infer the type of the operation, in practice the val is almost always a pointer
-        let val_ty = module.valtypes.get(&val).unwrap();
-        let rty = match val_ty.0 {
-            TypeNVVM::Pointer(ty) => {
-                match ty.0 {
-                    TypeNVVM::Array(inner_ty, _) => {
-                        // if the pointer is an array, we need to get the element type
-                        *inner_ty
+        let val_ty = *module.valtypes.get(&val).expect("const_ptr_byte_offset must have a type");
+
+        // check if the value is already a i8 pointer, otherwise bitcast it to a pointer to i8
+        let is_i8 = match val_ty.0 {
+            TypeNVVM::Pointer(ty) => match *ty.0 {
+                TypeNVVM::Array(aty, _) => {
+                    // if the pointer is an array, we need to get the element type
+                    if aty == self.type_i8() {
+                        // if the element type is i8, we can do a byte offset directly
+                        true
+                    } else {
+                        false
                     }
-                    TypeNVVM::Pointer(inner_ty) => {
-                        // if the pointer is a pointer, we need to get the inner type
-                        *inner_ty
-                    }
-                    _ => {
-                        // if the pointer is not an array or a pointer, we need to get the type
-                        // this is a bug in the codegen
-                        panic!("const_ptr_byte_offset called on non-pointer value: {:?}", val);
-                    }
+                }
+                _ => {
+                    false
                 }
             }
             _ => {
-                // if the value is not a pointer, we can't do pointer arithmetic
-                // this is a bug in the codegen
-                panic!("const_ptr_byte_offset called on non-pointer value: {:?}", val);
+                // if the value is not a pointer, we can't do a pointer offset
+                bug!("const_ptr_byte_offset called on non-pointer type: {:?}", val_ty);
             }
         };
 
-        panic!(
-            "const_ptr_byte_offset not implemented yet for type: {:?} with offset: {:?}",
-            rty, offset
-        );
+        let i8ptr_ty = self.type_pointer(self.type_i8());
+        let gepval = if is_i8 {
+            // if the value is already a pointer to i8, we can do a byte offset directly
+            val
+        } else {
+            // otherwise bitcast it to an i8*
+            self.const_bitcast(val, i8ptr_ty)
+        };
+        // create a GEP instruction to add the offset
+        let gep = ConstExpr::GEP { 
+            ty: i8ptr_ty, 
+            val: val, 
+            indices: vec![Const::U64(offset.bytes() as u64)],
+        };
+        let value = ValueNVVM::ConstExpr(gep);
+        let val = module.create_val(value, Some(i8ptr_ty));
+        
+        self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
     }
 }
 

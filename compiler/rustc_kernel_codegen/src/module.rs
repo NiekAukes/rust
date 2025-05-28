@@ -4,7 +4,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{coverage::Op, interpret::AllocId},
-    ty::Ty,
+    ty::{Ty, Value},
 };
 
 use crate::{

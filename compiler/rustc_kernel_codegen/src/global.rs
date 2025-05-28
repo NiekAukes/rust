@@ -41,7 +41,11 @@ impl<'m> Assemble<'m> for GlobalNVVM<'m> {
                 format!("@{} = constant {}", self.name, data_str)
             }
             ValueNVVM::ConstExpr(ref expr) => {
-                todo!()
+                let expr_str = expr.assemble(module);
+                let ty = *module.valtypes.get(&self.val).expect("GlobalNVVM must have a type");
+                let ty_str = ty.assemble(module);
+
+                format!("@{} = constant {} {}", self.name, expr_str, ty_str)
             }
             _ => {
                 panic!(
@@ -56,4 +60,35 @@ impl<'m> Assemble<'m> for GlobalNVVM<'m> {
 #[derive(Debug)]
 pub enum ConstExpr<'m> {
     GEP { ty: TyNVVM<'m>, val: Val<'m>, indices: Vec<Const> },
+    BitCast { ty: TyNVVM<'m>, val: Val<'m> },
+}
+
+impl<'m> ConstExpr<'m> {
+    pub fn assemble(&self, module: &mut module::ModuleNVVM<'m>) -> String {
+        match self {
+            ConstExpr::GEP { ty, val, indices } => {
+                let val_str = assemble_const_val(val, module);
+                let indices_str: Vec<String> = indices.iter().map(|i| i.assemble(module)).collect();
+                format!("getelementptr {}, {}, [{}]", ty.assemble(module), val_str, indices_str.join(", "))
+            }
+            ConstExpr::BitCast { ty, val } => {
+                let val_str = assemble_const_val(val, module);
+                format!("bitcast {} to {}", val_str, ty.assemble(module))
+            }
+        }
+    }
+}
+
+fn assemble_const_val<'m>(
+    val: &Val<'m>,
+    module: &mut module::ModuleNVVM<'m>,
+) -> String {
+    match val.0 {
+        ValueNVVM::Constant(ref c) => c.assemble_for_const(module),
+        ValueNVVM::Global(GlobalNVVM { ref val, .. }) => assemble_const_val(val, module),
+        _ => panic!(
+            "Expected a constant value, found: {:?}",
+            val.0
+        ),
+    }
 }
