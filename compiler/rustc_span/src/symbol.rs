@@ -1045,6 +1045,8 @@ symbols! {
         iterator_collect_fn,
         kcfi,
         kernel,
+        kernel_exchange_malloc_fn,
+        kernel_oom_fn,
         kernel_panic_fmt_impl,
         kernel_panic_impl,
         keyword,
