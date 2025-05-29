@@ -292,6 +292,12 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         ifn!("llvm.cttz.i32", fn(t_i32, i1) -> t_i32);
         ifn!("llvm.cttz.i64", fn(t_i64, i1) -> t_i64);
 
+        ifn!("llvm.ctpop", fn(t_isize) -> t_isize);
+        ifn!("llvm.ctpop.i8", fn(t_i8) -> t_i8);
+        ifn!("llvm.ctpop.i16", fn(t_i16) -> t_i16);
+        ifn!("llvm.ctpop.i32", fn(t_i32) -> t_i32);
+        ifn!("llvm.ctpop.i64", fn(t_i64) -> t_i64);
+
         ifn!("llvm.lifetime.start.p0i8", fn(t_i64, i8p) -> void);
         ifn!("llvm.lifetime.end.p0i8", fn(t_i64, i8p) -> void);
 

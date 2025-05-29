@@ -39,6 +39,10 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
         let val = match name {
             sym::unlikely => self
             .call_intrinsic("llvm.expect.i1", &[args[0].immediate(), self.const_bool(false)]),
+            sym::ctpop => {
+                let arg = args[0].immediate();
+                self.call_intrinsic("llvm.ctpop", &[arg])
+            }
             _ => panic!("unknown intrinsic '{}'", name),
         };
 
