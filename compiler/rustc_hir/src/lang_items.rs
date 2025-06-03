@@ -384,7 +384,6 @@ language_item_table! {
     KernelPanicImpl,         sym::kernel_panic_impl,     kernel_panic_impl,        Target::Fn,             GenericRequirement::None; 
     KernelPanicFmtImpl,      sym::kernel_panic_fmt_impl, kernel_panic_fmt_impl,    Target::Fn,             GenericRequirement::None;
     KernelExchangeMalloc,    sym::kernel_exchange_malloc_fn, kernel_exchange_malloc_fn, Target::Fn,           GenericRequirement::None;
-    KernelOom,               sym::kernel_oom_fn,            kernel_oom_fn,            Target::Fn,             GenericRequirement::None;
 }
 
 pub enum GenericRequirement {

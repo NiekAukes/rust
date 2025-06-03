@@ -851,7 +851,8 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
                     || lang_item == LangItem::PanicCannotUnwind
                     || lang_item == LangItem::PanicInCleanup
                     || lang_item == LangItem::PanicDivZero
-                    || lang_item == LangItem::PanicRemZero)
+                    || lang_item == LangItem::PanicRemZero
+                    || lang_item == LangItem::ExchangeMalloc)
             {
                 return;
             }
