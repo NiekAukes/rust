@@ -17,7 +17,8 @@ use std::iter;
 
 use crate::{
     abort_unwinding_calls, add_call_guards, add_moves_for_packed_drops, deref_separator,
-    mentioned_items, pass_manager as pm, remove_noop_landing_pads, simplify,
+    mentioned_items, pass_manager as pm, remove_noop_landing_pads, simplify, KernelLangItemSwap,
+    AbortUnwindingCalls
 };
 use rustc_middle::mir::patch::MirPatch;
 use rustc_mir_dataflow::elaborate_drops::{self, DropElaborator, DropFlagMode, DropStyle};
@@ -26,6 +27,17 @@ mod async_destructor_ctor;
 
 pub fn provide(providers: &mut Providers) {
     providers.mir_shims = make_shim;
+    providers.kernel_mir_shims = make_shim_kernel;
+}
+
+fn make_shim_kernel<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceDef<'tcx>) -> Body<'tcx> {
+    let mut shim = make_shim(tcx, instance);
+
+    let kernel_swap_pass = KernelLangItemSwap::new(tcx);
+    kernel_swap_pass.run_pass(tcx, &mut shim);
+
+    AbortUnwindingCalls.run_pass_for_device_code(tcx, &mut shim);
+    shim
 }
 
 fn make_shim<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceDef<'tcx>) -> Body<'tcx> {

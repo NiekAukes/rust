@@ -1843,7 +1843,7 @@ impl<'tcx> TyCtxt<'tcx> {
             | ty::InstanceDef::CloneShim(..)
             | ty::InstanceDef::ThreadLocalShim(..)
             | ty::InstanceDef::FnPtrAddrShim(..)
-            | ty::InstanceDef::AsyncDropGlueCtorShim(..) => self.mir_shims(instance),
+            | ty::InstanceDef::AsyncDropGlueCtorShim(..) => self.kernel_mir_shims(instance),
         }
     }
 

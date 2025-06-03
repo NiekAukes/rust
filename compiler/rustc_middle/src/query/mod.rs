@@ -1162,6 +1162,12 @@ rustc_queries! {
         desc { |tcx| "generating MIR shim for `{}`", tcx.def_path_str(key.def_id()) }
     }
 
+    /// Generates a kernel MIR body for the shim.
+    query kernel_mir_shims(key: ty::InstanceDef<'tcx>) -> &'tcx mir::Body<'tcx> {
+        arena_cache
+        desc { |tcx| "generating kernel MIR shim for `{}`", tcx.def_path_str(key.def_id()) }
+    }
+
     /// The `symbol_name` query provides the symbol name for calling a
     /// given instance from the local crate. In particular, it will also
     /// look up the correct symbol name of instances from upstream crates.
