@@ -112,9 +112,11 @@ mod simplify_comparison_integral;
 mod sroa;
 mod unreachable_enum_branching;
 mod unreachable_prop;
+mod kernel_lang_item_swap;
+mod remove_drop_glue;
 
 use crate::kernel_lang_item_swap::KernelLangItemSwap;
-pub mod kernel_lang_item_swap;
+use crate::remove_drop_glue::RemoveDropGlue;
 
 use rustc_const_eval::transform::check_consts::{self, ConstCx};
 use rustc_const_eval::transform::validate;
@@ -685,6 +687,7 @@ fn optimized_kernel_mir<'tcx>(tcx: TyCtxt<'tcx>, did: DefId) -> &'tcx Body<'tcx>
     let kernel_swap_pass = KernelLangItemSwap::new(tcx);
     kernel_swap_pass.run_pass(tcx, &mut body);
 
+    RemoveDropGlue.run_pass(tcx, &mut body);
     AbortUnwindingCalls.run_pass_for_device_code(tcx, &mut body);
 
     tcx.arena.alloc(body)
