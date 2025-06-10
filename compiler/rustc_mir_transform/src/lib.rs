@@ -687,7 +687,7 @@ fn optimized_kernel_mir<'tcx>(tcx: TyCtxt<'tcx>, did: DefId) -> &'tcx Body<'tcx>
     let kernel_swap_pass = KernelLangItemSwap::new(tcx);
     kernel_swap_pass.run_pass(tcx, &mut body);
 
-    RemoveDropGlue.run_pass(tcx, &mut body);
+    // RemoveDropGlue.run_pass(tcx, &mut body);
     AbortUnwindingCalls.run_pass_for_device_code(tcx, &mut body);
 
     tcx.arena.alloc(body)

@@ -435,7 +435,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                 module.ty_from_type(TypeNVVM::AdtDefForwardDecl(adtdef.did(), name))
             }
 
-            ty::Adt(adtdef, gargs) if adtdef.is_enum() => {
+            ty::Adt(adtdef, gargs) if adtdef.is_struct() || adtdef.is_enum() => {
                 // enums are represented as a struct with an index, and a union over the different variants
                 // TODO: could be optimized, right now we do ty_from_type twice for each variant
                 let mut tys = Vec::new();
@@ -722,14 +722,8 @@ fn struct_llfields<'m, 'tcx>(
         }
         let padding = layout.size - offset;
         if padding != Size::ZERO {
-            // let padding_align = prev_effective_align;
-            // assert_eq!(offset.align_to(padding_align) + padding, layout.size);
-            // debug!(
-            //     "struct_llfields: pad_bytes: {:?} offset: {:?} stride: {:?}",
-            //     padding, offset, layout.size
-            // );
-            // result.push(cx.type_padding_filler(padding, padding_align));
-            todo!("padding in struct_llfields")
+            let padding_align = prev_effective_align;
+            result.push(cx.type_padding_filler(padding, padding_align));
         }
     } else {
         debug!("struct_llfields: offset: {:?} stride: {:?}", offset, layout.size);

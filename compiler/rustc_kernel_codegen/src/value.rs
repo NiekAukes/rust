@@ -227,6 +227,11 @@ pub enum Instruction<'m> {
     },
 
     Resume(Val<'m>),
+    Select {
+        cond: Val<'m>,
+        then_val: Val<'m>,
+        else_val: Val<'m>,
+    },
 
     // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
     LifetimeStart(Val<'m>, usize),
@@ -557,6 +562,7 @@ impl<'m> Instruction<'m> {
             | Instruction::Invoke { .. }
             | Instruction::InsertValue { .. }
             | Instruction::Phi { .. }
+            | Instruction::Select { .. }
             | Instruction::InBoundsGep { .. } => true,
 
             Instruction::Retvoid
@@ -1021,6 +1027,28 @@ impl<'m> Instruction<'m> {
 
             Instruction::Resume(val) => {
                 panic!("Resume instruction not supported in nvvm")
+            }
+
+            Instruction::Select { cond, then_val, else_val } => {
+                let cond_ty = *module.valtypes.get(cond).unwrap();
+                let cond_ty_str = cond_ty.assemble(module);
+                let cond_label = cond.assemble(module, func);
+
+                let val_ty = *module.valtypes.get(then_val).unwrap();
+                let val_ty_str = val_ty.assemble(module);
+
+                let then_label = then_val.assemble(module, func);
+                let else_label = else_val.assemble(module, func);
+
+                format!(
+                    "select {} {}, {} {}, {} {}",
+                    cond_ty_str, 
+                    cond_label,  
+                    val_ty_str,  
+                    then_label,  
+                    val_ty_str,  
+                    else_label   
+                )
             }
 
             // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)

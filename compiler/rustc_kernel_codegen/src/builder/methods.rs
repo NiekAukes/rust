@@ -932,7 +932,19 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         then_val: Self::Value,
         else_val: Self::Value,
     ) -> Self::Value {
-        todo!()
+        let cond_ty = self.cx().val_ty(cond);
+        let then_ty = self.cx().val_ty(then_val);
+        let else_ty = self.cx().val_ty(else_val);
+
+        let instr = Instruction::Select { cond, then_val, else_val };
+
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(then_ty));
+        self.basic_block.add_instr(v);
+
+        v
     }
 
     fn va_arg(&mut self, list: Self::Value, ty: Self::Type) -> Self::Value {
