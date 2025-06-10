@@ -39,6 +39,7 @@ pub fn module_codegen<'tcx>(
     let mono_items = cgu.items_in_deterministic_order(tcx);
 
     cx.build_intrinsics();
+    cx.build_kernel_allocator_shims();
     
     for &(mono_item, data) in &mono_items {
         println!("predefining {:?}", mono_item);

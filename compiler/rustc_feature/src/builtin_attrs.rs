@@ -1073,6 +1073,10 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         TEST, pattern_complexity, CrateLevel, template!(NameValueStr: "N"),
         ErrorFollowing, EncodeCrossCrate::No,
     ),
+    ungated!(
+        kernel_allocator, Normal, template!(Word), ErrorFollowing,
+        EncodeCrossCrate::Yes
+    ),
 ];
 
 pub fn deprecated_attributes() -> Vec<&'static BuiltinAttribute> {

@@ -29,6 +29,7 @@ use rustc_target::spec::HasTargetSpec;
 use rustc_target::spec::Target;
 
 pub mod abi;
+mod allocator;
 mod consts;
 mod debug;
 mod declare;

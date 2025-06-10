@@ -1948,6 +1948,11 @@ rustc_queries! {
         desc { |tcx| "determining whether `{}` is a kernel item", tcx.def_path_str(def_id) }
     }
 
+    /// Returns the `DefId` of the kernel allocator for a crate, if it exists.
+    query kernel_allocator(key: CrateNum) -> Option<DefId> {
+        desc { "finding the kernel allocator for a crate" }
+    }
+
     query kernel_def_id_cgu_symbol(def_id: DefId) -> Symbol {
         desc { |tcx| "getting kernel codegen unit symbol for `{}`", tcx.def_path_str(def_id) }
     }
