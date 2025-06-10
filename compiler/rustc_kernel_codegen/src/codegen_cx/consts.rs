@@ -6,7 +6,7 @@ use rustc_middle::{
     mir::interpret::{
         read_target_uint, AllocId, AllocRange, Allocation, ConstAllocation, GlobalAlloc, InitChunk,
         Pointer, Scalar as InterpScalar,
-    },
+    }
 };
 use rustc_target::abi::{self, Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
 
@@ -18,7 +18,27 @@ use super::CodegenCx;
 
 impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn const_null(&self, t: Self::Type) -> Self::Value {
-        todo!()
+        match t.0 {
+            TypeNVVM::I(1) => self.const_bool(false),
+            TypeNVVM::I(8) => self.const_i8(0),
+            TypeNVVM::I(16) => self.const_i16(0),
+            TypeNVVM::I(32) => self.const_i32(0),
+            TypeNVVM::I(64) => self.const_i64(0),
+            TypeNVVM::I(128) => self.const_u128(0),
+            TypeNVVM::F32 | TypeNVVM::F64 => self.const_real(t, 0.0),
+            TypeNVVM::Pointer(_) => {
+                let value = ValueNVVM::Constant(Const::NullPtr);
+                self.get_module_mut().create_val(value, Some(t))
+            },
+            TypeNVVM::Struct(_) | TypeNVVM::Array(_, _) => {
+                let value = ValueNVVM::Constant(Const::ZeroInitializer);
+                self.get_module_mut().create_val(value, Some(t))            
+            },
+            TypeNVVM::Zst => self.const_struct(&[], false),
+            _ => {
+                bug!("const_null called on unsupported type: {:?}", t)
+            }
+        }
     }
 
     fn const_undef(&self, t: Self::Type) -> Self::Value {

@@ -257,6 +257,8 @@ pub enum Const {
     Arr(Vec<Const>),
     Struct(Vec<Const>),
     Undef,
+    NullPtr,
+    ZeroInitializer,
     FnRef(String),
 }
 
@@ -281,6 +283,8 @@ impl Const {
             Const::Arr(l) => l.len(),
             Const::Struct(l) => l.len(),
             Const::FnRef(_) => 8, // function references have pointer size
+            Const::NullPtr => 8, // null pointer has pointer size
+            Const::ZeroInitializer => 0, // zero initializer has no size
         }
     }
 
@@ -434,6 +438,8 @@ impl<'m> Const {
             }
 
             Const::FnRef(name) => format!("@{}", name),
+            Const::NullPtr => format!("null"),
+            Const::ZeroInitializer => format!("zeroinitializer"),
         }
     }
     pub fn assemble_for_const(&self, module: &mut ModuleNVVM<'m>) -> String {
@@ -482,6 +488,8 @@ impl<'m> Const {
             Const::FnRef(name) => {
                 format!("{} @{}", ty, name)
             }
+            Const::NullPtr => format!("{} null", ty),
+            Const::ZeroInitializer => format!("{} zeroinitializer", ty),
         }
     }
 
@@ -525,6 +533,13 @@ impl<'m> Const {
                 let ty = func.ty;
                 let ptr_ty = module.ty_from_type(TypeNVVM::Pointer(ty));
                 ptr_ty
+            }
+
+            Const::NullPtr | Const::ZeroInitializer => {
+                panic!(
+                    "get_ty called on {:?}, which has no intrinsic type. The type must be supplied by context.",
+                    self
+                )
             }
         }
     }
