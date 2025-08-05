@@ -377,7 +377,7 @@ pub enum Instruction<'m> {
 }
 
 #[derive(Debug, Clone)]
-pub enum Const {
+pub enum Const<'m> {
     I8(i8),
     I16(i16),
     I32(i32),
@@ -392,15 +392,15 @@ pub enum Const {
     F64(f64),
     Bool(bool),
     Lit(String),
-    Arr(Vec<Const>),
-    Struct(Vec<Const>),
-    Undef,
+    Arr(Vec<Const<'m>>),
+    Struct(Vec<Const<'m>>),
+    Undef(TyNVVM<'m>, usize), // type and size in bytes
     NullPtr,
     ZeroInitializer,
     FnRef(String),
 }
 
-impl Const {
+impl<'m> Const<'m> {
     pub fn size(&self) -> usize {
         match self {
             Const::I8(_) => 8,
@@ -417,7 +417,7 @@ impl Const {
             Const::F64(_) => 64,
             Const::Bool(_) => 1,
             Const::Lit(s) => s.as_bytes().len(),
-            Const::Undef => 0,
+            Const::Undef(ty, sz) => *sz,
             Const::Arr(l) => l.len(),
             Const::Struct(l) => l.len(),
             Const::FnRef(_) => 8, // function references have pointer size
@@ -461,7 +461,7 @@ impl Const {
 pub enum ValueNVVM<'m> {
     Param { func_name: String, idx: usize, ty: TyNVVM<'m> },
     Instr(Instruction<'m>),
-    Constant(Const),
+    Constant(Const<'m>),
     ConstExpr(ConstExpr<'m>), // a constant expression, e.g. GEP
     Global(GlobalNVVM<'m>),   // a pointer to a global
     Type(TyNVVM<'m>),
@@ -531,7 +531,7 @@ impl<'m> ValueNVVM<'m> {
     }
 }
 
-impl<'m> Const {
+impl<'m> Const<'m> {
     pub fn assemble(&self, module: &mut ModuleNVVM<'m>) -> String {
         // the same as assemble for const, but without the type
         match self {
@@ -549,7 +549,7 @@ impl<'m> Const {
             Const::F64(f) => format!("{}", f),
             Const::Bool(b) => format!("{}", if *b { 1 } else { 0 }),
             Const::Lit(s) => format!("\"{}\"", s),
-            Const::Undef => format!("undef"),
+            Const::Undef(_, _) => format!("undef"),
             Const::Arr(l) => {
                 let mut s = format!("[");
                 for (i, c) in l.iter().enumerate() {
@@ -598,7 +598,7 @@ impl<'m> Const {
             Const::F64(f) => format!("{} {}", ty, f),
             Const::Bool(b) => format!("{} {}", ty, if *b { 1 } else { 0 }),
             Const::Lit(s) => format!("\"{}\"", s),
-            Const::Undef => format!("undef"),
+            Const::Undef(_, _) => format!("{} undef", ty),
             Const::Arr(l) => {
                 let mut s = format!("[");
                 for (i, c) in l.iter().enumerate() {
@@ -647,7 +647,7 @@ impl<'m> Const {
             Const::F64(_) => module.ty_from_type(TypeNVVM::F64),
             Const::Bool(_) => module.ty_from_type(TypeNVVM::I(1)),
             Const::Lit(_) => module.ty_from_type(TypeNVVM::I(8)),
-            Const::Undef => module.ty_from_type(TypeNVVM::Zst),
+            Const::Undef(ty, sz) => *ty,
             Const::Arr(l) => {
                 let ty = if l.is_empty() {
                     module.ty_from_type(TypeNVVM::Zst)

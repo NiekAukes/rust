@@ -1,7 +1,8 @@
 use rustc_codegen_ssa::traits::StaticMethods;
 
 use crate::{
-     global::GlobalNVVM, value::{Const, Val, ValueNVVM}
+    global::GlobalNVVM,
+    value::{Const, Val, ValueNVVM},
 };
 
 use super::{declare::fix_ptx_name, CodegenCx};
@@ -27,10 +28,12 @@ impl<'m> StaticMethods for CodegenCx<'m, '_> {
         };
 
         let module = self.get_module_mut();
-        let global = ValueNVVM::Global(GlobalNVVM { val: cv, name });
-
         let ty = *module.valtypes.get(&cv).expect("StaticMethods static_addr_of must have a type");
         let ptr_ty = self.type_pointer(ty);
+
+        println!("[Kernel Const] Creating static: {} with value {:?} and type: {:?}", name, cv, ty);
+
+        let global = ValueNVVM::Global(GlobalNVVM { val: cv, name });
 
         // create a value
         let val = module.create_val(global, Some(ptr_ty));
@@ -59,5 +62,19 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         self.next_static_id.set(next_id + 1);
         next_id
     }
-}
 
+    fn add_expr_as_global(&self, val: Val<'m>, kind: Option<&str>) -> Val<'m> {
+        let name = match kind {
+            Some(k) => format!("{}_{}", k, self.get_next_static_id()),
+            None => format!("static_{}", self.get_next_static_id()),
+        };
+        let global = ValueNVVM::Global(GlobalNVVM { val, name });
+        let module = self.get_module_mut();
+
+        let ty = *module.valtypes.get(&val).expect("add_as_global must have a type");
+        let global_val = module.create_val(global, Some(ty));
+        self.globals.borrow_mut().insert(val, global_val);
+        module.add_global(global_val);
+        val
+    }
+}

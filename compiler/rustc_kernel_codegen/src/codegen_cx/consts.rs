@@ -6,12 +6,15 @@ use rustc_middle::{
     mir::interpret::{
         read_target_uint, AllocId, AllocRange, Allocation, ConstAllocation, GlobalAlloc, InitChunk,
         Pointer, Scalar as InterpScalar,
-    }
+    },
 };
 use rustc_target::abi::{self, Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
 
 use crate::{
-    codegen_cx::declare::fix_ptx_name, global::{ConstExpr, GlobalNVVM}, ty::{TyNVVM, TypeNVVM}, value::{Const, Instruction, Val, ValueNVVM}
+    codegen_cx::declare::fix_ptx_name,
+    global::{ConstExpr, GlobalNVVM},
+    ty::{TyNVVM, TypeNVVM},
+    value::{Const, Instruction, Val, ValueNVVM},
 };
 
 use super::CodegenCx;
@@ -29,11 +32,11 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
             TypeNVVM::Pointer(_) => {
                 let value = ValueNVVM::Constant(Const::NullPtr);
                 self.get_module_mut().create_val(value, Some(t))
-            },
+            }
             TypeNVVM::Struct(_) | TypeNVVM::Array(_, _) => {
                 let value = ValueNVVM::Constant(Const::ZeroInitializer);
-                self.get_module_mut().create_val(value, Some(t))            
-            },
+                self.get_module_mut().create_val(value, Some(t))
+            }
             TypeNVVM::Zst => self.const_struct(&[], false),
             _ => {
                 bug!("const_null called on unsupported type: {:?}", t)
@@ -42,8 +45,9 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
     }
 
     fn const_undef(&self, t: Self::Type) -> Self::Value {
-        let value = ValueNVVM::Constant(Const::Undef);
-        self.get_module_mut().create_val(value, Some(t))
+        let module = self.get_module_mut();
+        let value = ValueNVVM::Constant(Const::Undef(t, t.size(module)));
+        module.create_val(value, Some(t))
     }
 
     fn const_poison(&self, t: Self::Type) -> Self::Value {
@@ -209,11 +213,13 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
 
             let chunk_to_llval = move |chunk| match chunk {
                 InitChunk::Init(range) => {
+                    println!("[Kernel Const] Init chunk: {:?}", range);
                     let range = (range.start.bytes() as usize)..(range.end.bytes() as usize);
                     let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(range);
                     cx.const_bytes(bytes)
                 }
                 InitChunk::Uninit(range) => {
+                    println!("[Kernel Const] Uninit chunk: {:?}", range);
                     let len = range.end.bytes() - range.start.bytes();
                     cx.const_undef(cx.type_array(cx.type_i8(), len))
                 }
@@ -226,6 +232,7 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
             let max = cx.sess().opts.unstable_opts.uninit_const_chunk_threshold;
             let allow_uninit_chunks = chunks.clone().take(max.saturating_add(1)).count() <= max;
 
+            println!("[Kernel Const] llvals before: {:?}", llvals);
             if allow_uninit_chunks {
                 llvals.extend(chunks.map(chunk_to_llval));
             } else {
@@ -266,7 +273,7 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
 
             let address_space = self.tcx.global_alloc(prov.alloc_id()).address_space(self);
 
-            llvals.push(self.scalar_to_backend(
+            let llval = self.scalar_to_backend(
                 InterpScalar::from_pointer(
                     Pointer::new(prov, Size::from_bytes(ptr_offset)),
                     &self.tcx,
@@ -276,9 +283,11 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
                     valid_range: WrappingRange { start: 0, end: !0 },
                 },
                 self.type_ptr_ext(address_space),
-            ));
+            );
+            llvals.push(llval);
             next_offset = offset + pointer_size;
         }
+
         if alloc.len() >= next_offset {
             let range = next_offset..alloc.len();
             // This `inspect` is okay since we have check that it is after all relocations, it is
@@ -287,9 +296,9 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
             append_chunks_of_init_and_uninit_bytes(&mut llvals, self, alloc, range);
         }
 
+        println!("[Kernel Const] llvals after: {:?}", llvals);
+
         self.const_struct(&llvals, true)
-
-
     }
 
     fn scalar_to_backend(
@@ -356,14 +365,11 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
         let value = ValueNVVM::ConstExpr(expr);
         let val = self.get_module_mut().create_val(value, Some(ty));
 
+        println!("const_bitcast: val: {:?}, ty: {:?}", val, ty);
         self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
     }
 
-    fn const_ptr_byte_offset(
-        &self,
-        val: Val<'m>,
-        offset: rustc_target::abi::Size,
-    ) -> Val<'m> {
+    fn const_ptr_byte_offset(&self, val: Val<'m>, offset: rustc_target::abi::Size) -> Val<'m> {
         let mut module = self.get_module_mut();
         // infer the type of the operation, in practice the val is almost always a pointer
         let val_ty = *module.valtypes.get(&val).expect("const_ptr_byte_offset must have a type");
@@ -380,10 +386,8 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
                         false
                     }
                 }
-                _ => {
-                    false
-                }
-            }
+                _ => false,
+            },
             _ => {
                 // if the value is not a pointer, we can't do a pointer offset
                 bug!("const_ptr_byte_offset called on non-pointer type: {:?}", val_ty);
@@ -399,14 +403,15 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
             self.const_bitcast(val, i8ptr_ty)
         };
         // create a GEP instruction to add the offset
-        let gep = ConstExpr::GEP { 
-            ty: i8ptr_ty, 
-            val: val, 
+        let gep = ConstExpr::GEP {
+            ty: i8ptr_ty,
+            val: gepval,
             indices: vec![Const::U64(offset.bytes() as u64)],
         };
         let value = ValueNVVM::ConstExpr(gep);
         let val = module.create_val(value, Some(i8ptr_ty));
-        
+
+        println!("const_ptr_byte_offset: val: {:?}, offset: {:?}", val, offset);
         self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
     }
 }

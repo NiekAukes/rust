@@ -1,4 +1,5 @@
 use rustc_data_structures::intern::Interned;
+use rustc_middle::ty;
 
 use crate::{
     module::{self, Assemble},
@@ -45,7 +46,7 @@ impl<'m> Assemble<'m> for GlobalNVVM<'m> {
                 let ty = *module.valtypes.get(&self.val).expect("GlobalNVVM must have a type");
                 let ty_str = ty.assemble(module);
 
-                format!("@{} = constant {} {}", self.name, expr_str, ty_str)
+                format!("@{} = constant {} {}", self.name, ty_str, expr_str)
             }
             _ => {
                 panic!(
@@ -59,7 +60,7 @@ impl<'m> Assemble<'m> for GlobalNVVM<'m> {
 
 #[derive(Debug)]
 pub enum ConstExpr<'m> {
-    GEP { ty: TyNVVM<'m>, val: Val<'m>, indices: Vec<Const> },
+    GEP { ty: TyNVVM<'m>, val: Val<'m>, indices: Vec<Const<'m>> },
     BitCast { ty: TyNVVM<'m>, val: Val<'m> },
 }
 
@@ -68,27 +69,37 @@ impl<'m> ConstExpr<'m> {
         match self {
             ConstExpr::GEP { ty, val, indices } => {
                 let val_str = assemble_const_val(val, module);
-                let indices_str: Vec<String> = indices.iter().map(|i| i.assemble(module)).collect();
-                format!("getelementptr {}, {}, [{}]", ty.assemble(module), val_str, indices_str.join(", "))
+                let val_ty = *module.valtypes.get(val).expect("ConstExpr GEP must have a type");
+                let val_tystr = val_ty.assemble(module);
+                let indices_str: Vec<String> =
+                    indices.iter().map(|i| format!("i64 {}", i.assemble(module))).collect();
+                format!(
+                    "getelementptr ({}, {} {}, {})",
+                    ty.assemble(module),
+                    val_tystr,
+                    val_str,
+                    indices_str.join(", ")
+                )
             }
             ConstExpr::BitCast { ty, val } => {
                 let val_str = assemble_const_val(val, module);
-                format!("bitcast {} to {}", val_str, ty.assemble(module))
+                let val_ty = *module.valtypes.get(val).expect("ConstExpr BitCast must have a type");
+                let val_tystr = val_ty.assemble(module);
+                let ty_str = ty.assemble(module);
+                format!("bitcast ({} {} to {})", val_tystr, val_str, ty_str)
             }
         }
     }
 }
 
-fn assemble_const_val<'m>(
-    val: &Val<'m>,
-    module: &mut module::ModuleNVVM<'m>,
-) -> String {
+fn assemble_const_val<'m>(val: &Val<'m>, module: &mut module::ModuleNVVM<'m>) -> String {
     match val.0 {
         ValueNVVM::Constant(ref c) => c.assemble_for_const(module),
-        ValueNVVM::Global(GlobalNVVM { ref val, .. }) => assemble_const_val(val, module),
-        _ => panic!(
-            "Expected a constant value, found: {:?}",
-            val.0
-        ),
+        //ValueNVVM::Global(GlobalNVVM { ref val, .. }) => assemble_const_val(val, module),
+        ValueNVVM::Global(GlobalNVVM { ref val, name }) => {
+            //let ty = *module.valtypes.get(val).expect("GlobalNVVM must have a type");
+            format!("@{}", name)
+        }
+        _ => panic!("Expected a constant value, found: {:?}", val.0),
     }
 }
