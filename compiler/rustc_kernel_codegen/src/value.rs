@@ -19,7 +19,7 @@ pub trait AssembleVal<'m> {
 }
 
 #[derive(Debug)]
-pub enum Comp {
+pub enum IComp {
     Eq,
     Ne,
     Lt,
@@ -31,37 +31,123 @@ pub enum Comp {
     Slt,
     Sle,
 }
+/*
 
-impl From<rustc_codegen_ssa::common::IntPredicate> for Comp {
+   false: no comparison, always returns false
+   oeq: ordered and equal
+   ogt: ordered and greater than
+   oge: ordered and greater than or equal
+   olt: ordered and less than
+   ole: ordered and less than or equal
+   one: ordered and not equal
+   ord: ordered (no nans)
+   ueq: unordered or equal
+   ugt: unordered or greater than
+   uge: unordered or greater than or equal
+   ult: unordered or less than
+   ule: unordered or less than or equal
+   une: unordered or not equal
+   uno: unordered (either nans)
+   true: no comparison, always returns true
+
+*/
+
+#[derive(Debug)]
+pub enum FComp {
+    False,
+    Oeq,
+    Ogt,
+    Oge,
+    Olt,
+    Ole,
+    One,
+    Ord,
+    Ueq,
+    Ugt,
+    Uge,
+    Ult,
+    Ule,
+    Une,
+    Uno,
+    True,
+}
+
+impl From<rustc_codegen_ssa::common::IntPredicate> for IComp {
     fn from(pred: rustc_codegen_ssa::common::IntPredicate) -> Self {
         match pred {
-            rustc_codegen_ssa::common::IntPredicate::IntEQ => Comp::Eq,
-            rustc_codegen_ssa::common::IntPredicate::IntNE => Comp::Ne,
-            rustc_codegen_ssa::common::IntPredicate::IntULT => Comp::Lt,
-            rustc_codegen_ssa::common::IntPredicate::IntULE => Comp::Le,
-            rustc_codegen_ssa::common::IntPredicate::IntUGT => Comp::Gt,
-            rustc_codegen_ssa::common::IntPredicate::IntUGE => Comp::Ge,
-            rustc_codegen_ssa::common::IntPredicate::IntSGT => Comp::Sgt,
-            rustc_codegen_ssa::common::IntPredicate::IntSGE => Comp::Sge,
-            rustc_codegen_ssa::common::IntPredicate::IntSLT => Comp::Slt,
-            rustc_codegen_ssa::common::IntPredicate::IntSLE => Comp::Sle,
+            rustc_codegen_ssa::common::IntPredicate::IntEQ => IComp::Eq,
+            rustc_codegen_ssa::common::IntPredicate::IntNE => IComp::Ne,
+            rustc_codegen_ssa::common::IntPredicate::IntULT => IComp::Lt,
+            rustc_codegen_ssa::common::IntPredicate::IntULE => IComp::Le,
+            rustc_codegen_ssa::common::IntPredicate::IntUGT => IComp::Gt,
+            rustc_codegen_ssa::common::IntPredicate::IntUGE => IComp::Ge,
+            rustc_codegen_ssa::common::IntPredicate::IntSGT => IComp::Sgt,
+            rustc_codegen_ssa::common::IntPredicate::IntSGE => IComp::Sge,
+            rustc_codegen_ssa::common::IntPredicate::IntSLT => IComp::Slt,
+            rustc_codegen_ssa::common::IntPredicate::IntSLE => IComp::Sle,
         }
     }
 }
 
-impl Display for Comp {
+impl From<rustc_codegen_ssa::common::RealPredicate> for FComp {
+    fn from(pred: rustc_codegen_ssa::common::RealPredicate) -> Self {
+        match pred {
+            rustc_codegen_ssa::common::RealPredicate::RealPredicateFalse => FComp::False,
+            rustc_codegen_ssa::common::RealPredicate::RealOEQ => FComp::Oeq,
+            rustc_codegen_ssa::common::RealPredicate::RealOGT => FComp::Ogt,
+            rustc_codegen_ssa::common::RealPredicate::RealOGE => FComp::Oge,
+            rustc_codegen_ssa::common::RealPredicate::RealOLT => FComp::Olt,
+            rustc_codegen_ssa::common::RealPredicate::RealOLE => FComp::Ole,
+            rustc_codegen_ssa::common::RealPredicate::RealONE => FComp::One,
+            rustc_codegen_ssa::common::RealPredicate::RealORD => FComp::Ord,
+            rustc_codegen_ssa::common::RealPredicate::RealUNO => FComp::Uno,
+            rustc_codegen_ssa::common::RealPredicate::RealUEQ => FComp::Ueq,
+            rustc_codegen_ssa::common::RealPredicate::RealUGT => FComp::Ugt,
+            rustc_codegen_ssa::common::RealPredicate::RealUGE => FComp::Uge,
+            rustc_codegen_ssa::common::RealPredicate::RealULT => FComp::Ult,
+            rustc_codegen_ssa::common::RealPredicate::RealULE => FComp::Ule,
+            rustc_codegen_ssa::common::RealPredicate::RealUNE => FComp::Une,
+            rustc_codegen_ssa::common::RealPredicate::RealPredicateTrue => FComp::True,
+        }
+    }
+}
+
+impl Display for IComp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Comp::Eq => write!(f, "eq"),
-            Comp::Ne => write!(f, "ne"),
-            Comp::Lt => write!(f, "ult"),
-            Comp::Le => write!(f, "ule"),
-            Comp::Gt => write!(f, "ugt"),
-            Comp::Ge => write!(f, "uge"),
-            Comp::Sgt => write!(f, "sgt"),
-            Comp::Sge => write!(f, "sge"),
-            Comp::Slt => write!(f, "slt"),
-            Comp::Sle => write!(f, "sle"),
+            IComp::Eq => write!(f, "eq"),
+            IComp::Ne => write!(f, "ne"),
+            IComp::Lt => write!(f, "ult"),
+            IComp::Le => write!(f, "ule"),
+            IComp::Gt => write!(f, "ugt"),
+            IComp::Ge => write!(f, "uge"),
+            IComp::Sgt => write!(f, "sgt"),
+            IComp::Sge => write!(f, "sge"),
+            IComp::Slt => write!(f, "slt"),
+            IComp::Sle => write!(f, "sle"),
+        }
+    }
+}
+
+impl Display for FComp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FComp::False => write!(f, "false"),
+            FComp::Oeq => write!(f, "oeq"),
+            FComp::Ogt => write!(f, "ogt"),
+            FComp::Oge => write!(f, "oge"),
+            FComp::Olt => write!(f, "olt"),
+            FComp::Ole => write!(f, "ole"),
+            FComp::One => write!(f, "one"),
+            FComp::Ord => write!(f, "ord"),
+            FComp::Ueq => write!(f, "ueq"),
+            FComp::Ugt => write!(f, "ugt"),
+            FComp::Uge => write!(f, "uge"),
+            FComp::Ult => write!(f, "ult"),
+            FComp::Ule => write!(f, "ule"),
+            FComp::Une => write!(f, "une"),
+            FComp::Uno => write!(f, "uno"),
+            FComp::True => write!(f, "true"),
         }
     }
 }
@@ -98,7 +184,19 @@ pub enum Instruction<'m> {
         nsw: bool,
         nuw: bool,
     },
+    FSub {
+        lhs: Val<'m>,
+        rhs: Val<'m>,
+        nsw: bool,
+        nuw: bool,
+    },
     Add {
+        lhs: Val<'m>,
+        rhs: Val<'m>,
+        nsw: bool,
+        nuw: bool,
+    },
+    FAdd {
         lhs: Val<'m>,
         rhs: Val<'m>,
         nsw: bool,
@@ -109,7 +207,8 @@ pub enum Instruction<'m> {
     Or(Val<'m>, Val<'m>),
     Xor(Val<'m>, Val<'m>),
 
-    ICmp(Comp, Val<'m>, Val<'m>),
+    ICmp(IComp, Val<'m>, Val<'m>),
+    FCmp(FComp, Val<'m>, Val<'m>),
 
     URem(Val<'m>, Val<'m>),
     SRem(Val<'m>, Val<'m>),
@@ -120,6 +219,13 @@ pub enum Instruction<'m> {
     FDiv(Val<'m>, Val<'m>),
 
     Mul {
+        lhs: Val<'m>,
+        rhs: Val<'m>,
+        nsw: bool,
+        nuw: bool,
+    },
+
+    FMul {
         lhs: Val<'m>,
         rhs: Val<'m>,
         nsw: bool,
@@ -233,6 +339,38 @@ pub enum Instruction<'m> {
         else_val: Val<'m>,
     },
 
+    // float conversions
+    FPToUI {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+    FPToSI {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+    UIToFP {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+    SIToFP {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+    FPTrunc {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+    FExt {
+        ty: TyNVVM<'m>,
+        val: Val<'m>,
+        to: TyNVVM<'m>,
+    },
+
     // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
     LifetimeStart(Val<'m>, usize),
     LifetimeEnd(Val<'m>, usize),
@@ -283,7 +421,7 @@ impl Const {
             Const::Arr(l) => l.len(),
             Const::Struct(l) => l.len(),
             Const::FnRef(_) => 8, // function references have pointer size
-            Const::NullPtr => 8, // null pointer has pointer size
+            Const::NullPtr => 8,  // null pointer has pointer size
             Const::ZeroInitializer => 0, // zero initializer has no size
         }
     }
@@ -556,11 +694,14 @@ impl<'m> Instruction<'m> {
             | Instruction::IntToPtr { .. }
             | Instruction::Load { .. }
             | Instruction::Sub { .. }
+            | Instruction::FSub { .. }
             | Instruction::Add { .. }
+            | Instruction::FAdd { .. }
             | Instruction::And(_, _)
             | Instruction::Or(_, _)
             | Instruction::Xor(_, _)
             | Instruction::ICmp(_, _, _)
+            | Instruction::FCmp(_, _, _)
             | Instruction::URem(_, _)
             | Instruction::SRem(_, _)
             | Instruction::FRem(_, _)
@@ -568,11 +709,19 @@ impl<'m> Instruction<'m> {
             | Instruction::SDiv(_, _)
             | Instruction::FDiv(_, _)
             | Instruction::Mul { .. }
+            | Instruction::FMul { .. }
             | Instruction::Shl { .. }
             | Instruction::LShr { .. }
             | Instruction::Trunc { .. }
             | Instruction::SExt { .. }
             | Instruction::ZExt { .. }
+            | Instruction::FExt { .. }
+            | Instruction::FPToUI { .. }
+            | Instruction::FPToSI { .. }
+            | Instruction::UIToFP { .. }
+            | Instruction::SIToFP { .. }
+            | Instruction::FPTrunc { .. }
+            | Instruction::BitCast { .. }
             | Instruction::LandingPad { .. }
             | Instruction::Invoke { .. }
             | Instruction::InsertValue { .. }
@@ -665,6 +814,17 @@ impl<'m> Instruction<'m> {
                     rhs.assemble(module, func)
                 )
             }
+            Instruction::FSub { lhs, rhs, nsw, nuw } => {
+                let ty = *module.valtypes.get(lhs).unwrap();
+                let ty_label = ty.assemble(module);
+                format!(
+                    "fsub {} {}, {}",
+                    ty_label,
+                    lhs.assemble(module, func),
+                    rhs.assemble(module, func)
+                )
+            }
+
             Instruction::Add { lhs, rhs, nsw, nuw } => {
                 let ty = *module.valtypes.get(lhs).unwrap();
                 let ty_label = ty.assemble(module);
@@ -676,6 +836,23 @@ impl<'m> Instruction<'m> {
                 };
                 format!(
                     "add {}{} {}, {}",
+                    opts,
+                    ty_label,
+                    lhs.assemble(module, func),
+                    rhs.assemble(module, func)
+                )
+            }
+            Instruction::FAdd { lhs, rhs, nsw, nuw } => {
+                let ty = *module.valtypes.get(lhs).unwrap();
+                let ty_label = ty.assemble(module);
+                let opts = match (nsw, nuw) {
+                    (true, true) => "nsw nuw ",
+                    (true, false) => "nsw ",
+                    (false, true) => "nuw ",
+                    (false, false) => "",
+                };
+                format!(
+                    "fadd {}{} {}, {}",
                     opts,
                     ty_label,
                     lhs.assemble(module, func),
@@ -718,6 +895,18 @@ impl<'m> Instruction<'m> {
                 let ty_label = ty.assemble(module);
                 format!(
                     "icmp {} {} {}, {}",
+                    comp,
+                    ty_label,
+                    a.assemble(module, func),
+                    b.assemble(module, func)
+                )
+            }
+
+            Instruction::FCmp(comp, a, b) => {
+                let ty = *module.valtypes.get(a).unwrap();
+                let ty_label = ty.assemble(module);
+                format!(
+                    "fcmp {} {} {}, {}",
                     comp,
                     ty_label,
                     a.assemble(module, func),
@@ -802,6 +991,24 @@ impl<'m> Instruction<'m> {
                 };
                 format!(
                     "mul {}{} {}, {}",
+                    opts,
+                    ty_label,
+                    lhs.assemble(module, func),
+                    rhs.assemble(module, func)
+                )
+            }
+
+            Instruction::FMul { lhs, rhs, nsw, nuw } => {
+                let ty = *module.valtypes.get(lhs).unwrap();
+                let ty_label = ty.assemble(module);
+                let opts = match (nsw, nuw) {
+                    (true, true) => "nsw nuw ",
+                    (true, false) => "nsw ",
+                    (false, true) => "nuw ",
+                    (false, false) => "",
+                };
+                format!(
+                    "fmul {}{} {}, {}",
                     opts,
                     ty_label,
                     lhs.assemble(module, func),
@@ -1057,13 +1264,46 @@ impl<'m> Instruction<'m> {
 
                 format!(
                     "select {} {}, {} {}, {} {}",
-                    cond_ty_str, 
-                    cond_label,  
-                    val_ty_str,  
-                    then_label,  
-                    val_ty_str,  
-                    else_label   
+                    cond_ty_str, cond_label, val_ty_str, then_label, val_ty_str, else_label
                 )
+            }
+
+            Instruction::FPToUI { val, to, ty } => {
+                let ty_label = ty.assemble(module);
+                let val_label = val.assemble(module, func);
+                let to_label = to.assemble(module);
+                format!("fptoui {} {} to {}", ty_label, val_label, to_label)
+            }
+            Instruction::FPToSI { val, to, ty } => {
+                let ty_label = ty.assemble(module);
+                let val_label = val.assemble(module, func);
+                let to_label = to.assemble(module);
+                format!("fptosi {} {} to {}", ty_label, val_label, to_label)
+            }
+            Instruction::UIToFP { val, to, ty } => {
+                let ty_label = ty.assemble(module);
+                let val_label = val.assemble(module, func);
+                let to_label = to.assemble(module);
+                format!("uitofp {} {} to {}", ty_label, val_label, to_label)
+            }
+            Instruction::SIToFP { val, to, ty } => {
+                let ty_label = ty.assemble(module);
+                let val_label = val.assemble(module, func);
+                let to_label = to.assemble(module);
+                format!("sitoft {} {} to {}", ty_label, val_label, to_label)
+            }
+
+            Instruction::FPTrunc { val, to, ty } => {
+                let ty_label = ty.assemble(module);
+                let val_label = val.assemble(module, func);
+                let to_label = to.assemble(module);
+                format!("fptrunc {} {} to {}", ty_label, val_label, to_label)
+            }
+            Instruction::FExt { val, to, ty } => {
+                let ty_label = ty.assemble(module);
+                let val_label = val.assemble(module, func);
+                let to_label = to.assemble(module);
+                format!("fpext {} {} to {}", ty_label, val_label, to_label)
             }
 
             // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
@@ -1076,4 +1316,3 @@ impl<'m> Instruction<'m> {
         }
     }
 }
-

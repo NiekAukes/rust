@@ -5,7 +5,7 @@ use crate::module::MetadataNode;
 use crate::{
     basic_block::BasicBlock,
     ty::{TyNVVM, TypeNVVM},
-    value::{Comp, Const, Instruction, Val, ValueNVVM},
+    value::{Const, FComp, IComp, Instruction, Val, ValueNVVM},
 };
 use rustc_codegen_ssa::common::IntPredicate;
 use rustc_codegen_ssa::traits::StaticMethods;
@@ -161,11 +161,17 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn fadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let instr = Instruction::FAdd { lhs, rhs, nsw: false, nuw: false };
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(lhs)));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn fadd_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fadd(lhs, rhs) // not applicable
     }
 
     fn fadd_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -185,11 +191,17 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn fsub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let instr = Instruction::FSub { lhs, rhs, nsw: false, nuw: false };
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(lhs)));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn fsub_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fsub(lhs, rhs) // not applicable
     }
 
     fn fsub_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -207,11 +219,17 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn fmul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let instr = Instruction::FMul { lhs, rhs, nsw: false, nuw: false };
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(lhs)));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn fmul_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fmul(lhs, rhs) // not applicable
     }
 
     fn fmul_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -247,11 +265,17 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn fdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let instr = Instruction::FDiv(lhs, rhs);
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(lhs)));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn fdiv_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fdiv(lhs, rhs) // not applicable
     }
 
     fn fdiv_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -279,11 +303,17 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn frem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let instr = Instruction::FRem(lhs, rhs);
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(lhs)));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn frem_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.frem(lhs, rhs) // not applicable
     }
 
     fn frem_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -545,7 +575,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             return OperandRef::zero_sized(place.layout);
         }
 
-        println!("Loading operand: {:?}", place);
+        //println!("Loading operand: {:?}", place);
 
         let val = if let Some(_) = place.val.llextra {
             // FIXME: Merge with the `else` below?
@@ -568,7 +598,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             // we check if the value is a struct or array constant, if it is, we must use it as a global variable
             if let ValueNVVM::Constant(Const::Arr(_) | Const::Struct(_)) = place.val.llval.0 {
                 // get the static address of the constant
-                const_llval = Some(self.cx().static_addr_of(place.val.llval, place.val.align, None));
+                const_llval =
+                    Some(self.cx().static_addr_of(place.val.llval, place.val.align, None));
             }
             let llval = const_llval.unwrap_or_else(|| {
                 let load = self.load(llty, place.val.llval, place.val.align);
@@ -768,27 +799,57 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn fptoui(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        // convert a floating point value to an unsigned integer value
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::FPToUI { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn fptosi(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        // convert a floating point value to a signed integer value
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::FPToSI { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn uitofp(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        // convert an unsigned integer to a floating point value
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::UIToFP { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn sitofp(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        // convert a signed integer to a floating point value
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::SIToFP { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn fptrunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        // truncate a floating point value to a smaller floating point value
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::FPTrunc { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn fpext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        // extend a floating point value to a larger floating point value
+        let ty = self.cx().val_ty(val);
+        let instr = Instruction::FExt { ty, val, to: dest_ty };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(dest_ty));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn ptrtoint(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
@@ -863,7 +924,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             (lhs, rhs)
         };
 
-        let instr = Instruction::ICmp(Comp::from(op), lhs, rhs);
+        let instr = Instruction::ICmp(IComp::from(op), lhs, rhs);
         let v = self
             .cx()
             .get_module_mut()
@@ -878,7 +939,26 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         lhs: Self::Value,
         rhs: Self::Value,
     ) -> Self::Value {
-        todo!()
+        let module = self.cx().get_module();
+        // check if the types of the operands are the same
+        let (lhs, rhs) = if self.cx().val_ty(lhs) != self.cx().val_ty(rhs) {
+            // if not, pick the larger type and cast the other operand to it
+            if self.cx().val_ty(lhs).size(module) > self.cx().val_ty(rhs).size(module) {
+                (lhs, self.intcast(rhs, self.cx().val_ty(lhs), false))
+            } else {
+                (self.intcast(lhs, self.cx().val_ty(rhs), false), rhs)
+            }
+        } else {
+            (lhs, rhs)
+        };
+
+        let instr = Instruction::FCmp(FComp::from(op), lhs, rhs);
+        let v = self
+            .cx()
+            .get_module_mut()
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i1()));
+        self.basic_block.add_instr(v);
+        v
     }
 
     fn memcpy(
@@ -938,10 +1018,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 
         let instr = Instruction::Select { cond, then_val, else_val };
 
-        let v = self
-            .cx()
-            .get_module_mut()
-            .create_val(ValueNVVM::Instr(instr), Some(then_ty));
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(then_ty));
         self.basic_block.add_instr(v);
 
         v
@@ -1142,10 +1219,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             _ => panic!("Expected function type, found {:?}", fn_decl_ty),
         };
 
-        println!(
-            "Call function: {:?}, args: {:?}, ret: {:?}",
-            llfn, args, ret
-        );
+        println!("Call function: {:?}, args: {:?}, ret: {:?}", llfn, args, ret);
 
         // check if all function parameters have the correct type
         for (i, (arg, expected_ty)) in args.iter().zip(unpacked_fn_abi.iter()).enumerate() {
