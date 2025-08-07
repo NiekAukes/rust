@@ -569,3 +569,8 @@ hir_analysis_wrong_number_of_generic_arguments_to_intrinsic =
         [one] parameter
         *[other] parameters
     }
+
+hir_analysis_kernel_type_missing =
+    kernel attribute present but no kernel type found
+    .label = kernel type is missing
+    .suggestion = add a `#![engine({$engine})]` attribute to the crate root

@@ -1676,3 +1676,11 @@ pub struct InvalidReceiverTy<'tcx> {
     pub span: Span,
     pub receiver_ty: Ty<'tcx>,
 }
+
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_kernel_type_missing, code = E0798)]
+pub struct KernelTypeMissing {
+    #[primary_span]
+    pub span: Span,
+}

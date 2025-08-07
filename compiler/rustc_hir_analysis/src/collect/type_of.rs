@@ -446,11 +446,11 @@ pub(super) fn type_of_inner(
                     // create a hir Ty from the path
 
                     let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
-                        //let guar = tcx
-                        //    .dcx()
-                        //    .emit_err(crate::errors::);
-                        bug!("kernel attribute present but no kernel type found")
-                        //return Ty::new_error(tcx, guar);
+                        let guar = tcx
+                            .dcx()
+                            .emit_err(crate::errors::KernelTypeMissing { span: item.span });
+                        //bug!("kernel attribute present but no kernel type found");
+                        return ty::EarlyBinder::bind(Ty::new_error(tcx, guar));
                     };
                     let kernel_type = tcx.type_of(kernel_def_id);
                     // we now have the kernel type, but we still need populate the generic args
