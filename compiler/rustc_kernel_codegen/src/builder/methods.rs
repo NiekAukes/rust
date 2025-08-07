@@ -72,6 +72,10 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn ret(&mut self, v: Self::Value) {
+        let ret_type = self.basic_block.func.ret;
+
+        // convert argument to the return type
+        let v = self.convert_argument(v, ret_type);
         // build a return instruction
         let r = self.cx().get_module_mut().create_val(ValueNVVM::Instr(Instruction::Ret(v)), None);
 
@@ -321,7 +325,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn shl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let instr = Instruction::Shl { lhs, rhs, nuw: false, nsw: false };
+        let (_, nargs) = self.convert_arguments_to_largest(&[lhs, rhs]);
+        let instr = Instruction::Shl { lhs: nargs[0], rhs: nargs[1], nuw: false, nsw: false };
         let v = self
             .cx()
             .get_module_mut()
@@ -331,7 +336,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn lshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let instr = Instruction::LShr { lhs, rhs };
+        let (_, nargs) = self.convert_arguments_to_largest(&[lhs, rhs]);
+        let instr = Instruction::LShr { lhs: nargs[0], rhs: nargs[1] };
         let v = self
             .cx()
             .get_module_mut()
@@ -528,6 +534,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         // create a new alloca instruction
         let ty = self.cx().type_i8();
         let ptr_ty = self.cx().type_pointer(ty);
+        println!("align: {}", align.bytes());
         let alloca =
             ValueNVVM::Instr(Instruction::Alloca { ty, size: size.bytes(), align: align.bytes() });
         let v = self.cx().get_module_mut().create_val(alloca, Some(ptr_ty)); // the type of the alloca is not known
@@ -694,6 +701,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         // if not bitcast the value to the type of the pointer
         let target_ty = self.cx().type_pointer(self.cx().val_ty(val));
         let org_ptr_ty = self.cx().val_ty(ptr);
+
+        
 
         // if the types are not the same, cast the value to the type of the pointer
         let ptr = if target_ty != org_ptr_ty {
@@ -896,6 +905,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             self.trunc(val, dest_ty)
         } else if tysz1 < tysz2 {
             if is_signed { self.sext(val, dest_ty) } else { self.zext(val, dest_ty) }
+        } else if ty == dest_ty {
+            val // no cast needed
         } else {
             self.bitcast(val, dest_ty)
         }
@@ -941,16 +952,10 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     ) -> Self::Value {
         let module = self.cx().get_module();
         // check if the types of the operands are the same
-        let (lhs, rhs) = if self.cx().val_ty(lhs) != self.cx().val_ty(rhs) {
-            // if not, pick the larger type and cast the other operand to it
-            if self.cx().val_ty(lhs).size(module) > self.cx().val_ty(rhs).size(module) {
-                (lhs, self.intcast(rhs, self.cx().val_ty(lhs), false))
-            } else {
-                (self.intcast(lhs, self.cx().val_ty(rhs), false), rhs)
-            }
-        } else {
-            (lhs, rhs)
-        };
+        let (_, args) =
+            self.convert_arguments_to_largest(&[lhs, rhs]); // convert both arguments to the largest type
+        let lhs = args[0];
+        let rhs = args[1];
 
         let instr = Instruction::FCmp(FComp::from(op), lhs, rhs);
         let v = self
@@ -1224,6 +1229,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         // check if all function parameters have the correct type
         for (i, (arg, expected_ty)) in args.iter().zip(unpacked_fn_abi.iter()).enumerate() {
             //let ty = self.cx().backend_type(*expected_ty);
+            println!("Expected ty: {:?}, arg: {:?}", expected_ty, arg);
             args_vec.push(self.convert_argument(*arg, *expected_ty));
         }
 
@@ -1261,6 +1267,12 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
         };
         assert_eq!(args.len(), fn_args.len());
 
+
+        println!(
+            "Calling intrinsic: {}, args: {:?}, ret: {:?}",
+            name, args, fn_ret
+        );
+
         let mut args_vec = Vec::new();
         for (arg, expected_ty) in args.iter().zip(fn_args.iter()) {
             let arg = self.convert_argument(*arg, *expected_ty);
@@ -1289,12 +1301,21 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
     fn convert_argument(&mut self, arg: Val<'m>, to_ty: TyNVVM<'m>) -> Val<'m> {
         let from_ty = self.cx().val_ty(arg);
         if from_ty == to_ty {
+            println!(
+                "convert_argument: types are equal, returning original arg: {:?}",
+                from_ty
+            );
             return arg;
         } else if *from_ty == *to_ty {
             bug!("convert_argument: types are equal but not the same");
         }
 
         let module = self.cx().get_module();
+
+        println!(
+            "convert_argument: converting {:?} to {:?} with value {:?}",
+            from_ty, to_ty, arg
+        );
 
         // if the arg is a struct or array constant, we need to get the static address of the constant
         if let ValueNVVM::Constant(Const::Arr(_) | Const::Struct(_)) = arg.0 {

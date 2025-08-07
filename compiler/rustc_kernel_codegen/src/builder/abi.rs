@@ -105,6 +105,7 @@ impl<'m, 'tcx> ArgAbiExt<'m, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
     /// Can be used for both storing formal arguments into Rust variables
     /// or results of call/invoke instructions into their destinations.
     fn store(&self, bx: &mut Builder<'_, 'm, 'tcx>, val: Val<'m>, dst: PlaceRef<'tcx, Val<'m>>) {
+        
         match &self.mode {
             PassMode::Ignore => {}
             // Sized indirect arguments
@@ -133,6 +134,11 @@ impl<'m, 'tcx> ArgAbiExt<'m, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                 let llscratch = bx.alloca(scratch_size, scratch_align);
                 bx.lifetime_start(llscratch, scratch_size);
                 // ...store the value...
+
+                println!(
+            "ArgAbiExt::store: val: {:?}, dst: {:?}, mode: {:?}",
+            val, dst, self.mode
+        );
                 bx.store(val, llscratch, scratch_align);
                 // ... and then memcpy it to the intended destination.
                 bx.memcpy(

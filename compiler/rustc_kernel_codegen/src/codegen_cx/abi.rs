@@ -101,12 +101,22 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
 
         for (idx, arg) in fn_abi.args.iter().enumerate() {
             // lower the type to the NVVM type
+            
             match arg.mode {
                 PassMode::Ignore => continue,
-                PassMode::Pair(_, _) => {
+                PassMode::Pair(a, b) => {
                     // add 2 arguments to the list
-                    let ty1 = self.backend_type(arg.layout.field(self, 0));
-                    let ty2 = self.backend_type(arg.layout.field(self, 1));
+                    
+                    //let ty1 = self.backend_type(arg.layout.field(self, 0));
+                    //let ty2 = self.backend_type(arg.layout.field(self, 1));
+                    let (ty1, ty2) = match find_scalarpair_types(self, arg.layout) {
+                        Some(t) => t,
+                        None => panic!("Expected scalar pair"),
+                    };
+                    println!(
+                        "[Kernel] fn_decl_backend_type, arg {}: pair, types: {:?}, {:?}",
+                        idx, ty1, ty2
+                    );
                     args.push(ty1);
                     args.push(ty2);
                 }

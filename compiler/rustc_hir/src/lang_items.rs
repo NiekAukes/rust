@@ -383,6 +383,7 @@ language_item_table! {
     // Kernel lang items
     KernelPanicImpl,         sym::kernel_panic_impl,     kernel_panic_impl,        Target::Fn,             GenericRequirement::None; 
     KernelPanicFmtImpl,      sym::kernel_panic_fmt_impl, kernel_panic_fmt_impl,    Target::Fn,             GenericRequirement::None;
+    KernelPanicNounwind,     sym::kernel_panic_nounwind_impl,  kernel_panic_nounwind_impl, Target::Fn,             GenericRequirement::None;
     KernelExchangeMalloc,    sym::kernel_exchange_malloc_fn, kernel_exchange_malloc_fn, Target::Fn,           GenericRequirement::None;
 }
 

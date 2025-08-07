@@ -63,7 +63,15 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
     }
 
     fn const_uint_big(&self, t: Self::Type, u: u128) -> Self::Value {
-        self.const_u128(u)
+        match t.0 {
+            TypeNVVM::I(1) => self.const_u8(u as u8),   
+            TypeNVVM::I(8) => self.const_u8(u as u8),
+            TypeNVVM::I(16) => self.const_i16(u as i16),
+            TypeNVVM::I(32) => self.const_u32(u as u32),
+            TypeNVVM::I(64) => self.const_u64(u as u64),
+            TypeNVVM::I(128) => self.const_u128(u),
+            _ => bug!("const_uint_big called on unsupported type: {:?}", t),
+        }
     }
 
     fn const_bool(&self, val: bool) -> Self::Value {
@@ -181,8 +189,6 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
     }
 
     fn const_to_opt_u128(&self, v: Self::Value, sign_ext: bool) -> Option<u128> {
-        //println!("TODO: const_to_opt_u128\n\n");
-        //println!("Value: {:?} sign_ext: {}", v, sign_ext);
         None // Not supported
     }
 
@@ -213,13 +219,11 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
 
             let chunk_to_llval = move |chunk| match chunk {
                 InitChunk::Init(range) => {
-                    println!("[Kernel Const] Init chunk: {:?}", range);
                     let range = (range.start.bytes() as usize)..(range.end.bytes() as usize);
                     let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(range);
                     cx.const_bytes(bytes)
                 }
                 InitChunk::Uninit(range) => {
-                    println!("[Kernel Const] Uninit chunk: {:?}", range);
                     let len = range.end.bytes() - range.start.bytes();
                     cx.const_undef(cx.type_array(cx.type_i8(), len))
                 }
@@ -232,7 +236,6 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
             let max = cx.sess().opts.unstable_opts.uninit_const_chunk_threshold;
             let allow_uninit_chunks = chunks.clone().take(max.saturating_add(1)).count() <= max;
 
-            println!("[Kernel Const] llvals before: {:?}", llvals);
             if allow_uninit_chunks {
                 llvals.extend(chunks.map(chunk_to_llval));
             } else {
@@ -295,8 +298,6 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
             // inspect the result after interpreter execution).
             append_chunks_of_init_and_uninit_bytes(&mut llvals, self, alloc, range);
         }
-
-        println!("[Kernel Const] llvals after: {:?}", llvals);
 
         self.const_struct(&llvals, true)
     }
@@ -361,11 +362,11 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
 
     fn const_bitcast(&self, val: Val<'m>, ty: TyNVVM<'m>) -> Val<'m> {
         // create a bitcast instruction
-        let expr = ConstExpr::BitCast { val, ty };
-        let value = ValueNVVM::ConstExpr(expr);
-        let val = self.get_module_mut().create_val(value, Some(ty));
+        // let expr = ConstExpr::BitCast { val, ty };
+        // let value = ValueNVVM::ConstExpr(expr);
+        // let val = self.get_module_mut().create_val(value, Some(ty));
+        let val = self.inner_bitcast(val, ty);
 
-        println!("const_bitcast: val: {:?}, ty: {:?}", val, ty);
         self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
     }
 
@@ -400,18 +401,17 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
             val
         } else {
             // otherwise bitcast it to an i8*
-            self.const_bitcast(val, i8ptr_ty)
+            self.inner_bitcast(val, i8ptr_ty)
         };
         // create a GEP instruction to add the offset
         let gep = ConstExpr::GEP {
-            ty: i8ptr_ty,
+            ty: self.type_i8(),
             val: gepval,
             indices: vec![Const::U64(offset.bytes() as u64)],
         };
         let value = ValueNVVM::ConstExpr(gep);
         let val = module.create_val(value, Some(i8ptr_ty));
 
-        println!("const_ptr_byte_offset: val: {:?}, offset: {:?}", val, offset);
         self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
     }
 }
@@ -428,5 +428,12 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         let val = ValueNVVM::Constant(Const::Arr(consts));
         let ty = self.type_array(self.type_i8(), bytes.len() as u64);
         self.get_module_mut().create_val(val, Some(ty))
+    }
+
+    pub fn inner_bitcast(&self, val: Val<'m>, ty: TyNVVM<'m>) -> Val<'m> {
+        // create a bitcast instruction
+        let expr = ConstExpr::BitCast { val, ty };
+        let value = ValueNVVM::ConstExpr(expr);
+        self.get_module_mut().create_val(value, Some(ty))
     }
 }

@@ -100,6 +100,7 @@ fn assemble_const_val<'m>(val: &Val<'m>, module: &mut module::ModuleNVVM<'m>) ->
             //let ty = *module.valtypes.get(val).expect("GlobalNVVM must have a type");
             format!("@{}", name)
         }
+        ValueNVVM::ConstExpr(expr) => expr.assemble(module),
         _ => panic!("Expected a constant value, found: {:?}", val.0),
     }
 }

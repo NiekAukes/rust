@@ -79,6 +79,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
                     // let ty1 = self.backend_type(arg.layout.field(self, 0));
                     // let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty: ty1};
                     // module.create_val(value1, Some(ty1))
+                    
                     let (val1, val2) = match arg.layout.abi {
                         Abi::ScalarPair(s1, s2) => {
                             let (ty1, ty2) = match find_scalarpair_types(self, arg.layout) {
@@ -111,9 +112,10 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
                     // we need to pass a pointer to the value
                     // CHECK: is this correct?
                     let ty = self.backend_type(arg.layout);
+                    let ty_ptr = self.type_pointer(ty);
                     let value =
-                        ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty };
-                    let val = module.create_val(value, Some(ty));
+                        ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty: ty_ptr };
+                    let val = module.create_val(value, Some(ty_ptr));
                     args.push(val);
                     arg_count += 1;
                 }
@@ -158,6 +160,11 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         ));
 
         let mut f = FunctionNVVM::new(symbol_name.to_string(), is_kernel, ret, args, ty);
+
+        // println!(
+        //     "[Kernel] Predefining function: {} with args: {:?} and ret: {:?}",
+        //     symbol_name, f.args, f.ret
+        // );
 
         // we need to add the function to the module
         module.add_function(symbol_name.to_string(), f);

@@ -1049,6 +1049,7 @@ symbols! {
         kernel_exchange_malloc_fn,
         kernel_panic_fmt_impl,
         kernel_panic_impl,
+        kernel_panic_nounwind_impl,
         keyword,
         kind,
         kreg,

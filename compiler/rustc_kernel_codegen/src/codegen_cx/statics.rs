@@ -63,18 +63,18 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         next_id
     }
 
-    fn add_expr_as_global(&self, val: Val<'m>, kind: Option<&str>) -> Val<'m> {
-        let name = match kind {
-            Some(k) => format!("{}_{}", k, self.get_next_static_id()),
-            None => format!("static_{}", self.get_next_static_id()),
-        };
-        let global = ValueNVVM::Global(GlobalNVVM { val, name });
-        let module = self.get_module_mut();
+    // pub fn add_expr_as_global(&self, val: Val<'m>, kind: Option<&str>) -> Val<'m> {
+    //     let name = match kind {
+    //         Some(k) => format!("{}_{}", k, self.get_next_static_id()),
+    //         None => format!("static_{}", self.get_next_static_id()),
+    //     };
+    //     let global = ValueNVVM::Global(GlobalNVVM { val, name });
+    //     let module = self.get_module_mut();
 
-        let ty = *module.valtypes.get(&val).expect("add_as_global must have a type");
-        let global_val = module.create_val(global, Some(ty));
-        self.globals.borrow_mut().insert(val, global_val);
-        module.add_global(global_val);
-        val
-    }
+    //     let ty = *module.valtypes.get(&val).expect("add_as_global must have a type");
+    //     let global_val = module.create_val(global, Some(self.type_pointer(ty)));
+    //     self.globals.borrow_mut().insert(val, global_val);
+    //     module.add_global(global_val);
+    //     global_val
+    // }
 }

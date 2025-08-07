@@ -19,6 +19,7 @@ impl KernelLangItemSwap {
         let items_to_swap_config: &[(LangItemVariant, fn(&LanguageItems) -> Option<DefId>)] = &[
             (LangItemVariant::PanicImpl, |li: &LanguageItems| li.kernel_panic_impl()),
             (LangItemVariant::PanicFmt,  |li: &LanguageItems| li.kernel_panic_fmt_impl()),
+            (LangItemVariant::PanicNounwind, |li: &LanguageItems| li.kernel_panic_nounwind_impl()),
             (LangItemVariant::ExchangeMalloc, |li: &LanguageItems| li.kernel_exchange_malloc_fn()),
         ];
 
