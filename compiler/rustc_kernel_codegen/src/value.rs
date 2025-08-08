@@ -7,6 +7,7 @@ use crate::{
     module::{Assemble, ModuleNVVM},
     ty::{self, TyNVVM, TypeNVVM},
 };
+use rustc_ast::token::BinOpToken::Plus;
 use rustc_data_structures::intern::Interned;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 
@@ -371,9 +372,33 @@ pub enum Instruction<'m> {
         to: TyNVVM<'m>,
     },
 
+    // Inline Asm
+    ShuffleVector {
+        vec1: Val<'m>,
+        vec2: Val<'m>,
+        mask: Val<'m>,
+    },
+    InsertElement {
+        vec: Val<'m>,
+        elt: Val<'m>,
+        idx: Val<'m>,
+    },
+    InlineAsm {
+        template: String,
+        constraints: Vec<String>,
+        operands: Vec<InlineAsmNVVMOperand<'m>>,
+        output: Option<TyNVVM<'m>>,
+    },
+
     // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
     LifetimeStart(Val<'m>, usize),
     LifetimeEnd(Val<'m>, usize),
+}
+
+#[derive(Debug, Clone)]
+pub enum InlineAsmNVVMOperand<'m> {
+    In(Val<'m>),
+    Out(TyNVVM<'m>),
 }
 
 #[derive(Debug, Clone)]
@@ -488,7 +513,10 @@ impl<'m> AssembleVal<'m> for Val<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String {
         match self.0 {
             ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => {
-                func.label_of_val(*self).expect("Value should have a label")
+                match func.label_of_val(*self) {
+                    Some(label) => label,
+                    None => panic!("Value should have a label: {:#?}", self)
+                }
             }
 
             _ => self.0.assemble(module, func, self),
@@ -727,6 +755,9 @@ impl<'m> Instruction<'m> {
             | Instruction::InsertValue { .. }
             | Instruction::Phi { .. }
             | Instruction::Select { .. }
+            | Instruction::ShuffleVector { .. }
+            | Instruction::InsertElement { .. }
+            | Instruction::InlineAsm { .. }
             | Instruction::InBoundsGep { .. } => true,
 
             Instruction::Retvoid
@@ -1305,6 +1336,57 @@ impl<'m> Instruction<'m> {
                 let to_label = to.assemble(module);
                 format!("fpext {} {} to {}", ty_label, val_label, to_label)
             }
+
+            // Inline assembly
+            Instruction::InlineAsm { template, constraints, operands, output } => {
+                let mut ops = vec![];
+                for (i, operand) in operands.iter().enumerate() {
+                    match operand {
+                        InlineAsmNVVMOperand::In(val) => {
+                            let ty = *module.valtypes.get(val).unwrap();
+                            let ty_label = ty.assemble(module);
+                            ops.push(format!("{} {}", ty_label, val.assemble(module, func)));
+                        }
+                        InlineAsmNVVMOperand::Out(val) => {}
+                    };
+                }
+                let constraints_str = constraints.join(", ");
+                let opstring = ops.join(", ");
+                if let Some(ty) = output {
+                    format!("call {} asm \"{}\", \"{}\"({})", ty.assemble(module), template, constraints_str, opstring)
+                } else {
+                    format!("call asm (\"{}\", \"{}\", {})", template, constraints_str, opstring)
+                }
+            }
+
+            Instruction::ShuffleVector { vec1, vec2, mask } => {
+                let ty = *module.valtypes.get(vec1).unwrap();
+                let ty_label = ty.assemble(module);
+                format!(
+                    "shufflevector {} {}, {}, {}",
+                    ty_label,
+                    vec1.assemble(module, func),
+                    vec2.assemble(module, func),
+                    mask.assemble(module, func)
+                )
+            }
+
+            Instruction::InsertElement { vec, elt, idx } => {
+                let ty = *module.valtypes.get(vec).unwrap();
+                let ty_label = ty.assemble(module);
+                format!(
+                    "insertelement {} {}, {}, {}",
+                    ty_label,
+                    vec.assemble(module, func),
+                    elt.assemble(module, func),
+                    idx.assemble(module, func)
+                )
+            }
+
+
+
+
+
 
             // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
             Instruction::LifetimeStart(_, _) => {

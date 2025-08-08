@@ -1426,4 +1426,30 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
             }
         }
     }
+
+    pub fn shuffle_vector(
+        &mut self,
+        vec1: Val<'m>,
+        vec2: Val<'m>,
+        mask: Val<'m>,
+    ) -> Val<'m> {
+        //unsafe { llvm::LLVMBuildShuffleVector(self.llbuilder, v1, v2, mask, UNNAMED) }
+        let instr = Instruction::ShuffleVector { vec1, vec2, mask };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), None);
+        self.basic_block.add_instr(v);
+        v
+    }
+
+    pub fn insert_element(
+        &mut self,
+        vec: Val<'m>,
+        elt: Val<'m>,
+        idx: Val<'m>,
+    ) -> Val<'m> {
+        //unsafe { llvm::LLVMBuildInsertElement(self.llbuilder, vec, elt, idx, UNNAMED) }
+        let instr = Instruction::InsertElement { vec, elt, idx };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), None);
+        self.basic_block.add_instr(v);
+        v
+    }
 }

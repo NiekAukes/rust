@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use rustc_codegen_ssa::traits::{BaseTypeMethods, ConstMethods, MiscMethods, StaticMethods};
+use rustc_hir::def_id::DefId;
 use rustc_middle::{
     bug,
     mir::interpret::{
@@ -423,6 +424,30 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         self.get_module_mut().create_val(value, Some(ty))
     }
 
+    pub fn const_i32(&self, i: i32) -> Val<'m> {
+        let value = ValueNVVM::Constant(Const::I32(i));
+        let ty = self.type_i32();
+        self.get_module_mut().create_val(value, Some(ty))
+    }
+
+    pub fn const_array(
+        &self,
+        elts: &[Val<'m>],
+    ) -> Val<'m> {
+        // create an array from the elements
+        // unwrap the constants first
+        let consts = elts
+            .iter()
+            .map(|v| match v.0 {
+                ValueNVVM::Constant(c) => c.clone(),
+                _ => bug!("const_array called with non-constant value: {:?}", v),
+            })
+            .collect::<Vec<_>>();
+        let arr_const = Const::Arr(consts);
+        let ty = arr_const.get_ty(self.get_module_mut());
+        self.get_module_mut().create_val(ValueNVVM::Constant(arr_const), Some(ty))
+    }
+
     pub fn const_bytes(&self, bytes: &[u8]) -> Val<'m> {
         let consts = bytes.iter().map(|x| Const::U8(*x)).collect();
         let val = ValueNVVM::Constant(Const::Arr(consts));
@@ -435,5 +460,29 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         let expr = ConstExpr::BitCast { val, ty };
         let value = ValueNVVM::ConstExpr(expr);
         self.get_module_mut().create_val(value, Some(ty))
+    }
+
+
+    pub(crate) fn get_static(&self, def_id: DefId) -> Val<'m> {
+        // let instance = Instance::mono(self.tcx, def_id);
+        // trace!(?instance);
+
+        // let Changed = 1;
+        // let nested = match self.tcx.def_kind(def_id) {
+        //     DefKind::Static {nested, ..} => nested,
+        //     _ if self.tcx.is_kernel(def_id) => false,
+        //     _ => bug!("get_static: expected a static, but got {:?}", def_id),
+        // };
+        // // Nested statics do not have a type, so pick a dummy type and let `codegen_static` figure out
+        // // the llvm type from the actual evaluated initializer.
+        // let llty = if nested {
+        //     self.type_i8()
+        // } else {
+        //     let ty = instance.ty(self.tcx, ty::ParamEnv::reveal_all());
+        //     trace!(?ty);
+        //     self.layout_of(ty).llvm_type(self)
+        // };
+        // self.get_static_inner(def_id, llty)
+        todo!()
     }
 }
