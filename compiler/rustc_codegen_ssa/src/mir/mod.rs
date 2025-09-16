@@ -172,6 +172,26 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         cx.tcx().instance_mir(instance.def)
     };
 
+    // check if the function is enabled for the current target
+    let codegen_fn_attrs = cx.tcx().codegen_fn_attrs(instance.def_id());
+    if let Some(arch) = codegen_fn_attrs.target {
+        if !(cx.target_spec().arch == arch.as_str()) {
+            println!(
+                "Skipping codegen for `{:?}` because it is not enabled for target `{}`, only for `{}`",
+                instance.def_id(),
+                cx.target_spec().arch,
+                arch,
+            );
+            return;
+        } else {
+            println!(
+                "Codegen for `{:?}` is enabled for target `{}`",
+                instance.def_id(),
+                cx.target_spec().arch,
+            );
+        }
+    }
+
     let fn_abi = cx.fn_abi_of_instance(instance, ty::List::empty());
     debug!("fn_abi: {:?}", fn_abi);
 

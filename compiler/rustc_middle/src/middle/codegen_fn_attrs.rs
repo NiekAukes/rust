@@ -45,6 +45,9 @@ pub struct CodegenFnAttrs {
     /// The `#[repr(align(...))]` attribute. Indicates the value of which the function should be
     /// aligned to.
     pub alignment: Option<Align>,
+    /// The `#[target = "..."]` attribute. Indicates if the function is
+    /// enabled for a specific target architecture.
+    pub target: Option<Symbol>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, TyEncodable, TyDecodable, HashStable)]
@@ -127,6 +130,7 @@ impl CodegenFnAttrs {
             no_sanitize: SanitizerSet::empty(),
             instruction_set: None,
             alignment: None,
+            target: None,
         }
     }
 

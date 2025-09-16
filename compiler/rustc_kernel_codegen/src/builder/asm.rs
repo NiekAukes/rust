@@ -1,15 +1,36 @@
 use core::panic;
 
 use rustc_ast::{InlineAsmOperand, InlineAsmOptions, InlineAsmTemplatePiece};
-use rustc_codegen_ssa::{mir::operand::OperandValue, traits::{AsmBuilderMethods, BackendTypes, BaseTypeMethods, BuilderMethods, ConstMethods, InlineAsmOperandRef, MiscMethods}};
+use rustc_codegen_ssa::{
+    mir::operand::OperandValue,
+    traits::{
+        AsmBuilderMethods, BackendTypes, BaseTypeMethods, BuilderMethods, ConstMethods,
+        InlineAsmOperandRef, MiscMethods,
+    },
+};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::layout::{HasTyCtxt, TyAndLayout};
-use rustc_target::{abi::{Abi, Integer, Primitive, Scalar}, asm::{AArch64InlineAsmReg, AArch64InlineAsmRegClass, ArmInlineAsmReg, ArmInlineAsmRegClass, AvrInlineAsmRegClass, BpfInlineAsmRegClass, CSKYInlineAsmRegClass, HexagonInlineAsmRegClass, InlineAsmArch, InlineAsmReg, InlineAsmRegClass, InlineAsmRegOrRegClass, LoongArchInlineAsmRegClass, M68kInlineAsmRegClass, MipsInlineAsmRegClass, Msp430InlineAsmRegClass, NvptxInlineAsmRegClass, PowerPCInlineAsmRegClass, RiscVInlineAsmRegClass, S390xInlineAsmRegClass, SpirVInlineAsmRegClass, WasmInlineAsmRegClass, X86InlineAsmReg, X86InlineAsmRegClass}};
+use rustc_target::{
+    abi::{Abi, Integer, Primitive, Scalar},
+    asm::{
+        AArch64InlineAsmReg, AArch64InlineAsmRegClass, ArmInlineAsmReg, ArmInlineAsmRegClass,
+        AvrInlineAsmRegClass, BpfInlineAsmRegClass, CSKYInlineAsmRegClass,
+        HexagonInlineAsmRegClass, InlineAsmArch, InlineAsmReg, InlineAsmRegClass,
+        InlineAsmRegOrRegClass, LoongArchInlineAsmRegClass, M68kInlineAsmRegClass,
+        MipsInlineAsmRegClass, Msp430InlineAsmRegClass, NvptxInlineAsmRegClass,
+        PowerPCInlineAsmRegClass, RiscVInlineAsmRegClass, S390xInlineAsmRegClass,
+        SpirVInlineAsmRegClass, WasmInlineAsmRegClass, X86InlineAsmReg, X86InlineAsmRegClass,
+    },
+};
 
-use crate::{basic_block::BasicBlock, codegen_cx::CodegenCx, ty::TyNVVM, value::{InlineAsmNVVMOperand, Instruction, Val, ValueNVVM}};
+use crate::{
+    basic_block::BasicBlock,
+    codegen_cx::CodegenCx,
+    ty::TyNVVM,
+    value::{InlineAsmNVVMOperand, Instruction, Val, ValueNVVM},
+};
 
 use super::Builder;
-
 
 impl<'tcx> AsmBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     fn codegen_inline_asm(
@@ -114,7 +135,6 @@ impl<'tcx> AsmBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
             }
         }
 
-
         // Collect input operands
         let mut inputs = vec![];
         for (idx, op) in operands.iter().enumerate() {
@@ -160,7 +180,7 @@ impl<'tcx> AsmBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
         }
 
         constraints.append(&mut clobbers);
-        
+
         let volatile = !options.contains(InlineAsmOptions::PURE);
         let alignstack = !options.contains(InlineAsmOptions::NOSTACK);
         let output_type = match &output_types[..] {
@@ -171,14 +191,8 @@ impl<'tcx> AsmBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
 
         // END OF COPY
 
-
-
-        let (template_string, labels) = build_template_string(template,
-            operands,
-            &op_idx,
-            asm_arch,
-            &mut constraints,
-        );
+        let (template_string, labels) =
+            build_template_string(template, operands, &op_idx, asm_arch, &mut constraints);
         println!("template string: {}\n\n", template_string);
 
         if labels.len() > 0 {
@@ -214,7 +228,7 @@ impl<'tcx> AsmBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
 
         // END COPY
 
-        // panic!("template: {:?}\n\noperands: {}\n\noptions: {:?}\n\nline_spans: {:?}\n\ninstance: {:?}\n\ndest: {:?}\n\ncatch_funclet: {:?}\n\n", 
+        // panic!("template: {:?}\n\noperands: {}\n\noptions: {:?}\n\nline_spans: {:?}\n\ninstance: {:?}\n\ndest: {:?}\n\ncatch_funclet: {:?}\n\n",
         // template, operands_str, options, line_spans, instance, dest, catch_funclet);
     }
 }
@@ -255,8 +269,7 @@ fn build_template_string<'m, 'tcx>(
                         // Const operands get injected directly into the template
                         template_str.push_str(string);
                     }
-                    InlineAsmOperandRef::SymFn { .. }
-                    | InlineAsmOperandRef::SymStatic { .. } => {
+                    InlineAsmOperandRef::SymFn { .. } | InlineAsmOperandRef::SymStatic { .. } => {
                         // Only emit the raw symbol name
                         template_str.push_str(&format!("${}", op_idx[&operand_idx]));
                     }
@@ -292,10 +305,9 @@ fn build_template_string<'m, 'tcx>(
     // template_string
 }
 
-
-
 impl<'m, 'tcx> Builder<'_, 'm, 'tcx> {
-    pub(crate) fn inline_asm_call(&mut self,
+    pub(crate) fn inline_asm_call(
+        &mut self,
         template: String,
         constraints: Vec<String>,
         operands: &[InlineAsmOperandRef<'tcx, Self>],
@@ -316,29 +328,22 @@ impl<'m, 'tcx> Builder<'_, 'm, 'tcx> {
             }
         }
 
-        let instr = Instruction::InlineAsm {
-            template,
-            constraints,
-            operands: nvvm_operands,
-            output,
-        };
+        let instr =
+            Instruction::InlineAsm { template, constraints, operands: nvvm_operands, output };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), output);
         self.basic_block.add_instr(v);
         Some(v)
     }
 
-    fn operand_to_nvvm(&self, operand: &InlineAsmOperandRef<'tcx, Builder<'_, 'm, 'tcx>>) -> InlineAsmNVVMOperand<'m> {
+    fn operand_to_nvvm(
+        &self,
+        operand: &InlineAsmOperandRef<'tcx, Builder<'_, 'm, 'tcx>>,
+    ) -> InlineAsmNVVMOperand<'m> {
         match *operand {
-            InlineAsmOperandRef::In { reg, value } => {
-                InlineAsmNVVMOperand::In(value.immediate())
-            }
+            InlineAsmOperandRef::In { reg, value } => InlineAsmNVVMOperand::In(value.immediate()),
             InlineAsmOperandRef::Out { reg, late, place } => {
-                if late {
-                    todo!()
-                } else {
-                    let ty = self.cx().lower_layout(place.unwrap().layout);
-                    InlineAsmNVVMOperand::Out(ty)
-                }
+                let ty = self.cx().lower_layout(place.unwrap().layout);
+                InlineAsmNVVMOperand::Out(ty)
             }
             _ => {
                 todo!() // Handle other operand types as needed
@@ -347,10 +352,7 @@ impl<'m, 'tcx> Builder<'_, 'm, 'tcx> {
     }
 }
 
-
-
 // COPIED AND MODIFIED FROM rustc_codegen_llvm/asm.rs
-
 
 /// If the register is an xmm/ymm/zmm register then return its index.
 fn xmm_reg_index(reg: InlineAsmReg) -> Option<u32> {
@@ -430,12 +432,10 @@ fn a64_vreg_index(reg: InlineAsmReg) -> Option<u32> {
 
 fn is_float(layout: &TyAndLayout<'_>) -> bool {
     match layout.abi {
-        Abi::Scalar(Scalar::Initialized { value, .. } | Scalar::Union { value } ) => {
-            match value {
-                Primitive::F32 | Primitive::F64 => true,
-                _ => false,
-            }
-        }
+        Abi::Scalar(Scalar::Initialized { value, .. } | Scalar::Union { value }) => match value {
+            Primitive::F32 | Primitive::F64 => true,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -460,9 +460,7 @@ fn normal_register(layout: &TyAndLayout<'_>) -> &'static str {
 
 /// Converts a register class to an LLVM constraint code.
 fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'_>>) -> String {
-    let is_float = layout
-        .map(|l| is_float(l))
-        .unwrap_or(false);
+    let is_float = layout.map(|l| is_float(l)).unwrap_or(false);
 
     match reg {
         // For vector registers LLVM wants the register name to match the type size.
@@ -517,7 +515,7 @@ fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'_>>) ->
                 format!("{{{}}}", reg.name())
             }
         }
-        
+
         /*
         NVVM-IR constraints:
         c   i8
@@ -531,14 +529,14 @@ fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'_>>) ->
             match reg {
                 InlineAsmRegClass::X86(X86InlineAsmRegClass::reg) => {
                     // depending on the layout, we use different constraints
-                    normal_register(layout.expect("Expected layout for normal register")).to_string()
+                    normal_register(layout.expect("Expected layout for normal register"))
+                        .to_string()
                 }
                 _ => panic!("Unsupported register class: {:?}", reg),
             }
         }
     }
 }
-
 
 /// Helper function to get the LLVM type for a Scalar. Pointers are returned as
 /// the equivalent integer type.
@@ -556,7 +554,6 @@ fn llvm_asm_scalar_type<'m>(cx: &CodegenCx<'m, '_>, scalar: Scalar) -> TyNVVM<'m
         _ => unreachable!(),
     }
 }
-
 
 /// Fix up an input value to work around LLVM bugs.
 fn llvm_fixup_input<'m, 'tcx>(
@@ -603,7 +600,9 @@ fn llvm_fixup_input<'m, 'tcx>(
         (
             InlineAsmRegClass::X86(X86InlineAsmRegClass::xmm_reg | X86InlineAsmRegClass::zmm_reg),
             Abi::Vector { .. },
-        ) if layout.size.bytes() == 64 => bx.bitcast(value, bx.cx().type_array(bx.cx().type_f64(), 8)),
+        ) if layout.size.bytes() == 64 => {
+            bx.bitcast(value, bx.cx().type_array(bx.cx().type_f64(), 8))
+        }
         (
             InlineAsmRegClass::Arm(ArmInlineAsmRegClass::sreg | ArmInlineAsmRegClass::sreg_low16),
             Abi::Scalar(s),
@@ -794,8 +793,6 @@ fn llvm_fixup_output_type<'m, 'tcx>(
     }
 }
 
-
-
 /// Converts a modifier into LLVM's equivalent modifier.
 fn modifier_to_llvm(
     arch: InlineAsmArch,
@@ -973,6 +970,5 @@ fn dummy_output_type<'m>(cx: &CodegenCx<'m, '_>, reg: InlineAsmRegClass) -> TyNV
         InlineAsmRegClass::Err => unreachable!(),
     }
 }
-
 
 // END OF COPY

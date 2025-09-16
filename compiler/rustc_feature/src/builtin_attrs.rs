@@ -384,6 +384,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ungated!(link_section, Normal, template!(NameValueStr: "name"), FutureWarnPreceding, EncodeCrossCrate::No),
     ungated!(no_mangle, Normal, template!(Word), WarnFollowing, EncodeCrossCrate::No),
     ungated!(kernel, Normal, template!(Word), WarnFollowing, EncodeCrossCrate::Yes),
+    ungated!(target, Normal, template!(NameValueStr: "name"), WarnFollowing, EncodeCrossCrate::Yes),
     ungated!(used, Normal, template!(Word, List: "compiler|linker"), WarnFollowing, EncodeCrossCrate::No),
     ungated!(link_ordinal, Normal, template!(List: "ordinal"), ErrorPreceding, EncodeCrossCrate::Yes),
 

@@ -65,7 +65,7 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
 
     fn const_uint_big(&self, t: Self::Type, u: u128) -> Self::Value {
         match t.0 {
-            TypeNVVM::I(1) => self.const_u8(u as u8),   
+            TypeNVVM::I(1) => self.const_u8(u as u8),
             TypeNVVM::I(8) => self.const_u8(u as u8),
             TypeNVVM::I(16) => self.const_i16(u as i16),
             TypeNVVM::I(32) => self.const_u32(u as u32),
@@ -124,7 +124,14 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
     }
 
     fn const_real(&self, t: Self::Type, val: f64) -> Self::Value {
-        todo!()
+        let bytes = val.to_bits();
+        let value = match t.0 {
+            TypeNVVM::F32 => Const::F32(bytes as u32),
+            TypeNVVM::F64 => Const::F64(bytes),
+            _ => bug!("const_real called on unsupported type: {:?}", t),
+        };
+        let value = ValueNVVM::Constant(value);
+        self.get_module_mut().create_val(value, Some(t))
     }
 
     fn const_str(&self, s: &str) -> (Self::Value, Self::Value) {
@@ -312,12 +319,25 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
         let value = match cv {
             InterpScalar::Int(i) => {
                 let sz = i.size().bytes();
-                match sz {
-                    1 => self.const_i8(i.try_to_i8().unwrap()),
-                    2 => self.const_i16(i.try_to_i16().unwrap()),
-                    4 => self.const_i32(i.try_to_i32().unwrap()),
-                    8 => self.const_i64(i.try_to_i64().unwrap()),
-                    16 => self.const_i64(i.try_to_i128().unwrap() as i64),
+                match (sz, llty.0) {
+                    (1, TypeNVVM::I(1)) => self.const_bool(i.try_to_bool().unwrap()),
+                    (1, TypeNVVM::I(8)) => self.const_i8(i.try_to_i8().unwrap()),
+                    (2, TypeNVVM::I(16)) => self.const_i16(i.try_to_i16().unwrap()),
+                    (4, TypeNVVM::I(32)) => self.const_i32(i.try_to_i32().unwrap()),
+                    (8, TypeNVVM::I(64)) => self.const_i64(i.try_to_i64().unwrap()),
+                    (16, TypeNVVM::I(128)) => self.const_u128(i.try_to_u128().unwrap()),
+                    (4, TypeNVVM::F32) => {
+                        // convert to f32
+                        let b = i.try_to_u32().unwrap();
+                        let f = f32::from_bits(b);
+                        self.const_real(llty, f as f64)
+                    }
+                    (8, TypeNVVM::F64) => {
+                        // convert to f64
+                        let b = i.try_to_u64().unwrap();
+                        let f = f64::from_bits(b);
+                        self.const_real(llty, f)
+                    }
                     _ => todo!(),
                 }
             }
@@ -430,10 +450,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         self.get_module_mut().create_val(value, Some(ty))
     }
 
-    pub fn const_array(
-        &self,
-        elts: &[Val<'m>],
-    ) -> Val<'m> {
+    pub fn const_array(&self, elts: &[Val<'m>]) -> Val<'m> {
         // create an array from the elements
         // unwrap the constants first
         let consts = elts
@@ -461,7 +478,6 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         let value = ValueNVVM::ConstExpr(expr);
         self.get_module_mut().create_val(value, Some(ty))
     }
-
 
     pub(crate) fn get_static(&self, def_id: DefId) -> Val<'m> {
         // let instance = Instance::mono(self.tcx, def_id);

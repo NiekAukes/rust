@@ -413,8 +413,8 @@ pub enum Const<'m> {
     U32(u32),
     U64(u64),
     U128(u128),
-    F32(f32),
-    F64(f64),
+    F32(u32),
+    F64(u64),
     Bool(bool),
     Lit(String),
     Arr(Vec<Const<'m>>),
@@ -512,12 +512,10 @@ const PARAM_LABELS: [&str; 26] = [
 impl<'m> AssembleVal<'m> for Val<'m> {
     fn assemble(&self, module: &mut ModuleNVVM<'m>, func: &FunctionNVVM<'m>) -> String {
         match self.0 {
-            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => {
-                match func.label_of_val(*self) {
-                    Some(label) => label,
-                    None => panic!("Value should have a label: {:#?}", self)
-                }
-            }
+            ValueNVVM::Param { .. } | ValueNVVM::Instr(_) => match func.label_of_val(*self) {
+                Some(label) => label,
+                None => panic!("Value should have a label: {:#?}", self),
+            },
 
             _ => self.0.assemble(module, func, self),
         }
@@ -573,8 +571,8 @@ impl<'m> Const<'m> {
             Const::U32(i) => format!("{}", i),
             Const::U64(i) => format!("{}", i),
             Const::U128(i) => format!("{}", i),
-            Const::F32(f) => format!("{}", f),
-            Const::F64(f) => format!("{}", f),
+            Const::F32(f) => format!("0x{:x}", *f),
+            Const::F64(f) => format!("0x{:x}", *f),
             Const::Bool(b) => format!("{}", if *b { 1 } else { 0 }),
             Const::Lit(s) => format!("\"{}\"", s),
             Const::Undef(_, _) => format!("undef"),
@@ -757,7 +755,6 @@ impl<'m> Instruction<'m> {
             | Instruction::Select { .. }
             | Instruction::ShuffleVector { .. }
             | Instruction::InsertElement { .. }
-            | Instruction::InlineAsm { .. }
             | Instruction::InBoundsGep { .. } => true,
 
             Instruction::Retvoid
@@ -772,6 +769,13 @@ impl<'m> Instruction<'m> {
             | Instruction::LifetimeEnd(_, _)
             | Instruction::Store { .. } => false,
 
+            Instruction::InlineAsm { output, .. } => {
+                if let Some(ty) = output {
+                    !ty.is_zst()
+                } else {
+                    false
+                }
+            }
             Instruction::Call { ret_ty, .. } => !ret_ty.is_zst(),
         }
     }
@@ -1353,9 +1357,15 @@ impl<'m> Instruction<'m> {
                 let constraints_str = constraints.join(", ");
                 let opstring = ops.join(", ");
                 if let Some(ty) = output {
-                    format!("call {} asm \"{}\", \"{}\"({})", ty.assemble(module), template, constraints_str, opstring)
+                    format!(
+                        "call {} asm \"{}\", \"{}\"({})",
+                        ty.assemble(module),
+                        template,
+                        constraints_str,
+                        opstring
+                    )
                 } else {
-                    format!("call asm (\"{}\", \"{}\", {})", template, constraints_str, opstring)
+                    format!("call void asm \"{}\", \"{}\"({})", template, constraints_str, opstring)
                 }
             }
 
@@ -1382,11 +1392,6 @@ impl<'m> Instruction<'m> {
                     idx.assemble(module, func)
                 )
             }
-
-
-
-
-
 
             // TEMPORARY INSTRUCTIONS (TO BE OPTIMIZED OUT)
             Instruction::LifetimeStart(_, _) => {

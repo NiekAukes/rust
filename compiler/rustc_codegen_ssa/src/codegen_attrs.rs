@@ -274,6 +274,24 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                     codegen_fn_attrs.export_name = Some(s);
                 }
             }
+
+            sym::target => {
+                if let Some(s) = attr.value_str() {
+                    if s.as_str().contains('\0') {
+                        // `#[target = ...]` will be converted to a null-terminated string,
+                        // so it may not contain any null characters.
+                        struct_span_code_err!(
+                            tcx.dcx(),
+                            attr.span,
+                            E0648,
+                            "`target` may not contain null characters"
+                        )
+                        .emit();
+                    }
+                    codegen_fn_attrs.target = Some(s);
+                }
+            }
+
             sym::target_feature => {
                 if !tcx.is_closure_like(did.to_def_id())
                     && let Some(fn_sig) = fn_sig()
@@ -614,6 +632,21 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
 
     codegen_fn_attrs
 }
+
+// fn should_include_for_arch(tcx: TyCtxt<'_>, def_id: LocalDefId, arch: &str) -> bool {
+//     // check if the function is annotated with `#[target = "arch"]`
+//     // if the arch differs from the current target, then we don't include it
+//     if let Some(attr) = tcx.get_attr(def_id, sym::target) {
+//         if let Some(l) = attr.meta_item_list() {
+//             if let Some(target_arch) = l.first().and_then(|meta| meta.value_str()) {
+//                 if arch != target_arch.as_str() {
+//                     return false;
+//                 }
+//             }
+//         }
+//     }
+//     true
+// }
 
 /// Checks if the provided DefId is a method in a trait impl for a trait which has track_caller
 /// applied to the method prototype.
