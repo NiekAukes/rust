@@ -42,6 +42,8 @@ use std::sync::LazyLock;
 
 use pass_manager::{self as pm, Lint, MirLint, MirPass, WithMinOptLevel};
 
+use crate::kernel_lang_item_swap::KernelLangItemSwap;
+
 mod check_pointers;
 mod cost_checker;
 mod cross_crate_inline;
@@ -54,19 +56,6 @@ mod lint_tail_expr_drop_order;
 mod patch;
 mod shim;
 mod ssa;
-// This pass is public to allow external drivers to perform MIR cleanup
-mod check_alignment;
-mod kernel_lang_item_swap;
-mod remove_drop_glue;
-pub mod simplify;
-mod simplify_branches;
-mod simplify_comparison_integral;
-mod sroa;
-mod unreachable_enum_branching;
-mod unreachable_prop;
-
-use crate::kernel_lang_item_swap::KernelLangItemSwap;
-use crate::remove_drop_glue::RemoveDropGlue;
 
 /// We import passes via this macro so that we can have a static list of pass names
 /// (used to verify CLI arguments). It takes a list of modules, followed by the passes
@@ -209,6 +198,8 @@ declare_passes! {
     mod unreachable_enum_branching : UnreachableEnumBranching;
     mod unreachable_prop : UnreachablePropagation;
     mod validate : Validator;
+    mod kernel_lang_item_swap : KernelLangItemSwap;
+    // mod remove_drop_glue : RemoveDropGlue; --- IGNORE ---
 }
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
@@ -750,7 +741,7 @@ pub(crate) fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'
 }
 
 /// Optimize the MIR and prepare it for codegen.
-fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
+fn optimized_mir_inner(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
     // if tcx.is_kernel(did) {
     //     // do not do any optimizations
     //     // return the processed mir directly
@@ -763,7 +754,7 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
         // we can just output the MIR we want directly. This also saves const
         // qualification and borrow checking the trouble of special casing
         // constructors.
-        return tcx.arena.alloc(shim::build_adt_ctor(tcx, did.to_def_id()));
+        return shim::build_adt_ctor(tcx, did.to_def_id());
     }
 
     match tcx.hir_body_const_context(did) {
@@ -779,7 +770,7 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     let mut body = remap_mir_for_const_eval_select(tcx, body, hir::Constness::NotConst);
 
     if body.tainted_by_errors.is_some() {
-        return tcx.arena.alloc(body);
+        return body;
     }
 
     // Before doing anything, remember which items are being mentioned so that the set of items
@@ -793,12 +784,16 @@ fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     if let TerminatorKind::Unreachable = body.basic_blocks[START_BLOCK].terminator().kind
         && body.basic_blocks[START_BLOCK].statements.is_empty()
     {
-        return tcx.arena.alloc(body);
+        return body;
     }
 
     run_optimization_passes(tcx, &mut body);
 
-    tcx.arena.alloc(body)
+    body
+}
+
+fn optimized_mir<'tcx>(tcx: TyCtxt<'tcx>, did: LocalDefId) -> &'tcx Body<'tcx> {
+    tcx.arena.alloc(optimized_mir_inner(tcx, did))
 }
 
 /// Optimize the MIR and prepare it for codegen.
