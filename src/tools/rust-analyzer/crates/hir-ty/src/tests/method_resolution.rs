@@ -658,7 +658,7 @@ fn infer_call_trait_method_on_generic_param_1() {
         }
         "#,
         expect![[r#"
-            29..33 'self': &Self
+            29..33 'self': &'? Self
             63..64 't': T
             69..88 '{     ...d(); }': ()
             75..76 't': T
@@ -679,7 +679,7 @@ fn infer_call_trait_method_on_generic_param_2() {
         }
         "#,
         expect![[r#"
-            32..36 'self': &Self
+            32..36 'self': &'? Self
             70..71 't': T
             76..95 '{     ...d(); }': ()
             82..83 't': T
@@ -757,7 +757,7 @@ struct S;
 impl Clone for S {}
 impl Clone for &S {}
 fn test() { (S.clone(), (&S).clone(), (&&S).clone()); }
-          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ (S, S, &S)
+          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ (S, S, &'? S)
 "#,
     );
 }
@@ -1150,12 +1150,12 @@ fn dyn_trait_super_trait_not_in_scope() {
         }
         "#,
         expect![[r#"
-            51..55 'self': &Self
+            51..55 'self': &'? Self
             64..69 '{ 0 }': u32
             66..67 '0': u32
-            176..177 'd': &dyn Trait
+            176..177 'd': &'? (dyn Trait + 'static)
             191..207 '{     ...o(); }': ()
-            197..198 'd': &dyn Trait
+            197..198 'd': &'? (dyn Trait + 'static)
             197..204 'd.foo()': u32
         "#]],
     );
@@ -1182,15 +1182,15 @@ fn test() {
 }
 "#,
         expect![[r#"
-            75..79 'self': &S
+            75..79 'self': &'? S
             89..109 '{     ...     }': bool
             99..103 'true': bool
             123..167 '{     ...o(); }': ()
-            133..134 's': &S
-            137..151 'unsafe { f() }': &S
-            146..147 'f': fn f() -> &S
-            146..149 'f()': &S
-            157..158 's': &S
+            133..134 's': &'static S
+            137..151 'unsafe { f() }': &'static S
+            146..147 'f': fn f() -> &'static S
+            146..149 'f()': &'static S
+            157..158 's': &'static S
             157..164 's.foo()': bool
         "#]],
     );
@@ -1210,7 +1210,7 @@ impl<T> Slice<T> {
 fn main() {
     let foo: Slice<u32>;
     foo.into_vec(); // we shouldn't crash on this at least
-} //^^^^^^^^^^^^^^ {unknown}
+} //^^^^^^^^^^^^^^ ()
 "#,
     );
 }
@@ -1286,6 +1286,7 @@ fn main() {
 fn method_on_dyn_impl() {
     check_types(
         r#"
+//- minicore: coerce_unsized
 trait Foo {}
 
 impl Foo for u32 {}
@@ -1342,7 +1343,7 @@ fn foo<T: Trait>(a: &T) {
 fn autoderef_visibility_field() {
     check(
         r#"
-//- minicore: deref
+//- minicore: receiver
 mod a {
     pub struct Foo(pub char);
     pub struct Bar(i32);
@@ -1374,7 +1375,7 @@ fn autoderef_visibility_method() {
     cov_mark::check!(autoderef_candidate_not_visible);
     check(
         r#"
-//- minicore: deref
+//- minicore: receiver
 mod a {
     pub struct Foo(pub char);
     impl Foo {
@@ -1601,11 +1602,11 @@ use core::IntoIterator;
 fn f() {
     let v = [4].into_iter();
     v;
-  //^ &i32
+  //^ &'? i32
 
     let a = [0, 1].into_iter();
     a;
-  //^ &i32
+  //^ &'? i32
 }
 
 //- /main2021.rs crate:main2021 deps:core edition:2021
@@ -1618,11 +1619,60 @@ fn f() {
 
     let a = [0, 1].into_iter();
     a;
-  //^ &i32
+  //^ &'? i32
 }
 
 //- /core.rs crate:core
 #[rustc_skip_array_during_method_dispatch]
+pub trait IntoIterator {
+    type Out;
+    fn into_iter(self) -> Self::Out;
+}
+
+impl<T> IntoIterator for [T; 1] {
+    type Out = T;
+    fn into_iter(self) -> Self::Out { loop {} }
+}
+impl<'a, T> IntoIterator for &'a [T] {
+    type Out = &'a T;
+    fn into_iter(self) -> Self::Out { loop {} }
+}
+    "#,
+    );
+}
+
+#[test]
+fn skip_during_method_dispatch() {
+    check_types(
+        r#"
+//- /main2018.rs crate:main2018 deps:core edition:2018
+use core::IntoIterator;
+
+fn f() {
+    let v = [4].into_iter();
+    v;
+  //^ &'? i32
+
+    let a = [0, 1].into_iter();
+    a;
+  //^ &'? i32
+}
+
+//- /main2021.rs crate:main2021 deps:core edition:2021
+use core::IntoIterator;
+
+fn f() {
+    let v = [4].into_iter();
+    v;
+  //^ i32
+
+    let a = [0, 1].into_iter();
+    a;
+  //^ &'? i32
+}
+
+//- /core.rs crate:core
+#[rustc_skip_during_method_dispatch(array, boxed_slice)]
 pub trait IntoIterator {
     type Out;
     fn into_iter(self) -> Self::Out;
@@ -1691,7 +1741,7 @@ fn main() {
 fn deref_fun_1() {
     check_types(
         r#"
-//- minicore: deref
+//- minicore: receiver
 
 struct A<T, U>(T, U);
 struct B<T>(T);
@@ -1732,7 +1782,7 @@ fn test() {
 fn deref_fun_2() {
     check_types(
         r#"
-//- minicore: deref
+//- minicore: receiver
 
 struct A<T, U>(T, U);
 struct B<T>(T);
@@ -1767,7 +1817,7 @@ fn test() {
     let a2 = A(make(), 1i32);
     let _: &str = a2.thing();
     a2;
-  //^^ A<C<&str>, i32>
+  //^^ A<C<&'? str>, i32>
 }
 "#,
     );
@@ -1798,9 +1848,9 @@ impl Foo {
 }
 fn test() {
     Foo.foo();
-  //^^^ adjustments: Borrow(Ref(Not))
+  //^^^ adjustments: Borrow(Ref('?1, Not))
     (&Foo).foo();
-  // ^^^^ adjustments: Deref(None), Borrow(Ref(Not))
+  // ^^^^ adjustments: Deref(None), Borrow(Ref('?3, Not))
 }
 "#,
     );
@@ -1814,7 +1864,7 @@ fn receiver_adjustment_unsize_array() {
 fn test() {
     let a = [1, 2, 3];
     a.len();
-} //^ adjustments: Borrow(Ref(Not)), Pointer(Unsize)
+} //^ adjustments: Borrow(Ref('?7, Not)), Pointer(Unsize)
 "#,
     );
 }
@@ -1853,7 +1903,7 @@ pub fn test(generic_args: impl Into<Foo>) {
 fn bad_inferred_reference_2() {
     check_no_mismatches(
         r#"
-//- minicore: deref
+//- minicore: receiver
 trait ExactSizeIterator {
     fn len(&self) -> usize;
 }
@@ -1969,10 +2019,10 @@ impl dyn Error + Send {
     /// Attempts to downcast the box to a concrete type.
     pub fn downcast<T: Error + 'static>(self: Box<Self>) -> Result<Box<T>, Box<dyn Error + Send>> {
         let err: Box<dyn Error> = self;
-                               // ^^^^ expected Box<dyn Error>, got Box<dyn Error + Send>
+                               // ^^^^ expected Box<dyn Error + 'static>, got Box<dyn Error + Send + 'static>
                                // FIXME, type mismatch should not occur
         <dyn Error>::downcast(err).map_err(|_| loop {})
-      //^^^^^^^^^^^^^^^^^^^^^ type: fn downcast<{unknown}>(Box<dyn Error>) -> Result<Box<{unknown}>, Box<dyn Error>>
+      //^^^^^^^^^^^^^^^^^^^^^ type: fn downcast<{unknown}>(Box<dyn Error + 'static>) -> Result<Box<{unknown}>, Box<dyn Error + 'static>>
     }
 }
 "#,
@@ -2004,7 +2054,7 @@ fn foo() {
 fn box_deref_is_builtin() {
     check(
         r#"
-//- minicore: deref
+//- minicore: receiver
 use core::ops::Deref;
 
 #[lang = "owned_box"]
@@ -2027,7 +2077,7 @@ impl Foo {
 }
 fn test() {
     Box::new(Foo).foo();
-  //^^^^^^^^^^^^^ adjustments: Deref(None), Borrow(Ref(Not))
+  //^^^^^^^^^^^^^ adjustments: Deref(None), Borrow(Ref('?3, Not))
 }
 "#,
     );
@@ -2037,7 +2087,7 @@ fn test() {
 fn manually_drop_deref_is_not_builtin() {
     check(
         r#"
-//- minicore: manually_drop, deref
+//- minicore: manually_drop, receiver
 struct Foo;
 impl Foo {
     fn foo(&self) {}
@@ -2045,7 +2095,100 @@ impl Foo {
 use core::mem::ManuallyDrop;
 fn test() {
     ManuallyDrop::new(Foo).foo();
-  //^^^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(Some(OverloadedDeref(Some(Not)))), Borrow(Ref(Not))
+  //^^^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(Some(OverloadedDeref(Some(Not)))), Borrow(Ref('?4, Not))
+}
+"#,
+    );
+}
+
+#[test]
+fn mismatched_args_due_to_supertraits_with_deref() {
+    check_no_mismatches(
+        r#"
+//- minicore: receiver
+use core::ops::Deref;
+
+trait Trait1 {
+    type Assoc: Deref<Target = String>;
+}
+
+trait Trait2: Trait1 {
+}
+
+trait Trait3 {
+    type T1: Trait1;
+    type T2: Trait2;
+    fn bar(&self, x: bool, y: bool);
+}
+
+struct Foo;
+
+impl Foo {
+    fn bar(&mut self, _: &'static str) {}
+}
+
+impl Deref for Foo {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target { &0 }
+}
+
+fn problem_method<T: Trait3>() {
+    let mut foo = Foo;
+    foo.bar("hello"); // Rustc ok, RA errors (mismatched args)
+}
+"#,
+    );
+}
+
+#[test]
+fn receiver_without_deref_impl() {
+    check(
+        r#"
+//- minicore: receiver
+use core::ops::Receiver;
+
+struct Foo;
+
+impl Foo {
+    fn foo1(self: &Bar) -> i32 { 42 }
+    fn foo2(self: Bar) -> bool { true }
+}
+
+struct Bar;
+
+impl Receiver for Bar {
+    type Target = Foo;
+}
+
+fn main() {
+    let bar = Bar;
+    let _v1 = bar.foo1();
+      //^^^ type: {unknown}
+    let _v2 = bar.foo2();
+      //^^^ type: {unknown}
+}
+"#,
+    );
+}
+
+#[test]
+fn mut_to_const_pointer() {
+    check(
+        r#"
+pub trait X {
+    fn perform(self) -> u64;
+}
+
+impl X for *const u8 {
+    fn perform(self) -> u64 {
+        42
+    }
+}
+
+fn test(x: *mut u8) {
+    let _v = x.perform();
+     //      ^ adjustments: Pointer(MutToConstPointer)
+     //      ^^^^^^^^^^^ type: u64
 }
 "#,
     );

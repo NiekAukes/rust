@@ -1,24 +1,19 @@
+use std::fmt::Write;
+
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_hir as hir;
+use rustc_hir::HirId;
+use rustc_hir::def_id::LocalDefId;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
+use rustc_span::def_id::LocalDefIdMap;
+use rustc_span::{Ident, Span, Symbol};
+
+use super::TyCtxt;
 use crate::hir::place::{
     Place as HirPlace, PlaceBase as HirPlaceBase, ProjectionKind as HirProjectionKind,
 };
-use crate::{mir, ty};
-
-use std::fmt::Write;
-
 use crate::query::Providers;
-use rustc_data_structures::captures::Captures;
-use rustc_data_structures::fx::FxIndexMap;
-use rustc_hir as hir;
-use rustc_hir::def_id::LocalDefId;
-use rustc_hir::HirId;
-use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
-use rustc_span::def_id::LocalDefIdMap;
-use rustc_span::symbol::Ident;
-use rustc_span::{Span, Symbol};
-
-use super::TyCtxt;
-
-use self::BorrowKind::*;
+use crate::{mir, ty};
 
 /// Captures are represented using fields inside a structure.
 /// This represents accessing self in the closure structure
@@ -56,6 +51,9 @@ pub enum UpvarCapture {
     /// depending on inference.
     ByValue,
 
+    /// Upvar is captured by use. This is true when the closure is labeled `use`.
+    ByUse,
+
     /// Upvar is captured by reference.
     ByRef(BorrowKind),
 }
@@ -90,9 +88,6 @@ pub struct CapturedPlace<'tcx> {
 
     /// Represents if `place` can be mutated or not.
     pub mutability: hir::Mutability,
-
-    /// Region of the resulting reference if the upvar is captured by ref.
-    pub region: Option<ty::Region<'tcx>>,
 }
 
 impl<'tcx> CapturedPlace<'tcx> {
@@ -121,6 +116,10 @@ impl<'tcx> CapturedPlace<'tcx> {
                         bug!("Unexpected type {:?} for `Field` projection", ty)
                     }
                 },
+
+                HirProjectionKind::UnwrapUnsafeBinder => {
+                    write!(&mut symbol, "__unwrap").unwrap();
+                }
 
                 // Ignore derefs for now, as they are likely caused by
                 // autoderefs that don't appear in the original code.
@@ -155,9 +154,9 @@ impl<'tcx> CapturedPlace<'tcx> {
     /// Return span pointing to use that resulted in selecting the captured path
     pub fn get_path_span(&self, tcx: TyCtxt<'tcx>) -> Span {
         if let Some(path_expr_id) = self.info.path_expr_id {
-            tcx.hir().span(path_expr_id)
+            tcx.hir_span(path_expr_id)
         } else if let Some(capture_kind_expr_id) = self.info.capture_kind_expr_id {
-            tcx.hir().span(capture_kind_expr_id)
+            tcx.hir_span(capture_kind_expr_id)
         } else {
             // Fallback on upvars mentioned if neither path or capture expr id is captured
 
@@ -171,9 +170,9 @@ impl<'tcx> CapturedPlace<'tcx> {
     /// Return span pointing to use that resulted in selecting the current capture kind
     pub fn get_capture_kind_span(&self, tcx: TyCtxt<'tcx>) -> Span {
         if let Some(capture_kind_expr_id) = self.info.capture_kind_expr_id {
-            tcx.hir().span(capture_kind_expr_id)
+            tcx.hir_span(capture_kind_expr_id)
         } else if let Some(path_expr_id) = self.info.path_expr_id {
-            tcx.hir().span(path_expr_id)
+            tcx.hir_span(path_expr_id)
         } else {
             // Fallback on upvars mentioned if neither path or capture expr id is captured
 
@@ -186,7 +185,7 @@ impl<'tcx> CapturedPlace<'tcx> {
 
     pub fn is_by_ref(&self) -> bool {
         match self.info.capture_kind {
-            ty::UpvarCapture::ByValue => false,
+            ty::UpvarCapture::ByValue | ty::UpvarCapture::ByUse => false,
             ty::UpvarCapture::ByRef(..) => true,
         }
     }
@@ -222,7 +221,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn closure_captures(self, def_id: LocalDefId) -> &'tcx [&'tcx ty::CapturedPlace<'tcx>] {
         if !self.is_closure_like(def_id.to_def_id()) {
             return &[];
-        };
+        }
         self.closure_typeinfo(def_id).captures
     }
 }
@@ -237,7 +236,7 @@ impl<'tcx> TyCtxt<'tcx> {
 /// Eg: 1. `foo.x` which is represented using `projections=[Field(x)]` is an ancestor of
 ///        `foo.x.y` which is represented using `projections=[Field(x), Field(y)]`.
 ///        Note both `foo.x` and `foo.x.y` start off of the same root variable `foo`.
-///     2. Since we only look at the projections here function will return `bar.x` as an a valid
+///     2. Since we only look at the projections here function will return `bar.x` as a valid
 ///        ancestor of `foo.x.y`. It's the caller's responsibility to ensure that both projections
 ///        list are being applied to the same root variable.
 pub fn is_ancestor_or_same_capture(
@@ -301,7 +300,7 @@ pub struct CaptureInfo {
 
 pub fn place_to_string_for_capture<'tcx>(tcx: TyCtxt<'tcx>, place: &HirPlace<'tcx>) -> String {
     let mut curr_string: String = match place.base {
-        HirPlaceBase::Upvar(upvar_id) => tcx.hir().name(upvar_id.var_path.hir_id).to_string(),
+        HirPlaceBase::Upvar(upvar_id) => tcx.hir_name(upvar_id.var_path.hir_id).to_string(),
         _ => bug!("Capture_information should only contain upvars"),
     };
 
@@ -339,7 +338,7 @@ pub fn place_to_string_for_capture<'tcx>(tcx: TyCtxt<'tcx>, place: &HirPlace<'tc
 #[derive(TypeFoldable, TypeVisitable)]
 pub enum BorrowKind {
     /// Data must be immutable and is aliasable.
-    ImmBorrow,
+    Immutable,
 
     /// Data must be immutable but not aliasable. This kind of borrow
     /// cannot currently be expressed by the user and is used only in
@@ -387,17 +386,17 @@ pub enum BorrowKind {
     /// borrow, it's just used when translating closures.
     ///
     /// FIXME: Rename this to indicate the borrow is actually not immutable.
-    UniqueImmBorrow,
+    UniqueImmutable,
 
     /// Data is mutable and not aliasable.
-    MutBorrow,
+    Mutable,
 }
 
 impl BorrowKind {
     pub fn from_mutbl(m: hir::Mutability) -> BorrowKind {
         match m {
-            hir::Mutability::Mut => MutBorrow,
-            hir::Mutability::Not => ImmBorrow,
+            hir::Mutability::Mut => BorrowKind::Mutable,
+            hir::Mutability::Not => BorrowKind::Immutable,
         }
     }
 
@@ -407,13 +406,13 @@ impl BorrowKind {
     /// question.
     pub fn to_mutbl_lossy(self) -> hir::Mutability {
         match self {
-            MutBorrow => hir::Mutability::Mut,
-            ImmBorrow => hir::Mutability::Not,
+            BorrowKind::Mutable => hir::Mutability::Mut,
+            BorrowKind::Immutable => hir::Mutability::Not,
 
             // We have no type corresponding to a unique imm borrow, so
             // use `&mut`. It gives all the capabilities of a `&uniq`
             // and hence is a safe "over approximation".
-            UniqueImmBorrow => hir::Mutability::Mut,
+            BorrowKind::UniqueImmutable => hir::Mutability::Mut,
         }
     }
 }
@@ -422,54 +421,50 @@ pub fn analyze_coroutine_closure_captures<'a, 'tcx: 'a, T>(
     parent_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>,
     child_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>,
     mut for_each: impl FnMut((usize, &'a CapturedPlace<'tcx>), (usize, &'a CapturedPlace<'tcx>)) -> T,
-) -> impl Iterator<Item = T> + Captures<'a> + Captures<'tcx> {
-    std::iter::from_coroutine(
-        #[coroutine]
-        move || {
-            let mut child_captures = child_captures.into_iter().enumerate().peekable();
+) -> impl Iterator<Item = T> {
+    gen move {
+        let mut child_captures = child_captures.into_iter().enumerate().peekable();
 
-            // One parent capture may correspond to several child captures if we end up
-            // refining the set of captures via edition-2021 precise captures. We want to
-            // match up any number of child captures with one parent capture, so we keep
-            // peeking off this `Peekable` until the child doesn't match anymore.
-            for (parent_field_idx, parent_capture) in parent_captures.into_iter().enumerate() {
-                // Make sure we use every field at least once, b/c why are we capturing something
-                // if it's not used in the inner coroutine.
-                let mut field_used_at_least_once = false;
+        // One parent capture may correspond to several child captures if we end up
+        // refining the set of captures via edition-2021 precise captures. We want to
+        // match up any number of child captures with one parent capture, so we keep
+        // peeking off this `Peekable` until the child doesn't match anymore.
+        for (parent_field_idx, parent_capture) in parent_captures.into_iter().enumerate() {
+            // Make sure we use every field at least once, b/c why are we capturing something
+            // if it's not used in the inner coroutine.
+            let mut field_used_at_least_once = false;
 
-                // A parent matches a child if they share the same prefix of projections.
-                // The child may have more, if it is capturing sub-fields out of
-                // something that is captured by-move in the parent closure.
-                while child_captures.peek().map_or(false, |(_, child_capture)| {
-                    child_prefix_matches_parent_projections(parent_capture, child_capture)
-                }) {
-                    let (child_field_idx, child_capture) = child_captures.next().unwrap();
-                    // This analysis only makes sense if the parent capture is a
-                    // prefix of the child capture.
-                    assert!(
-                        child_capture.place.projections.len()
-                            >= parent_capture.place.projections.len(),
-                        "parent capture ({parent_capture:#?}) expected to be prefix of \
-                    child capture ({child_capture:#?})"
-                    );
-
-                    yield for_each(
-                        (parent_field_idx, parent_capture),
-                        (child_field_idx, child_capture),
-                    );
-
-                    field_used_at_least_once = true;
-                }
-
-                // Make sure the field was used at least once.
+            // A parent matches a child if they share the same prefix of projections.
+            // The child may have more, if it is capturing sub-fields out of
+            // something that is captured by-move in the parent closure.
+            while child_captures.peek().is_some_and(|(_, child_capture)| {
+                child_prefix_matches_parent_projections(parent_capture, child_capture)
+            }) {
+                let (child_field_idx, child_capture) = child_captures.next().unwrap();
+                // This analysis only makes sense if the parent capture is a
+                // prefix of the child capture.
                 assert!(
-                    field_used_at_least_once,
-                    "we captured {parent_capture:#?} but it was not used in the child coroutine?"
+                    child_capture.place.projections.len() >= parent_capture.place.projections.len(),
+                    "parent capture ({parent_capture:#?}) expected to be prefix of \
+                    child capture ({child_capture:#?})"
                 );
+
+                yield for_each(
+                    (parent_field_idx, parent_capture),
+                    (child_field_idx, child_capture),
+                );
+
+                field_used_at_least_once = true;
             }
-            assert_eq!(child_captures.next(), None, "leftover child captures?");
-        },
-    )
+
+            // Make sure the field was used at least once.
+            assert!(
+                field_used_at_least_once,
+                "we captured {parent_capture:#?} but it was not used in the child coroutine?"
+            );
+        }
+        assert_eq!(child_captures.next(), None, "leftover child captures?");
+    }
 }
 
 fn child_prefix_matches_parent_projections(

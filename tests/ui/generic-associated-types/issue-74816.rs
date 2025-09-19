@@ -1,3 +1,7 @@
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
+
 #![feature(associated_type_defaults)]
 
 trait Trait1 {
@@ -7,7 +11,7 @@ trait Trait1 {
 trait Trait2 {
     type Associated: Trait1 = Self;
     //~^ ERROR: the trait bound `Self: Trait1` is not satisfied
-    //~| the size for values of type `Self` cannot be known
+    //~| ERROR the size for values of type `Self` cannot be known
 }
 
 impl Trait2 for () {}

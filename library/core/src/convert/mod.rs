@@ -38,6 +38,7 @@
 use crate::error::Error;
 use crate::fmt;
 use crate::hash::{Hash, Hasher};
+use crate::marker::PointeeSized;
 
 mod num;
 
@@ -214,8 +215,8 @@ pub const fn identity<T>(x: T) -> T {
 /// is_hello(s);
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(test), rustc_diagnostic_item = "AsRef")]
-pub trait AsRef<T: ?Sized> {
+#[rustc_diagnostic_item = "AsRef"]
+pub trait AsRef<T: PointeeSized>: PointeeSized {
     /// Converts this type into a shared reference of the (usually inferred) input type.
     #[stable(feature = "rust1", since = "1.0.0")]
     fn as_ref(&self) -> &T;
@@ -365,8 +366,8 @@ pub trait AsRef<T: ?Sized> {
 /// Note, however, that APIs don't need to be generic. In many cases taking a `&mut [u8]` or
 /// `&mut Vec<u8>`, for example, is the better choice (callers need to pass the correct type then).
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(test), rustc_diagnostic_item = "AsMut")]
-pub trait AsMut<T: ?Sized> {
+#[rustc_diagnostic_item = "AsMut"]
+pub trait AsMut<T: PointeeSized>: PointeeSized {
     /// Converts this type into a mutable reference of the (usually inferred) input type.
     #[stable(feature = "rust1", since = "1.0.0")]
     fn as_mut(&mut self) -> &mut T;
@@ -443,6 +444,7 @@ pub trait AsMut<T: ?Sized> {
 /// [`Vec`]: ../../std/vec/struct.Vec.html
 #[rustc_diagnostic_item = "Into"]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[doc(search_unbox)]
 pub trait Into<T>: Sized {
     /// Converts this type into the (usually inferred) input type.
     #[must_use]
@@ -463,8 +465,8 @@ pub trait Into<T>: Sized {
 /// orphaning rules.
 /// See [`Into`] for more details.
 ///
-/// Prefer using [`Into`] over using `From` when specifying trait bounds on a generic function.
-/// This way, types that directly implement [`Into`] can be used as arguments as well.
+/// Prefer using [`Into`] over [`From`] when specifying trait bounds on a generic function
+/// to ensure that types that only implement [`Into`] can be used as well.
 ///
 /// The `From` trait is also very useful when performing error handling. When constructing a function
 /// that is capable of failing, the return type will generally be of the form `Result<T, E>`.
@@ -574,9 +576,10 @@ pub trait Into<T>: Sized {
 #[rustc_diagnostic_item = "From"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_on_unimplemented(on(
-    all(_Self = "&str", T = "alloc::string::String"),
+    all(Self = "&str", T = "alloc::string::String"),
     note = "to coerce a `{T}` into a `{Self}`, use `&*` as a prefix",
 ))]
+#[doc(search_unbox)]
 pub trait From<T>: Sized {
     /// Converts to this type from the input type.
     #[rustc_diagnostic_item = "from_fn"]
@@ -594,6 +597,9 @@ pub trait From<T>: Sized {
 /// implementation for free, thanks to a blanket implementation in the
 /// standard library. For more information on this, see the
 /// documentation for [`Into`].
+///
+/// Prefer using [`TryInto`] over [`TryFrom`] when specifying trait bounds on a generic function
+/// to ensure that types that only implement [`TryInto`] can be used as well.
 ///
 /// # Implementing `TryInto`
 ///
@@ -633,6 +639,9 @@ pub trait TryInto<T>: Sized {
 /// calling `T::try_from()` on a value of type `T` is [`Infallible`].
 /// When the [`!`] type is stabilized [`Infallible`] and [`!`] will be
 /// equivalent.
+///
+/// Prefer using [`TryInto`] over [`TryFrom`] when specifying trait bounds on a generic function
+/// to ensure that types that only implement [`TryInto`] can be used as well.
 ///
 /// `TryFrom<T>` can be implemented as follows:
 ///
@@ -693,7 +702,7 @@ pub trait TryFrom<T>: Sized {
 
 // As lifts over &
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: ?Sized, U: ?Sized> AsRef<U> for &T
+impl<T: PointeeSized, U: PointeeSized> AsRef<U> for &T
 where
     T: AsRef<U>,
 {
@@ -705,7 +714,7 @@ where
 
 // As lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: ?Sized, U: ?Sized> AsRef<U> for &mut T
+impl<T: PointeeSized, U: PointeeSized> AsRef<U> for &mut T
 where
     T: AsRef<U>,
 {
@@ -725,7 +734,7 @@ where
 
 // AsMut lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: ?Sized, U: ?Sized> AsMut<U> for &mut T
+impl<T: PointeeSized, U: PointeeSized> AsMut<U> for &mut T
 where
     T: AsMut<U>,
 {
@@ -776,7 +785,6 @@ impl<T> From<T> for T {
 ///
 /// [#64715]: https://github.com/rust-lang/rust/issues/64715
 #[stable(feature = "convert_infallible", since = "1.34.0")]
-#[allow(unused_attributes)] // FIXME(#58633): do a principled fix instead.
 #[rustc_reservation_impl = "permitting this impl would forbid us from adding \
                             `impl<T> From<!> for T` later; see rust-lang/rust#64715 for details"]
 impl<T> From<!> for T {

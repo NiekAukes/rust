@@ -1,12 +1,11 @@
-use super::*;
-
-use crate::DiagCtxt;
-use rustc_span::source_map::FilePathMapping;
-use rustc_span::BytePos;
-
 use std::str;
 
+use rustc_span::BytePos;
+use rustc_span::source_map::FilePathMapping;
 use serde::Deserialize;
+
+use super::*;
+use crate::DiagCtxt;
 
 #[derive(Deserialize, Debug, PartialEq, Eq)]
 struct TestData {
@@ -40,23 +39,23 @@ impl<T: Write> Write for Shared<T> {
 /// Test the span yields correct positions in JSON.
 fn test_positions(code: &str, span: (u32, u32), expected_output: SpanTestData) {
     rustc_span::create_default_session_globals_then(|| {
-        let sm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
+        let sm = Arc::new(SourceMap::new(FilePathMapping::empty()));
         sm.new_source_file(Path::new("test.rs").to_owned().into(), code.to_owned());
-        let fallback_bundle =
-            crate::fallback_fluent_bundle(vec![crate::DEFAULT_LOCALE_RESOURCE], false);
+        let translator =
+            Translator::with_fallback_bundle(vec![crate::DEFAULT_LOCALE_RESOURCE], false);
 
         let output = Arc::new(Mutex::new(Vec::new()));
         let je = JsonEmitter::new(
             Box::new(Shared { data: output.clone() }),
-            sm,
-            fallback_bundle,
+            Some(sm),
+            translator,
             true, // pretty
-            HumanReadableErrorType::Short(ColorConfig::Never),
+            HumanReadableErrorType::Short,
+            ColorConfig::Never,
         );
 
         let span = Span::with_root_ctxt(BytePos(span.0), BytePos(span.1));
-        let dcx = DiagCtxt::new(Box::new(je));
-        dcx.span_err(span, "foo");
+        DiagCtxt::new(Box::new(je)).handle().span_err(span, "foo");
 
         let bytes = output.lock().unwrap();
         let actual_output = str::from_utf8(&bytes).unwrap();

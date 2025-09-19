@@ -1,11 +1,72 @@
 //! Completion tests for attributes.
-use expect_test::{expect, Expect};
+use expect_test::expect;
 
-use crate::tests::{check_edit, completion_list};
+use crate::tests::{check, check_edit};
 
-fn check(ra_fixture: &str, expect: Expect) {
-    let actual = completion_list(ra_fixture);
-    expect.assert_eq(&actual);
+#[test]
+fn derive_helpers() {
+    check(
+        r#"
+//- /mac.rs crate:mac
+#![crate_type = "proc-macro"]
+
+#[proc_macro_derive(MyDerive, attributes(my_cool_helper_attribute))]
+pub fn my_derive() {}
+
+//- /lib.rs crate:lib deps:mac
+#[rustc_builtin_macro]
+pub macro derive($item:item) {}
+
+#[derive(mac::MyDerive)]
+pub struct Foo(#[m$0] i32);
+"#,
+        expect![[r#"
+            at allow(…)
+            at automatically_derived
+            at cfg(…)
+            at cfg_attr(…)
+            at cold
+            at deny(…)
+            at deprecated
+            at derive                                  macro derive
+            at derive(…)
+            at diagnostic::do_not_recommend
+            at diagnostic::on_unimplemented
+            at doc = "…"
+            at doc(alias = "…")
+            at doc(hidden)
+            at expect(…)
+            at export_name = "…"
+            at forbid(…)
+            at global_allocator
+            at ignore = "…"
+            at inline
+            at link
+            at link_name = "…"
+            at link_section = "…"
+            at macro_export
+            at macro_use
+            at must_use
+            at my_cool_helper_attribute derive helper of `MyDerive`
+            at no_mangle
+            at non_exhaustive
+            at panic_handler
+            at path = "…"
+            at proc_macro
+            at proc_macro_attribute
+            at proc_macro_derive(…)
+            at repr(…)
+            at should_panic
+            at target_feature(enable = "…")
+            at test
+            at track_caller
+            at used
+            at warn(…)
+            md mac
+            kw crate::
+            kw self::
+        "#]],
+    )
 }
 
 #[test]
@@ -26,6 +87,7 @@ struct Foo;
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -75,6 +137,7 @@ fn with_existing_attr() {
             at cfg(…)
             at cfg_attr(…)
             at deny(…)
+            at expect(…)
             at forbid(…)
             at warn(…)
             kw crate::
@@ -97,6 +160,7 @@ fn attr_on_source_file() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at feature(…)
             at forbid(…)
             at must_use
@@ -127,6 +191,7 @@ fn attr_on_module() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at macro_use
             at must_use
@@ -149,6 +214,7 @@ fn attr_on_module() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_implicit_prelude
@@ -174,6 +240,7 @@ fn attr_on_macro_rules() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at macro_export
             at macro_use
@@ -199,6 +266,7 @@ fn attr_on_macro_def() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -222,6 +290,7 @@ fn attr_on_extern_crate() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at macro_use
             at must_use
@@ -246,6 +315,7 @@ fn attr_on_use() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -269,6 +339,7 @@ fn attr_on_type_alias() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -293,12 +364,13 @@ struct Foo;
             at cfg_attr(…)
             at deny(…)
             at deprecated
-            at derive           macro derive
+            at derive             macro derive
             at derive(…)
-            at derive_const     macro derive_const
+            at derive_const macro derive_const
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -326,6 +398,7 @@ fn attr_on_enum() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -351,6 +424,7 @@ fn attr_on_const() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -374,6 +448,7 @@ fn attr_on_static() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at export_name = "…"
             at forbid(…)
             at global_allocator
@@ -399,11 +474,12 @@ fn attr_on_trait() {
             at cfg_attr(…)
             at deny(…)
             at deprecated
+            at diagnostic::on_unimplemented
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
-            at must_use
             at must_use
             at no_mangle
             at warn(…)
@@ -424,9 +500,11 @@ fn attr_on_impl() {
             at cfg_attr(…)
             at deny(…)
             at deprecated
+            at diagnostic::do_not_recommend
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
@@ -446,12 +524,83 @@ fn attr_on_impl() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at must_use
             at no_mangle
             at warn(…)
             kw crate::
             kw self::
+        "#]],
+    );
+}
+
+#[test]
+fn attr_with_qualifier() {
+    check(
+        r#"#[diagnostic::$0] impl () {}"#,
+        expect![[r#"
+            at allow(…)
+            at automatically_derived
+            at cfg(…)
+            at cfg_attr(…)
+            at deny(…)
+            at deprecated
+            at do_not_recommend
+            at doc = "…"
+            at doc(alias = "…")
+            at doc(hidden)
+            at expect(…)
+            at forbid(…)
+            at must_use
+            at no_mangle
+            at warn(…)
+        "#]],
+    );
+    check(
+        r#"#[diagnostic::$0] trait Foo {}"#,
+        expect![[r#"
+            at allow(…)
+            at cfg(…)
+            at cfg_attr(…)
+            at deny(…)
+            at deprecated
+            at doc = "…"
+            at doc(alias = "…")
+            at doc(hidden)
+            at expect(…)
+            at forbid(…)
+            at must_use
+            at no_mangle
+            at on_unimplemented
+            at warn(…)
+        "#]],
+    );
+}
+
+#[test]
+fn attr_diagnostic_on_unimplemented() {
+    check(
+        r#"#[diagnostic::on_unimplemented($0)] trait Foo {}"#,
+        expect![[r#"
+            ba label = "…"
+            ba message = "…"
+            ba note = "…"
+        "#]],
+    );
+    check(
+        r#"#[diagnostic::on_unimplemented(message = "foo", $0)] trait Foo {}"#,
+        expect![[r#"
+            ba label = "…"
+            ba note = "…"
+        "#]],
+    );
+    check(
+        r#"#[diagnostic::on_unimplemented(note = "foo", $0)] trait Foo {}"#,
+        expect![[r#"
+            ba label = "…"
+            ba message = "…"
+            ba note = "…"
         "#]],
     );
 }
@@ -469,6 +618,7 @@ fn attr_on_extern_block() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at link
             at must_use
@@ -489,6 +639,7 @@ fn attr_on_extern_block() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at forbid(…)
             at link
             at must_use
@@ -509,6 +660,7 @@ fn attr_on_variant() {
             at cfg(…)
             at cfg_attr(…)
             at deny(…)
+            at expect(…)
             at forbid(…)
             at non_exhaustive
             at warn(…)
@@ -532,13 +684,13 @@ fn attr_on_fn() {
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at export_name = "…"
             at forbid(…)
             at ignore = "…"
             at inline
             at link_name = "…"
             at link_section = "…"
-            at must_use
             at must_use
             at no_mangle
             at panic_handler
@@ -569,9 +721,12 @@ fn attr_in_source_file_end() {
             at deny(…)
             at deprecated
             at derive(…)
+            at diagnostic::do_not_recommend
+            at diagnostic::on_unimplemented
             at doc = "…"
             at doc(alias = "…")
             at doc(hidden)
+            at expect(…)
             at export_name = "…"
             at forbid(…)
             at global_allocator
@@ -627,6 +782,28 @@ struct Foo;
     );
 }
 
+#[test]
+fn issue_17479() {
+    check(
+        r#"
+//- proc_macros: issue_17479
+fn main() {
+    proc_macros::issue_17479!("te$0");
+}
+"#,
+        expect![""],
+    );
+    check(
+        r#"
+//- proc_macros: issue_17479
+fn main() {
+    proc_macros::issue_17479!("$0");
+}
+"#,
+        expect![""],
+    )
+}
+
 mod cfg {
     use super::*;
 
@@ -641,6 +818,7 @@ mod cfg {
                 ba dbg
                 ba opt_level
                 ba test
+                ba true
             "#]],
         );
         check(
@@ -652,6 +830,7 @@ mod cfg {
                 ba dbg
                 ba opt_level
                 ba test
+                ba true
             "#]],
         );
     }
@@ -678,14 +857,9 @@ mod cfg {
 mod derive {
     use super::*;
 
-    fn check_derive(ra_fixture: &str, expect: Expect) {
-        let actual = completion_list(ra_fixture);
-        expect.assert_eq(&actual);
-    }
-
     #[test]
     fn no_completion_for_incorrect_derive() {
-        check_derive(
+        check(
             r#"
 //- minicore: derive, copy, clone, ord, eq, default, fmt
 #[derive{$0)] struct Test;
@@ -696,16 +870,16 @@ mod derive {
 
     #[test]
     fn empty_derive() {
-        check_derive(
+        check(
             r#"
 //- minicore: derive, copy, clone, ord, eq, default, fmt
 #[derive($0)] struct Test;
 "#,
             expect![[r#"
-                de Clone                  macro Clone
+                de Clone              macro Clone
                 de Clone, Copy
-                de Default                macro Default
-                de PartialEq              macro PartialEq
+                de Default          macro Default
+                de PartialEq      macro PartialEq
                 de PartialEq, Eq
                 de PartialEq, Eq, PartialOrd, Ord
                 de PartialEq, PartialOrd
@@ -718,15 +892,15 @@ mod derive {
 
     #[test]
     fn derive_with_input_before() {
-        check_derive(
+        check(
             r#"
 //- minicore: derive, copy, clone, ord, eq, default, fmt
 #[derive(serde::Serialize, PartialEq, $0)] struct Test;
 "#,
             expect![[r#"
-                de Clone               macro Clone
+                de Clone     macro Clone
                 de Clone, Copy
-                de Default             macro Default
+                de Default macro Default
                 de Eq
                 de Eq, PartialOrd, Ord
                 de PartialOrd
@@ -739,15 +913,15 @@ mod derive {
 
     #[test]
     fn derive_with_input_after() {
-        check_derive(
+        check(
             r#"
 //- minicore: derive, copy, clone, ord, eq, default, fmt
 #[derive($0 serde::Serialize, PartialEq)] struct Test;
 "#,
             expect![[r#"
-                de Clone               macro Clone
+                de Clone     macro Clone
                 de Clone, Copy
-                de Default             macro Default
+                de Default macro Default
                 de Eq
                 de Eq, PartialOrd, Ord
                 de PartialOrd
@@ -760,15 +934,15 @@ mod derive {
 
     #[test]
     fn derive_with_existing_derives() {
-        check_derive(
+        check(
             r#"
 //- minicore: derive, copy, clone, ord, eq, default, fmt
 #[derive(PartialEq, Eq, Or$0)] struct Test;
 "#,
             expect![[r#"
-                de Clone           macro Clone
+                de Clone     macro Clone
                 de Clone, Copy
-                de Default         macro Default
+                de Default macro Default
                 de PartialOrd
                 de PartialOrd, Ord
                 md core
@@ -780,7 +954,7 @@ mod derive {
 
     #[test]
     fn derive_flyimport() {
-        check_derive(
+        check(
             r#"
 //- proc_macros: derive_identity
 //- minicore: derive
@@ -794,7 +968,7 @@ mod derive {
                 kw self::
             "#]],
         );
-        check_derive(
+        check(
             r#"
 //- proc_macros: derive_identity
 //- minicore: derive
@@ -830,7 +1004,7 @@ use proc_macros::DeriveIdentity;
 
     #[test]
     fn qualified() {
-        check_derive(
+        check(
             r#"
 //- proc_macros: derive_identity
 //- minicore: derive, copy, clone
@@ -840,7 +1014,7 @@ use proc_macros::DeriveIdentity;
                 de DeriveIdentity proc_macro DeriveIdentity
             "#]],
         );
-        check_derive(
+        check(
             r#"
 //- proc_macros: derive_identity
 //- minicore: derive, copy, clone
@@ -946,19 +1120,14 @@ mod lint {
 mod repr {
     use super::*;
 
-    fn check_repr(ra_fixture: &str, expect: Expect) {
-        let actual = completion_list(ra_fixture);
-        expect.assert_eq(&actual);
-    }
-
     #[test]
     fn no_completion_for_incorrect_repr() {
-        check_repr(r#"#[repr{$0)] struct Test;"#, expect![[]])
+        check(r#"#[repr{$0)] struct Test;"#, expect![[]])
     }
 
     #[test]
     fn empty() {
-        check_repr(
+        check(
             r#"#[repr($0)] struct Test;"#,
             expect![[r#"
                 ba C
@@ -983,12 +1152,12 @@ mod repr {
 
     #[test]
     fn transparent() {
-        check_repr(r#"#[repr(transparent, $0)] struct Test;"#, expect![[r#""#]]);
+        check(r#"#[repr(transparent, $0)] struct Test;"#, expect![[r#""#]]);
     }
 
     #[test]
     fn align() {
-        check_repr(
+        check(
             r#"#[repr(align(1), $0)] struct Test;"#,
             expect![[r#"
                 ba C
@@ -1011,7 +1180,7 @@ mod repr {
 
     #[test]
     fn packed() {
-        check_repr(
+        check(
             r#"#[repr(packed, $0)] struct Test;"#,
             expect![[r#"
                 ba C
@@ -1034,7 +1203,7 @@ mod repr {
 
     #[test]
     fn c() {
-        check_repr(
+        check(
             r#"#[repr(C, $0)] struct Test;"#,
             expect![[r#"
                 ba align($0)
@@ -1057,7 +1226,7 @@ mod repr {
 
     #[test]
     fn prim() {
-        check_repr(
+        check(
             r#"#[repr(usize, $0)] struct Test;"#,
             expect![[r#"
                 ba C

@@ -1,11 +1,16 @@
-use crate::base::ExtCtxt;
 use rustc_ast::ptr::P;
-use rustc_ast::{self as ast, AttrVec, BlockCheckMode, Expr, LocalKind, MatchKind, PatKind, UnOp};
-use rustc_ast::{attr, token, util::literal};
+use rustc_ast::token::Delimiter;
+use rustc_ast::tokenstream::TokenStream;
+use rustc_ast::util::literal;
+use rustc_ast::{
+    self as ast, AnonConst, AttrVec, BlockCheckMode, Expr, LocalKind, MatchKind, PatKind, UnOp,
+    attr, token, tokenstream,
+};
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{Span, DUMMY_SP};
-use thin_vec::{thin_vec, ThinVec};
+use rustc_span::{DUMMY_SP, Ident, Span, Symbol, kw, sym};
+use thin_vec::{ThinVec, thin_vec};
+
+use crate::base::ExtCtxt;
 
 impl<'a> ExtCtxt<'a> {
     pub fn path(&self, span: Span, strs: Vec<Ident>) -> ast::Path {
@@ -52,13 +57,13 @@ impl<'a> ExtCtxt<'a> {
         &self,
         span: Span,
         path: ast::Path,
-        delim: ast::token::Delimiter,
-        tokens: ast::tokenstream::TokenStream,
+        delim: Delimiter,
+        tokens: TokenStream,
     ) -> P<ast::MacCall> {
         P(ast::MacCall {
             path,
             args: P(ast::DelimArgs {
-                dspan: ast::tokenstream::DelimSpan { open: span, close: span },
+                dspan: tokenstream::DelimSpan { open: span, close: span },
                 delim,
                 tokens,
             }),
@@ -136,22 +141,50 @@ impl<'a> ExtCtxt<'a> {
         }
     }
 
+    pub fn lifetime_param(
+        &self,
+        span: Span,
+        ident: Ident,
+        bounds: ast::GenericBounds,
+    ) -> ast::GenericParam {
+        ast::GenericParam {
+            id: ast::DUMMY_NODE_ID,
+            ident: ident.with_span_pos(span),
+            attrs: AttrVec::new(),
+            bounds,
+            is_placeholder: false,
+            kind: ast::GenericParamKind::Lifetime,
+            colon_span: None,
+        }
+    }
+
+    pub fn const_param(
+        &self,
+        span: Span,
+        ident: Ident,
+        bounds: ast::GenericBounds,
+        ty: P<ast::Ty>,
+        default: Option<AnonConst>,
+    ) -> ast::GenericParam {
+        ast::GenericParam {
+            id: ast::DUMMY_NODE_ID,
+            ident: ident.with_span_pos(span),
+            attrs: AttrVec::new(),
+            bounds,
+            is_placeholder: false,
+            kind: ast::GenericParamKind::Const { ty, kw_span: DUMMY_SP, default },
+            colon_span: None,
+        }
+    }
+
     pub fn trait_ref(&self, path: ast::Path) -> ast::TraitRef {
         ast::TraitRef { path, ref_id: ast::DUMMY_NODE_ID }
     }
 
-    pub fn poly_trait_ref(&self, span: Span, path: ast::Path) -> ast::PolyTraitRef {
+    pub fn poly_trait_ref(&self, span: Span, path: ast::Path, is_const: bool) -> ast::PolyTraitRef {
         ast::PolyTraitRef {
             bound_generic_params: ThinVec::new(),
-            trait_ref: self.trait_ref(path),
-            span,
-        }
-    }
-
-    pub fn trait_bound(&self, path: ast::Path, is_const: bool) -> ast::GenericBound {
-        ast::GenericBound::Trait(
-            self.poly_trait_ref(path.span, path),
-            ast::TraitBoundModifiers {
+            modifiers: ast::TraitBoundModifiers {
                 polarity: ast::BoundPolarity::Positive,
                 constness: if is_const {
                     ast::BoundConstness::Maybe(DUMMY_SP)
@@ -160,7 +193,13 @@ impl<'a> ExtCtxt<'a> {
                 },
                 asyncness: ast::BoundAsyncness::Normal,
             },
-        )
+            trait_ref: self.trait_ref(path),
+            span,
+        }
+    }
+
+    pub fn trait_bound(&self, path: ast::Path, is_const: bool) -> ast::GenericBound {
+        ast::GenericBound::Trait(self.poly_trait_ref(path.span, path, is_const))
     }
 
     pub fn lifetime(&self, span: Span, ident: Ident) -> ast::Lifetime {
@@ -193,6 +232,7 @@ impl<'a> ExtCtxt<'a> {
             self.pat_ident(sp, ident)
         };
         let local = P(ast::Local {
+            super_: None,
             pat,
             ty,
             id: ast::DUMMY_NODE_ID,
@@ -208,6 +248,7 @@ impl<'a> ExtCtxt<'a> {
     /// Generates `let _: Type;`, which is usually used for type assertions.
     pub fn stmt_let_type_only(&self, span: Span, ty: P<ast::Ty>) -> ast::Stmt {
         let local = P(ast::Local {
+            super_: None,
             pat: self.pat_wild(span),
             ty: Some(ty),
             id: ast::DUMMY_NODE_ID,
@@ -218,6 +259,10 @@ impl<'a> ExtCtxt<'a> {
             tokens: None,
         });
         self.stmt_local(local, span)
+    }
+
+    pub fn stmt_semi(&self, expr: P<ast::Expr>) -> ast::Stmt {
+        ast::Stmt { id: ast::DUMMY_NODE_ID, span: expr.span, kind: ast::StmtKind::Semi(expr) }
     }
 
     pub fn stmt_local(&self, local: P<ast::Local>, span: Span) -> ast::Stmt {
@@ -245,7 +290,6 @@ impl<'a> ExtCtxt<'a> {
             rules: BlockCheckMode::Default,
             span,
             tokens: None,
-            could_be_bare_literal: false,
         })
     }
 
@@ -290,6 +334,25 @@ impl<'a> ExtCtxt<'a> {
         self.expr(sp, ast::ExprKind::Paren(e))
     }
 
+    pub fn expr_method_call(
+        &self,
+        span: Span,
+        expr: P<ast::Expr>,
+        ident: Ident,
+        args: ThinVec<P<ast::Expr>>,
+    ) -> P<ast::Expr> {
+        let seg = ast::PathSegment::from_ident(ident);
+        self.expr(
+            span,
+            ast::ExprKind::MethodCall(Box::new(ast::MethodCall {
+                seg,
+                receiver: expr,
+                args,
+                span,
+            })),
+        )
+    }
+
     pub fn expr_call(
         &self,
         span: Span,
@@ -297,6 +360,12 @@ impl<'a> ExtCtxt<'a> {
         args: ThinVec<P<ast::Expr>>,
     ) -> P<ast::Expr> {
         self.expr(span, ast::ExprKind::Call(expr, args))
+    }
+    pub fn expr_loop(&self, sp: Span, block: P<ast::Block>) -> P<ast::Expr> {
+        self.expr(sp, ast::ExprKind::Loop(block, None, sp))
+    }
+    pub fn expr_asm(&self, sp: Span, expr: P<ast::InlineAsm>) -> P<ast::Expr> {
+        self.expr(sp, ast::ExprKind::InlineAsm(expr))
     }
     pub fn expr_call_ident(
         &self,
@@ -413,8 +482,8 @@ impl<'a> ExtCtxt<'a> {
                     span,
                     [sym::std, sym::unreachable].map(|s| Ident::new(s, span)).to_vec(),
                 ),
-                ast::token::Delimiter::Parenthesis,
-                ast::tokenstream::TokenStream::default(),
+                Delimiter::Parenthesis,
+                TokenStream::default(),
             ),
         )
     }
@@ -460,7 +529,7 @@ impl<'a> ExtCtxt<'a> {
         self.pat(span, PatKind::Wild)
     }
     pub fn pat_lit(&self, span: Span, expr: P<ast::Expr>) -> P<ast::Pat> {
-        self.pat(span, PatKind::Lit(expr))
+        self.pat(span, PatKind::Expr(expr))
     }
     pub fn pat_ident(&self, span: Span, ident: Ident) -> P<ast::Pat> {
         self.pat_ident_binding_mode(span, ident, ast::BindingMode::NONE)
@@ -597,15 +666,8 @@ impl<'a> ExtCtxt<'a> {
         P(ast::FnDecl { inputs, output })
     }
 
-    pub fn item(
-        &self,
-        span: Span,
-        name: Ident,
-        attrs: ast::AttrVec,
-        kind: ast::ItemKind,
-    ) -> P<ast::Item> {
+    pub fn item(&self, span: Span, attrs: ast::AttrVec, kind: ast::ItemKind) -> P<ast::Item> {
         P(ast::Item {
-            ident: name,
             attrs,
             id: ast::DUMMY_NODE_ID,
             kind,
@@ -622,38 +684,48 @@ impl<'a> ExtCtxt<'a> {
     pub fn item_static(
         &self,
         span: Span,
-        name: Ident,
+        ident: Ident,
         ty: P<ast::Ty>,
         mutability: ast::Mutability,
         expr: P<ast::Expr>,
     ) -> P<ast::Item> {
         self.item(
             span,
-            name,
             AttrVec::new(),
-            ast::ItemKind::Static(ast::StaticItem { ty, mutability, expr: Some(expr) }.into()),
+            ast::ItemKind::Static(
+                ast::StaticItem {
+                    ident,
+                    ty,
+                    safety: ast::Safety::Default,
+                    mutability,
+                    expr: Some(expr),
+                    define_opaque: None,
+                }
+                .into(),
+            ),
         )
     }
 
     pub fn item_const(
         &self,
         span: Span,
-        name: Ident,
+        ident: Ident,
         ty: P<ast::Ty>,
         expr: P<ast::Expr>,
     ) -> P<ast::Item> {
         let defaultness = ast::Defaultness::Final;
         self.item(
             span,
-            name,
             AttrVec::new(),
             ast::ItemKind::Const(
                 ast::ConstItem {
                     defaultness,
+                    ident,
                     // FIXME(generic_const_items): Pass the generics as a parameter.
                     generics: ast::Generics::default(),
                     ty,
                     expr: Some(expr),
+                    define_opaque: None,
                 }
                 .into(),
             ),
@@ -663,7 +735,7 @@ impl<'a> ExtCtxt<'a> {
     // Builds `#[name]`.
     pub fn attr_word(&self, name: Symbol, span: Span) -> ast::Attribute {
         let g = &self.sess.psess.attr_id_generator;
-        attr::mk_attr_word(g, ast::AttrStyle::Outer, name, span)
+        attr::mk_attr_word(g, ast::AttrStyle::Outer, ast::Safety::Default, name, span)
     }
 
     // Builds `#[name = val]`.
@@ -671,12 +743,26 @@ impl<'a> ExtCtxt<'a> {
     // Note: `span` is used for both the identifier and the value.
     pub fn attr_name_value_str(&self, name: Symbol, val: Symbol, span: Span) -> ast::Attribute {
         let g = &self.sess.psess.attr_id_generator;
-        attr::mk_attr_name_value_str(g, ast::AttrStyle::Outer, name, val, span)
+        attr::mk_attr_name_value_str(
+            g,
+            ast::AttrStyle::Outer,
+            ast::Safety::Default,
+            name,
+            val,
+            span,
+        )
     }
 
     // Builds `#[outer(inner)]`.
     pub fn attr_nested_word(&self, outer: Symbol, inner: Symbol, span: Span) -> ast::Attribute {
         let g = &self.sess.psess.attr_id_generator;
-        attr::mk_attr_nested_word(g, ast::AttrStyle::Outer, outer, inner, span)
+        attr::mk_attr_nested_word(
+            g,
+            ast::AttrStyle::Outer,
+            ast::Safety::Default,
+            outer,
+            inner,
+            span,
+        )
     }
 }

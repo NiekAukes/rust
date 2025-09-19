@@ -2,14 +2,13 @@
 use std::ops::Range;
 
 use rustc_data_structures::fx::FxHashSet;
+use tracing::trace;
 
-use crate::borrow_tracker::{
-    stacked_borrows::{Item, Permission},
-    AccessKind, BorTag,
-};
-use crate::ProvenanceExtra;
+use crate::borrow_tracker::stacked_borrows::{Item, Permission};
+use crate::borrow_tracker::{AccessKind, BorTag};
+use crate::{InterpResult, ProvenanceExtra, interp_ok};
 
-/// Exactly what cache size we should use is a difficult tradeoff. There will always be some
+/// Exactly what cache size we should use is a difficult trade-off. There will always be some
 /// workload which has a `BorTag` working set which exceeds the size of the cache, and ends up
 /// falling back to linear searches of the borrow stack very often.
 /// The cost of making this value too large is that the loop in `Stack::insert` which ensures the
@@ -135,8 +134,16 @@ impl StackCache {
 
 impl PartialEq for Stack {
     fn eq(&self, other: &Self) -> bool {
-        // All the semantics of Stack are in self.borrows, everything else is caching
-        self.borrows == other.borrows
+        let Stack {
+            borrows,
+            unknown_bottom,
+            // The cache is ignored for comparison.
+            #[cfg(feature = "stack-cache")]
+                cache: _,
+            #[cfg(feature = "stack-cache")]
+                unique_range: _,
+        } = self;
+        *borrows == other.borrows && *unknown_bottom == other.unknown_bottom
     }
 }
 
@@ -347,7 +354,7 @@ impl<'tcx> Stack {
         self.borrows.get(idx).cloned()
     }
 
-    #[allow(clippy::len_without_is_empty)] // Stacks are never empty
+    #[expect(clippy::len_without_is_empty)] // Stacks are never empty
     pub fn len(&self) -> usize {
         self.borrows.len()
     }
@@ -373,8 +380,8 @@ impl<'tcx> Stack {
     pub fn disable_uniques_starting_at(
         &mut self,
         disable_start: usize,
-        mut visitor: impl FnMut(Item) -> crate::InterpResult<'tcx>,
-    ) -> crate::InterpResult<'tcx> {
+        mut visitor: impl FnMut(Item) -> InterpResult<'tcx>,
+    ) -> InterpResult<'tcx> {
         #[cfg(feature = "stack-cache")]
         let unique_range = self.unique_range.clone();
         #[cfg(not(feature = "stack-cache"))]
@@ -413,16 +420,16 @@ impl<'tcx> Stack {
         #[cfg(feature = "stack-cache-consistency-check")]
         self.verify_cache_consistency();
 
-        Ok(())
+        interp_ok(())
     }
 
     /// Produces an iterator which iterates over `range` in reverse, and when dropped removes that
     /// range of `Item`s from this `Stack`.
-    pub fn pop_items_after<V: FnMut(Item) -> crate::InterpResult<'tcx>>(
+    pub fn pop_items_after<V: FnMut(Item) -> InterpResult<'tcx>>(
         &mut self,
         start: usize,
         mut visitor: V,
-    ) -> crate::InterpResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         while self.borrows.len() > start {
             let item = self.borrows.pop().unwrap();
             visitor(item)?;
@@ -467,6 +474,6 @@ impl<'tcx> Stack {
 
         #[cfg(feature = "stack-cache-consistency-check")]
         self.verify_cache_consistency();
-        Ok(())
+        interp_ok(())
     }
 }

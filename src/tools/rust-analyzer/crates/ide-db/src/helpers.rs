@@ -2,16 +2,18 @@
 
 use std::collections::VecDeque;
 
-use base_db::{FileId, SourceDatabaseExt};
-use hir::{Crate, DescendPreference, ItemInNs, ModuleDef, Name, Semantics};
+use base_db::SourceDatabase;
+use hir::{Crate, ItemInNs, ModuleDef, Name, Semantics};
+use span::{Edition, FileId};
 use syntax::{
+    AstToken, SyntaxKind, SyntaxToken, ToSmolStr, TokenAtOffset,
     ast::{self, make},
-    AstToken, SyntaxKind, SyntaxToken, TokenAtOffset,
 };
 
 use crate::{
+    RootDatabase,
     defs::{Definition, IdentClass},
-    generated, RootDatabase,
+    generated,
 };
 
 pub fn item_name(db: &RootDatabase, item: ItemInNs) -> Option<Name> {
@@ -34,14 +36,14 @@ pub fn pick_token<T: AstToken>(mut tokens: TokenAtOffset<SyntaxToken>) -> Option
 }
 
 /// Converts the mod path struct into its ast representation.
-pub fn mod_path_to_ast(path: &hir::ModPath) -> ast::Path {
-    let _p = tracing::span!(tracing::Level::INFO, "mod_path_to_ast").entered();
+pub fn mod_path_to_ast(path: &hir::ModPath, edition: Edition) -> ast::Path {
+    let _p = tracing::info_span!("mod_path_to_ast").entered();
 
     let mut segments = Vec::new();
     let mut is_abs = false;
     match path.kind {
         hir::PathKind::Plain => {}
-        hir::PathKind::Super(0) => segments.push(make::path_segment_self()),
+        hir::PathKind::SELF => segments.push(make::path_segment_self()),
         hir::PathKind::Super(n) => segments.extend((0..n).map(|_| make::path_segment_super())),
         hir::PathKind::DollarCrate(_) | hir::PathKind::Crate => {
             segments.push(make::path_segment_crate())
@@ -49,11 +51,9 @@ pub fn mod_path_to_ast(path: &hir::ModPath) -> ast::Path {
         hir::PathKind::Abs => is_abs = true,
     }
 
-    segments.extend(
-        path.segments()
-            .iter()
-            .map(|segment| make::path_segment(make::name_ref(&segment.to_smol_str()))),
-    );
+    segments.extend(path.segments().iter().map(|segment| {
+        make::path_segment(make::name_ref(&segment.display_no_db(edition).to_smolstr()))
+    }));
     make::path_from_segments(segments, is_abs)
 }
 
@@ -109,15 +109,16 @@ pub fn lint_eq_or_in_group(lint: &str, lint_is: &str) -> bool {
 
 pub fn is_editable_crate(krate: Crate, db: &RootDatabase) -> bool {
     let root_file = krate.root_file(db);
-    let source_root_id = db.file_source_root(root_file);
-    !db.source_root(source_root_id).is_library
+    let source_root_id = db.file_source_root(root_file).source_root_id(db);
+    !db.source_root(source_root_id).source_root(db).is_library
 }
 
+// FIXME: This is a weird function
 pub fn get_definition(
     sema: &Semantics<'_, RootDatabase>,
     token: SyntaxToken,
 ) -> Option<Definition> {
-    for token in sema.descend_into_macros(DescendPreference::None, token) {
+    for token in sema.descend_into_macros_exact(token) {
         let def = IdentClass::classify_token(sema, &token).map(IdentClass::definitions_no_ops);
         if let Some(&[x]) = def.as_deref() {
             return Some(x);

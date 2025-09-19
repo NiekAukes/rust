@@ -2,14 +2,15 @@
 
 //@ check-pass
 
-trait Trait {}
+pub trait Trait {}
 
-type TAIT = impl Trait;
+pub type TAIT = impl Trait;
 
-struct Concrete;
+pub struct Concrete;
 impl Trait for Concrete {}
 
-fn tait() -> TAIT {
+#[define_opaque(TAIT)]
+pub fn tait() -> TAIT {
     Concrete
 }
 
@@ -24,9 +25,7 @@ impl<T> OuterTrait for Dummy<T> {
 }
 
 fn tait_and_impl_trait() -> impl OuterTrait<Item = (TAIT, impl Trait)> {
-    Dummy {
-        t: (tait(), Concrete),
-    }
+    Dummy { t: (tait(), Concrete) }
 }
 
 fn tait_and_dyn_trait() -> impl OuterTrait<Item = (TAIT, Box<dyn Trait>)> {

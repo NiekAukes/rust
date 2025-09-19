@@ -1,16 +1,16 @@
 use rustc_hir as hir;
 use rustc_infer::infer::{DefineOpaqueTypes, InferOk, TyCtxtInferExt};
 use rustc_infer::traits;
-use rustc_middle::ty::{self, ToPredicate};
-use rustc_span::def_id::DefId;
+use rustc_middle::ty::{self, TypingMode, Upcast};
 use rustc_span::DUMMY_SP;
+use rustc_span::def_id::DefId;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
-
 use thin_vec::ThinVec;
+use tracing::{debug, instrument, trace};
 
 use crate::clean;
 use crate::clean::{
-    clean_middle_assoc_item, clean_middle_ty, clean_trait_ref_with_bindings, clean_ty_generics,
+    clean_middle_assoc_item, clean_middle_ty, clean_trait_ref_with_constraints, clean_ty_generics,
 };
 use crate::core::DocContext;
 
@@ -25,7 +25,7 @@ pub(crate) fn synthesize_blanket_impls(
     let mut blanket_impls = Vec::new();
     for trait_def_id in tcx.all_traits() {
         if !cx.cache.effective_visibilities.is_reachable(tcx, trait_def_id)
-            || cx.generated_synthetics.get(&(ty.skip_binder(), trait_def_id)).is_some()
+            || cx.generated_synthetics.contains(&(ty.skip_binder(), trait_def_id))
         {
             continue;
         }
@@ -38,7 +38,7 @@ pub(crate) fn synthesize_blanket_impls(
             if !matches!(trait_ref.skip_binder().self_ty().kind(), ty::Param(_)) {
                 continue;
             }
-            let infcx = tcx.infer_ctxt().build();
+            let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
             let args = infcx.fresh_args_for_item(DUMMY_SP, item_def_id);
             let impl_ty = ty.instantiate(tcx, args);
             let param_env = ty::ParamEnv::empty();
@@ -64,7 +64,7 @@ pub(crate) fn synthesize_blanket_impls(
                 .instantiate(tcx, impl_args)
                 .predicates
                 .into_iter()
-                .chain(Some(ty::Binder::dummy(impl_trait_ref).to_predicate(tcx)));
+                .chain(Some(impl_trait_ref.upcast(tcx)));
             for predicate in predicates {
                 let obligation = traits::Obligation::new(
                     tcx,
@@ -83,45 +83,44 @@ pub(crate) fn synthesize_blanket_impls(
             cx.generated_synthetics.insert((ty.skip_binder(), trait_def_id));
 
             blanket_impls.push(clean::Item {
-                name: None,
-                attrs: Default::default(),
-                item_id: clean::ItemId::Blanket { impl_id: impl_def_id, for_: item_def_id },
-                kind: Box::new(clean::ImplItem(Box::new(clean::Impl {
-                    unsafety: hir::Unsafety::Normal,
-                    generics: clean_ty_generics(
-                        cx,
-                        tcx.generics_of(impl_def_id),
-                        tcx.explicit_predicates_of(impl_def_id),
-                    ),
-                    // FIXME(eddyb) compute both `trait_` and `for_` from
-                    // the post-inference `trait_ref`, as it's more accurate.
-                    trait_: Some(clean_trait_ref_with_bindings(
-                        cx,
-                        ty::Binder::dummy(trait_ref.instantiate_identity()),
-                        ThinVec::new(),
-                    )),
-                    for_: clean_middle_ty(
-                        ty::Binder::dummy(ty.instantiate_identity()),
-                        cx,
-                        None,
-                        None,
-                    ),
-                    items: tcx
-                        .associated_items(impl_def_id)
-                        .in_definition_order()
-                        .filter(|item| !item.is_impl_trait_in_trait())
-                        .map(|item| clean_middle_assoc_item(item, cx))
-                        .collect(),
-                    polarity: ty::ImplPolarity::Positive,
-                    kind: clean::ImplKind::Blanket(Box::new(clean_middle_ty(
-                        ty::Binder::dummy(trait_ref.instantiate_identity().self_ty()),
-                        cx,
-                        None,
-                        None,
-                    ))),
-                }))),
-                cfg: None,
-                inline_stmt_id: None,
+                inner: Box::new(clean::ItemInner {
+                    name: None,
+                    item_id: clean::ItemId::Blanket { impl_id: impl_def_id, for_: item_def_id },
+                    attrs: Default::default(),
+                    stability: None,
+                    kind: clean::ImplItem(Box::new(clean::Impl {
+                        safety: hir::Safety::Safe,
+                        generics: clean_ty_generics(cx, impl_def_id),
+                        // FIXME(eddyb) compute both `trait_` and `for_` from
+                        // the post-inference `trait_ref`, as it's more accurate.
+                        trait_: Some(clean_trait_ref_with_constraints(
+                            cx,
+                            ty::Binder::dummy(trait_ref.instantiate_identity()),
+                            ThinVec::new(),
+                        )),
+                        for_: clean_middle_ty(
+                            ty::Binder::dummy(ty.instantiate_identity()),
+                            cx,
+                            None,
+                            None,
+                        ),
+                        items: tcx
+                            .associated_items(impl_def_id)
+                            .in_definition_order()
+                            .filter(|item| !item.is_impl_trait_in_trait())
+                            .map(|item| clean_middle_assoc_item(item, cx))
+                            .collect(),
+                        polarity: ty::ImplPolarity::Positive,
+                        kind: clean::ImplKind::Blanket(Box::new(clean_middle_ty(
+                            ty::Binder::dummy(trait_ref.instantiate_identity().self_ty()),
+                            cx,
+                            None,
+                            None,
+                        ))),
+                    })),
+                    cfg: None,
+                    inline_stmt_id: None,
+                }),
             });
         }
     }

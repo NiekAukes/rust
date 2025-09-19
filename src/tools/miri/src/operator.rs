@@ -1,28 +1,29 @@
 use std::iter;
 
-use rand::{seq::IteratorRandom, Rng};
+use rand::Rng;
+use rand::seq::IteratorRandom;
+use rustc_abi::Size;
 use rustc_apfloat::{Float, FloatConvert};
 use rustc_middle::mir;
-use rustc_target::abi::Size;
 
 use crate::*;
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn binary_ptr_op(
         &self,
         bin_op: mir::BinOp,
-        left: &ImmTy<'tcx, Provenance>,
-        right: &ImmTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, (ImmTy<'tcx, Provenance>, bool)> {
+        left: &ImmTy<'tcx>,
+        right: &ImmTy<'tcx>,
+    ) -> InterpResult<'tcx, ImmTy<'tcx>> {
         use rustc_middle::mir::BinOp::*;
 
         let this = self.eval_context_ref();
         trace!("ptr_op: {:?} {:?} {:?}", *left, bin_op, *right);
 
-        Ok(match bin_op {
+        interp_ok(match bin_op {
             Eq | Ne | Lt | Le | Gt | Ge => {
-                assert_eq!(left.layout.abi, right.layout.abi); // types can differ, e.g. fn ptrs with different `for`
+                assert_eq!(left.layout.backend_repr, right.layout.backend_repr); // types can differ, e.g. fn ptrs with different `for`
                 let size = this.pointer_size();
                 // Just compare the bits. ScalarPairs are compared lexicographically.
                 // We thus always compare pairs and simply fill scalars up with 0.
@@ -45,14 +46,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     Ge => left >= right,
                     _ => bug!(),
                 };
-                (ImmTy::from_bool(res, *this.tcx), false)
+                ImmTy::from_bool(res, *this.tcx)
             }
 
             // Some more operations are possible with atomics.
             // The return value always has the provenance of the *left* operand.
             Add | Sub | BitOr | BitAnd | BitXor => {
-                assert!(left.layout.ty.is_unsafe_ptr());
-                assert!(right.layout.ty.is_unsafe_ptr());
+                assert!(left.layout.ty.is_raw_ptr());
+                assert!(right.layout.ty.is_raw_ptr());
                 let ptr = left.to_scalar().to_pointer(this)?;
                 // We do the actual operation with usize-typed scalars.
                 let left = ImmTy::from_uint(ptr.addr().bytes(), this.machine.layouts.usize);
@@ -60,16 +61,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     right.to_scalar().to_target_usize(this)?,
                     this.machine.layouts.usize,
                 );
-                let (result, overflowing) = this.overflowing_binary_op(bin_op, &left, &right)?;
+                let result = this.binary_op(bin_op, &left, &right)?;
                 // Construct a new pointer with the provenance of `ptr` (the LHS).
                 let result_ptr = Pointer::new(
                     ptr.provenance,
                     Size::from_bytes(result.to_scalar().to_target_usize(this)?),
                 );
-                (
-                    ImmTy::from_scalar(Scalar::from_maybe_pointer(result_ptr, this), left.layout),
-                    overflowing,
-                )
+
+                ImmTy::from_scalar(Scalar::from_maybe_pointer(result_ptr, this), left.layout)
             }
 
             _ => span_bug!(this.cur_span(), "Invalid operator on pointers: {:?}", bin_op),
@@ -77,6 +76,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     }
 
     fn generate_nan<F1: Float + FloatConvert<F2>, F2: Float>(&self, inputs: &[F1]) -> F2 {
+        let this = self.eval_context_ref();
+        if !this.machine.float_nondet {
+            return F2::NAN;
+        }
+
         /// Make the given NaN a signaling NaN.
         /// Returns `None` if this would not result in a NaN.
         fn make_signaling<F: Float>(f: F) -> Option<F> {
@@ -90,7 +94,6 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             if f.is_nan() { Some(f) } else { None }
         }
 
-        let this = self.eval_context_ref();
         let mut rand = this.machine.rng.borrow_mut();
         // Assemble an iterator of possible NaNs: preferred, quieting propagation, unchanged propagation.
         // On some targets there are more possibilities; for now we just generate those options that
@@ -109,7 +112,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         // Pick one of the NaNs.
         let nan = nans.choose(&mut *rand).unwrap();
         // Non-deterministically flip the sign.
-        if rand.gen() {
+        if rand.random() {
             // This will properly flip even for NaN.
             -nan
         } else {
@@ -117,7 +120,13 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
     }
 
-    fn adjust_nan<F1: Float + FloatConvert<F2>, F2: Float>(&self, f: F2, inputs: &[F1]) -> F2 {
-        if f.is_nan() { self.generate_nan(inputs) } else { f }
+    fn equal_float_min_max<F: Float>(&self, a: F, b: F) -> F {
+        let this = self.eval_context_ref();
+        if !this.machine.float_nondet {
+            return a;
+        }
+        // Return one side non-deterministically.
+        let mut rand = this.machine.rng.borrow_mut();
+        if rand.random() { a } else { b }
     }
 }

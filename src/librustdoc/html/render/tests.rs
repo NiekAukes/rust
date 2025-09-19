@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
+use super::AllTypes;
 use super::print_item::compare_names;
-use super::{AllTypes, Buffer};
 
 #[test]
 fn test_compare_names() {
@@ -34,7 +34,7 @@ fn test_compare_names() {
 #[test]
 fn test_name_sorting() {
     let names = [
-        "Apple", "Banana", "Fruit", "Fruit0", "Fruit00", "Fruit01", "Fruit1", "Fruit02", "Fruit2",
+        "Apple", "Banana", "Fruit", "Fruit0", "Fruit00", "Fruit01", "Fruit02", "Fruit1", "Fruit2",
         "Fruit20", "Fruit30x", "Fruit100", "Pear",
     ];
     let mut sorted = names.to_owned();
@@ -47,8 +47,7 @@ fn test_all_types_prints_header_once() {
     // Regression test for #82477
     let all_types = AllTypes::new();
 
-    let mut buffer = Buffer::new();
-    all_types.print(&mut buffer);
+    let buffer = all_types.print().to_string();
 
-    assert_eq!(1, buffer.into_inner().matches("List of all items").count());
+    assert_eq!(1, buffer.matches("List of all items").count());
 }

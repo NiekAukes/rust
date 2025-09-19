@@ -1,4 +1,5 @@
 #![allow(missing_docs, nonstandard_style)]
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 use crate::ffi::{OsStr, OsString};
 use crate::io::ErrorKind;
@@ -8,31 +9,18 @@ use crate::path::PathBuf;
 use crate::sys::pal::windows::api::wide_str;
 use crate::time::Duration;
 
-pub use self::rand::hashmap_random_keys;
-
 #[macro_use]
 pub mod compat;
 
-mod api;
+pub mod api;
 
-pub mod alloc;
-pub mod args;
 pub mod c;
-pub mod env;
-pub mod fs;
 #[cfg(not(target_vendor = "win7"))]
 pub mod futex;
 pub mod handle;
-pub mod io;
-pub mod net;
 pub mod os;
 pub mod pipe;
-pub mod process;
-pub mod rand;
-pub mod stdio;
 pub mod thread;
-pub mod thread_local_dtor;
-pub mod thread_local_key;
 pub mod time;
 cfg_if::cfg_if! {
     if #[cfg(not(target_vendor = "uwp"))] {
@@ -43,8 +31,8 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Map a Result<T, WinError> to io::Result<T>.
-trait IoResult<T> {
+/// Map a [`Result<T, WinError>`] to [`io::Result<T>`](crate::io::Result<T>).
+pub trait IoResult<T> {
     fn io_result(self) -> crate::io::Result<T>;
 }
 impl<T> IoResult<T> for Result<T, api::WinError> {
@@ -56,17 +44,19 @@ impl<T> IoResult<T> for Result<T, api::WinError> {
 // SAFETY: must be called only once during runtime initialization.
 // NOTE: this is not guaranteed to run, for example when Rust code is called externally.
 pub unsafe fn init(_argc: isize, _argv: *const *const u8, _sigpipe: u8) {
-    stack_overflow::init();
+    unsafe {
+        stack_overflow::init();
 
-    // Normally, `thread::spawn` will call `Thread::set_name` but since this thread already
-    // exists, we have to call it ourselves.
-    thread::Thread::set_name_wide(wide_str!("main"));
+        // Normally, `thread::spawn` will call `Thread::set_name` but since this thread already
+        // exists, we have to call it ourselves.
+        thread::Thread::set_name_wide(wide_str!("main"));
+    }
 }
 
 // SAFETY: must be called only once during runtime cleanup.
 // NOTE: this is not guaranteed to run, for example when the program aborts.
 pub unsafe fn cleanup() {
-    net::cleanup();
+    crate::sys::net::cleanup();
 }
 
 #[inline]
@@ -77,7 +67,7 @@ pub fn is_interrupted(_errno: i32) -> bool {
 pub fn decode_error_kind(errno: i32) -> ErrorKind {
     use ErrorKind::*;
 
-    match errno as c::DWORD {
+    match errno as u32 {
         c::ERROR_ACCESS_DENIED => return PermissionDenied,
         c::ERROR_ALREADY_EXISTS => return AlreadyExists,
         c::ERROR_FILE_EXISTS => return AlreadyExists,
@@ -116,13 +106,14 @@ pub fn decode_error_kind(errno: i32) -> ErrorKind {
         c::ERROR_WRITE_PROTECT => return ReadOnlyFilesystem,
         c::ERROR_DISK_FULL | c::ERROR_HANDLE_DISK_FULL => return StorageFull,
         c::ERROR_SEEK_ON_DEVICE => return NotSeekable,
-        c::ERROR_DISK_QUOTA_EXCEEDED => return FilesystemQuotaExceeded,
+        c::ERROR_DISK_QUOTA_EXCEEDED => return QuotaExceeded,
         c::ERROR_FILE_TOO_LARGE => return FileTooLarge,
         c::ERROR_BUSY => return ResourceBusy,
         c::ERROR_POSSIBLE_DEADLOCK => return Deadlock,
         c::ERROR_NOT_SAME_DEVICE => return CrossesDevices,
         c::ERROR_TOO_MANY_LINKS => return TooManyLinks,
         c::ERROR_FILENAME_EXCED_RANGE => return InvalidFilename,
+        c::ERROR_CANT_RESOLVE_FILENAME => return FilesystemLoop,
         _ => {}
     }
 
@@ -140,6 +131,7 @@ pub fn decode_error_kind(errno: i32) -> ErrorKind {
         c::WSAEHOSTUNREACH => HostUnreachable,
         c::WSAENETDOWN => NetworkDown,
         c::WSAENETUNREACH => NetworkUnreachable,
+        c::WSAEDQUOT => QuotaExceeded,
 
         _ => Uncategorized,
     }
@@ -184,7 +176,7 @@ pub fn to_u16s<S: AsRef<OsStr>>(s: S) -> crate::io::Result<Vec<u16>> {
         maybe_result.extend(s.encode_wide());
 
         if unrolled_find_u16s(0, &maybe_result).is_some() {
-            return Err(crate::io::const_io_error!(
+            return Err(crate::io::const_error!(
                 ErrorKind::InvalidInput,
                 "strings passed to WinAPI cannot contain NULs",
             ));
@@ -218,7 +210,7 @@ pub fn to_u16s<S: AsRef<OsStr>>(s: S) -> crate::io::Result<Vec<u16>> {
 // from this closure is then the return value of the function.
 pub fn fill_utf16_buf<F1, F2, T>(mut f1: F1, f2: F2) -> crate::io::Result<T>
 where
-    F1: FnMut(*mut u16, c::DWORD) -> c::DWORD,
+    F1: FnMut(*mut u16, u32) -> u32,
     F2: FnOnce(&[u16]) -> T,
 {
     // Start off with a stack buf but then spill over to the heap if we end up
@@ -227,7 +219,7 @@ where
     // This initial size also works around `GetFullPathNameW` returning
     // incorrect size hints for some short paths:
     // https://github.com/dylni/normpath/issues/5
-    let mut stack_buf: [MaybeUninit<u16>; 512] = MaybeUninit::uninit_array();
+    let mut stack_buf: [MaybeUninit<u16>; 512] = [MaybeUninit::uninit(); 512];
     let mut heap_buf: Vec<MaybeUninit<u16>> = Vec::new();
     unsafe {
         let mut n = stack_buf.len();
@@ -240,7 +232,7 @@ where
                 // We used `reserve` and not `reserve_exact`, so in theory we
                 // may have gotten more than requested. If so, we'd like to use
                 // it... so long as we won't cause overflow.
-                n = heap_buf.capacity().min(c::DWORD::MAX as usize);
+                n = heap_buf.capacity().min(u32::MAX as usize);
                 // Safety: MaybeUninit<u16> does not need initialization
                 heap_buf.set_len(n);
                 &mut heap_buf[..]
@@ -256,13 +248,13 @@ where
             // error" is still 0 then we interpret it as a 0 length buffer and
             // not an actual error.
             c::SetLastError(0);
-            let k = match f1(buf.as_mut_ptr().cast::<u16>(), n as c::DWORD) {
+            let k = match f1(buf.as_mut_ptr().cast::<u16>(), n as u32) {
                 0 if api::get_last_error().code == 0 => 0,
                 0 => return Err(crate::io::Error::last_os_error()),
                 n => n,
             } as usize;
             if k == n && api::get_last_error().code == c::ERROR_INSUFFICIENT_BUFFER {
-                n = n.saturating_mul(2).min(c::DWORD::MAX as usize);
+                n = n.saturating_mul(2).min(u32::MAX as usize);
             } else if k > n {
                 n = k;
             } else if k == n {
@@ -273,7 +265,7 @@ where
                 unreachable!();
             } else {
                 // Safety: First `k` values are initialized.
-                let slice: &[u16] = MaybeUninit::slice_assume_init_ref(&buf[..k]);
+                let slice: &[u16] = buf[..k].assume_init_ref();
                 return Ok(f2(slice));
             }
         }
@@ -289,6 +281,14 @@ pub fn truncate_utf16_at_nul(v: &[u16]) -> &[u16] {
         // don't include the 0
         Some(i) => &v[..i],
         None => v,
+    }
+}
+
+pub fn ensure_no_nuls<T: AsRef<OsStr>>(s: T) -> crate::io::Result<T> {
+    if s.as_ref().encode_wide().any(|b| b == 0) {
+        Err(crate::io::const_error!(ErrorKind::InvalidInput, "nul byte found in provided data"))
+    } else {
+        Ok(s)
     }
 }
 
@@ -310,7 +310,7 @@ pub fn cvt<I: IsZero>(i: I) -> crate::io::Result<I> {
     if i.is_zero() { Err(crate::io::Error::last_os_error()) } else { Ok(i) }
 }
 
-pub fn dur2timeout(dur: Duration) -> c::DWORD {
+pub fn dur2timeout(dur: Duration) -> u32 {
     // Note that a duration is a (u64, u32) (seconds, nanoseconds) pair, and the
     // timeouts in windows APIs are typically u32 milliseconds. To translate, we
     // have two pieces to take care of:
@@ -322,14 +322,18 @@ pub fn dur2timeout(dur: Duration) -> c::DWORD {
         .checked_mul(1000)
         .and_then(|ms| ms.checked_add((dur.subsec_nanos() as u64) / 1_000_000))
         .and_then(|ms| ms.checked_add(if dur.subsec_nanos() % 1_000_000 > 0 { 1 } else { 0 }))
-        .map(|ms| if ms > <c::DWORD>::MAX as u64 { c::INFINITE } else { ms as c::DWORD })
+        .map(|ms| if ms > <u32>::MAX as u64 { c::INFINITE } else { ms as u32 })
         .unwrap_or(c::INFINITE)
 }
 
 /// Use `__fastfail` to abort the process
 ///
-/// This is the same implementation as in libpanic_abort's `__rust_start_panic`. See
-/// that function for more information on `__fastfail`
+/// In Windows 8 and later, this will terminate the process immediately without
+/// running any in-process exception handlers. In earlier versions of Windows,
+/// this sequence of instructions will be treated as an access violation, which
+/// will still terminate the process but might run some exception handlers.
+///
+/// https://docs.microsoft.com/en-us/cpp/intrinsics/fastfail
 #[cfg(not(miri))] // inline assembly does not work in Miri
 pub fn abort_internal() -> ! {
     unsafe {
@@ -347,7 +351,6 @@ pub fn abort_internal() -> ! {
     }
 }
 
-// miri is sensitive to changes here so check that miri is happy if touching this
 #[cfg(miri)]
 pub fn abort_internal() -> ! {
     crate::intrinsics::abort();

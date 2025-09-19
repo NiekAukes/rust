@@ -1,13 +1,38 @@
+use std::fmt::Debug;
+
+use rustc_hir::def_id::DefId;
+use rustc_middle::ty::{self, Ty, Upcast};
+
+use super::{ObligationCause, PredicateObligation, PredicateObligations};
 use crate::infer::InferCtxt;
 use crate::traits::Obligation;
-use rustc_hir::def_id::DefId;
-use rustc_macros::extension;
-use rustc_middle::ty::{self, ToPredicate, Ty};
 
-use super::FulfillmentError;
-use super::{ObligationCause, PredicateObligation};
+/// A trait error with most of its information removed. This is the error
+/// returned by an `ObligationCtxt` by default, and suitable if you just
+/// want to see if a predicate holds, and don't particularly care about the
+/// error itself (except for if it's an ambiguity or true error).
+///
+/// use `ObligationCtxt::new_with_diagnostics` to get a `FulfillmentError`.
+#[derive(Clone, Debug)]
+pub enum ScrubbedTraitError<'tcx> {
+    /// A real error. This goal definitely does not hold.
+    TrueError,
+    /// An ambiguity. This goal may hold if further inference is done.
+    Ambiguity,
+    /// An old-solver-style cycle error, which will fatal.
+    Cycle(PredicateObligations<'tcx>),
+}
 
-pub trait TraitEngine<'tcx>: 'tcx {
+impl<'tcx> ScrubbedTraitError<'tcx> {
+    pub fn is_true_error(&self) -> bool {
+        match self {
+            ScrubbedTraitError::TrueError => true,
+            ScrubbedTraitError::Ambiguity | ScrubbedTraitError::Cycle(_) => false,
+        }
+    }
+}
+
+pub trait TraitEngine<'tcx, E: 'tcx>: 'tcx {
     /// Requires that `ty` must implement the trait with `def_id` in
     /// the given environment. This trait must not have any type
     /// parameters (except for `Self`).
@@ -26,7 +51,7 @@ pub trait TraitEngine<'tcx>: 'tcx {
                 cause,
                 recursion_depth: 0,
                 param_env,
-                predicate: ty::Binder::dummy(trait_ref).to_predicate(infcx.tcx),
+                predicate: trait_ref.upcast(infcx.tcx),
             },
         );
     }
@@ -37,28 +62,10 @@ pub trait TraitEngine<'tcx>: 'tcx {
         obligation: PredicateObligation<'tcx>,
     );
 
-    #[must_use]
-    fn select_where_possible(&mut self, infcx: &InferCtxt<'tcx>) -> Vec<FulfillmentError<'tcx>>;
-
-    fn collect_remaining_errors(&mut self, infcx: &InferCtxt<'tcx>) -> Vec<FulfillmentError<'tcx>>;
-
-    fn pending_obligations(&self) -> Vec<PredicateObligation<'tcx>>;
-
-    /// Among all pending obligations, collect those are stalled on a inference variable which has
-    /// changed since the last call to `select_where_possible`. Those obligations are marked as
-    /// successful and returned.
-    fn drain_unstalled_obligations(
-        &mut self,
-        infcx: &InferCtxt<'tcx>,
-    ) -> Vec<PredicateObligation<'tcx>>;
-}
-
-#[extension(pub trait TraitEngineExt<'tcx>)]
-impl<'tcx, T: ?Sized + TraitEngine<'tcx>> T {
     fn register_predicate_obligations(
         &mut self,
         infcx: &InferCtxt<'tcx>,
-        obligations: impl IntoIterator<Item = PredicateObligation<'tcx>>,
+        obligations: PredicateObligations<'tcx>,
     ) {
         for obligation in obligations {
             self.register_predicate_obligation(infcx, obligation);
@@ -66,7 +73,12 @@ impl<'tcx, T: ?Sized + TraitEngine<'tcx>> T {
     }
 
     #[must_use]
-    fn select_all_or_error(&mut self, infcx: &InferCtxt<'tcx>) -> Vec<FulfillmentError<'tcx>> {
+    fn select_where_possible(&mut self, infcx: &InferCtxt<'tcx>) -> Vec<E>;
+
+    fn collect_remaining_errors(&mut self, infcx: &InferCtxt<'tcx>) -> Vec<E>;
+
+    #[must_use]
+    fn select_all_or_error(&mut self, infcx: &InferCtxt<'tcx>) -> Vec<E> {
         let errors = self.select_where_possible(infcx);
         if !errors.is_empty() {
             return errors;
@@ -74,4 +86,20 @@ impl<'tcx, T: ?Sized + TraitEngine<'tcx>> T {
 
         self.collect_remaining_errors(infcx)
     }
+
+    fn has_pending_obligations(&self) -> bool;
+
+    fn pending_obligations(&self) -> PredicateObligations<'tcx>;
+
+    /// Among all pending obligations, collect those are stalled on a inference variable which has
+    /// changed since the last call to `select_where_possible`. Those obligations are marked as
+    /// successful and returned.
+    fn drain_stalled_obligations_for_coroutines(
+        &mut self,
+        infcx: &InferCtxt<'tcx>,
+    ) -> PredicateObligations<'tcx>;
+}
+
+pub trait FromSolverError<'tcx, E>: Debug + 'tcx {
+    fn from_solver_error(infcx: &InferCtxt<'tcx>, error: E) -> Self;
 }

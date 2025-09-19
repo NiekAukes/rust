@@ -1,6 +1,5 @@
 //! Support code for encoding and decoding types.
 
-use smallvec::{Array, SmallVec};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -10,6 +9,9 @@ use std::num::NonZero;
 use std::path;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use rustc_hashes::{Hash64, Hash128};
+use smallvec::{Array, SmallVec};
 use thin_vec::ThinVec;
 
 /// A byte that [cannot occur in UTF8 sequences][utf8]. Used to mark the end of a string.
@@ -140,7 +142,7 @@ pub trait Decoder {
 ///   `rustc_metadata::rmeta::Lazy`.
 /// * `TyEncodable` should be used for types that are only serialized in crate
 ///   metadata or the incremental cache. This is most types in `rustc_middle`.
-pub trait Encodable<S: Encoder> {
+pub trait Encodable<S: Encoder>: crate::PointeeSized {
     fn encode(&self, s: &mut S);
 }
 
@@ -196,7 +198,7 @@ direct_serialize_impls! {
     char emit_char read_char
 }
 
-impl<S: Encoder, T: ?Sized> Encodable<S> for &T
+impl<S: Encoder, T: ?Sized + crate::PointeeSized> Encodable<S> for &T
 where
     T: Encodable<S>,
 {
@@ -252,7 +254,7 @@ impl<S: Encoder> Encodable<S> for () {
 }
 
 impl<D: Decoder> Decodable<D> for () {
-    fn decode(_: &mut D) -> () {}
+    fn decode(_: &mut D) {}
 }
 
 impl<S: Encoder, T> Encodable<S> for PhantomData<T> {
@@ -287,7 +289,7 @@ impl<D: Decoder, T: Decodable<D>> Decodable<D> for Rc<T> {
 impl<S: Encoder, T: Encodable<S>> Encodable<S> for [T] {
     default fn encode(&self, s: &mut S) {
         s.emit_usize(self.len());
-        for e in self.iter() {
+        for e in self {
             e.encode(s);
         }
     }
@@ -324,7 +326,7 @@ impl<D: Decoder, const N: usize> Decodable<D> for [u8; N] {
     }
 }
 
-impl<'a, S: Encoder, T: Encodable<S>> Encodable<S> for Cow<'a, [T]>
+impl<S: Encoder, T: Encodable<S>> Encodable<S> for Cow<'_, [T]>
 where
     [T]: ToOwned<Owned = Vec<T>>,
 {
@@ -344,14 +346,14 @@ where
     }
 }
 
-impl<'a, S: Encoder> Encodable<S> for Cow<'a, str> {
+impl<S: Encoder> Encodable<S> for Cow<'_, str> {
     fn encode(&self, s: &mut S) {
         let val: &str = self;
         val.encode(s)
     }
 }
 
-impl<'a, D: Decoder> Decodable<D> for Cow<'a, str> {
+impl<D: Decoder> Decodable<D> for Cow<'_, str> {
     fn decode(d: &mut D) -> Cow<'static, str> {
         let v: String = Decodable::decode(d);
         Cow::Owned(v)
@@ -526,7 +528,7 @@ impl<D: Decoder, T: Decodable<D>> Decodable<D> for ThinVec<T> {
 impl<S: Encoder, T: Encodable<S>> Encodable<S> for VecDeque<T> {
     fn encode(&self, s: &mut S) {
         s.emit_usize(self.len());
-        for e in self.iter() {
+        for e in self {
             e.encode(s);
         }
     }
@@ -546,7 +548,7 @@ where
 {
     fn encode(&self, e: &mut S) {
         e.emit_usize(self.len());
-        for (key, val) in self.iter() {
+        for (key, val) in self {
             key.encode(e);
             val.encode(e);
         }
@@ -570,7 +572,7 @@ where
 {
     fn encode(&self, s: &mut S) {
         s.emit_usize(self.len());
-        for e in self.iter() {
+        for e in self {
             e.encode(s);
         }
     }
@@ -594,7 +596,7 @@ where
 {
     fn encode(&self, e: &mut E) {
         e.emit_usize(self.len());
-        for (key, val) in self.iter() {
+        for (key, val) in self {
             key.encode(e);
             val.encode(e);
         }
@@ -620,7 +622,7 @@ where
 {
     fn encode(&self, s: &mut E) {
         s.emit_usize(self.len());
-        for e in self.iter() {
+        for e in self {
             e.encode(s);
         }
     }
@@ -645,7 +647,7 @@ where
 {
     fn encode(&self, e: &mut E) {
         e.emit_usize(self.len());
-        for (key, val) in self.iter() {
+        for (key, val) in self {
             key.encode(e);
             val.encode(e);
         }
@@ -671,7 +673,7 @@ where
 {
     fn encode(&self, s: &mut E) {
         s.emit_usize(self.len());
-        for e in self.iter() {
+        for e in self {
             e.encode(s);
         }
     }
@@ -713,5 +715,33 @@ impl<D: Decoder, T: Decodable<D>> Decodable<D> for Arc<[T]> {
     fn decode(d: &mut D) -> Arc<[T]> {
         let vec: Vec<T> = Decodable::decode(d);
         vec.into()
+    }
+}
+
+impl<S: Encoder> Encodable<S> for Hash64 {
+    #[inline]
+    fn encode(&self, s: &mut S) {
+        s.emit_raw_bytes(&self.as_u64().to_le_bytes());
+    }
+}
+
+impl<S: Encoder> Encodable<S> for Hash128 {
+    #[inline]
+    fn encode(&self, s: &mut S) {
+        s.emit_raw_bytes(&self.as_u128().to_le_bytes());
+    }
+}
+
+impl<D: Decoder> Decodable<D> for Hash64 {
+    #[inline]
+    fn decode(d: &mut D) -> Self {
+        Self::new(u64::from_le_bytes(d.read_raw_bytes(8).try_into().unwrap()))
+    }
+}
+
+impl<D: Decoder> Decodable<D> for Hash128 {
+    #[inline]
+    fn decode(d: &mut D) -> Self {
+        Self::new(u128::from_le_bytes(d.read_raw_bytes(16).try_into().unwrap()))
     }
 }

@@ -4,13 +4,11 @@
 
 #![feature(type_alias_impl_trait)]
 
-trait Anything {}
+pub trait Anything {}
 impl<T> Anything for T {}
-type Input = impl Anything;
-fn run<F: FnOnce(Input) -> ()>(f: F, i: Input) {
-    f(i);
-}
+pub type Input = impl Anything;
 
+#[define_opaque(Input)]
 fn bop(_: Input) {
     run(
         |x: u32| {
@@ -18,6 +16,10 @@ fn bop(_: Input) {
         },
         0,
     );
+}
+
+fn run<F: FnOnce(Input) -> ()>(f: F, i: Input) {
+    f(i);
 }
 
 fn main() {}

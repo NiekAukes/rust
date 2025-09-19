@@ -1,6 +1,6 @@
 #![feature(no_core, unboxed_closures)]
 #![no_core]
-#![allow(dead_code)]
+#![allow(dead_code, unnecessary_transmutes)]
 
 extern crate mini_core;
 
@@ -11,11 +11,7 @@ fn abc(a: u8) -> u8 {
 }
 
 fn bcd(b: bool, a: u8) -> u8 {
-    if b {
-        a * 2
-    } else {
-        a * 3
-    }
+    if b { a * 2 } else { a * 3 }
 }
 
 fn call() {
@@ -153,10 +149,9 @@ fn array_as_slice(arr: &[u8; 3]) -> &[u8] {
     arr
 }
 
-// FIXME: fix the intrinsic implementation to work with the new ->u32 signature
-// unsafe fn use_ctlz_nonzero(a: u16) -> u32 {
-//     intrinsics::ctlz_nonzero(a)
-// }
+unsafe fn use_ctlz_nonzero(a: u16) -> u32 {
+    intrinsics::ctlz_nonzero(a)
+}
 
 fn ptr_as_usize(ptr: *const u8) -> usize {
     ptr as usize

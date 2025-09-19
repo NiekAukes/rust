@@ -1,8 +1,11 @@
-use crate::def_id::{DefId, DefIndex, LocalDefId, CRATE_DEF_ID};
+use std::fmt::{self, Debug};
+
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher, StableOrd, ToStableHashKey};
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
-use rustc_span::{def_id::DefPathHash, HashStableContext};
-use std::fmt::{self, Debug};
+use rustc_span::HashStableContext;
+use rustc_span::def_id::DefPathHash;
+
+use crate::def_id::{CRATE_DEF_ID, DefId, DefIndex, LocalDefId};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Encodable, Decodable)]
 pub struct OwnerId {
@@ -80,6 +83,12 @@ pub struct HirId {
     pub local_id: ItemLocalId,
 }
 
+// To ensure correctness of incremental compilation,
+// `HirId` must not implement `Ord` or `PartialOrd`.
+// See https://github.com/rust-lang/rust/issues/90317.
+impl !Ord for HirId {}
+impl !PartialOrd for HirId {}
+
 impl Debug for HirId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Example: HirId(DefId(0:1 ~ aa[7697]::{use#0}).10)
@@ -113,27 +122,11 @@ impl HirId {
     pub fn make_owner(owner: LocalDefId) -> Self {
         Self { owner: OwnerId { def_id: owner }, local_id: ItemLocalId::ZERO }
     }
-
-    pub fn index(self) -> (usize, usize) {
-        (rustc_index::Idx::index(self.owner.def_id), rustc_index::Idx::index(self.local_id))
-    }
 }
 
 impl fmt::Display for HirId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
-    }
-}
-
-impl Ord for HirId {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.index()).cmp(&(other.index()))
-    }
-}
-
-impl PartialOrd for HirId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -165,10 +158,12 @@ impl ItemLocalId {
     pub const INVALID: ItemLocalId = ItemLocalId::MAX;
 }
 
-// Safety: Ord is implement as just comparing the ItemLocalId's numerical
-// values and these are not changed by (de-)serialization.
-unsafe impl StableOrd for ItemLocalId {
+impl StableOrd for ItemLocalId {
     const CAN_USE_UNSTABLE_SORT: bool = true;
+
+    // `Ord` is implemented as just comparing the ItemLocalId's numerical
+    // values and these are not changed by (de-)serialization.
+    const THIS_IMPLEMENTATION_HAS_BEEN_TRIPLE_CHECKED: () = ();
 }
 
 /// The `HirId` corresponding to `CRATE_NODE_ID` and `CRATE_DEF_ID`.

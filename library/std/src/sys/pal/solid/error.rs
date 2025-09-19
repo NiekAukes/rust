@@ -1,7 +1,7 @@
-use super::{abi, itron, net};
+pub use self::itron::error::{ItronError as SolidError, expect_success};
+use super::{abi, itron};
 use crate::io::ErrorKind;
-
-pub use self::itron::error::{expect_success, ItronError as SolidError};
+use crate::sys::net;
 
 /// Describe the specified SOLID error code. Returns `None` if it's an
 /// undefined error code.

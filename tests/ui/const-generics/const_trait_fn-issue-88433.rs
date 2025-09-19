@@ -1,6 +1,7 @@
 //@ build-pass
+//@ compile-flags: -Znext-solver
 
-#![feature(const_trait_impl, effects)]
+#![feature(const_trait_impl)]
 
 #[const_trait]
 trait Func<T> {

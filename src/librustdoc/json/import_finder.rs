@@ -1,9 +1,7 @@
 use rustc_hir::def_id::DefIdSet;
 
-use crate::{
-    clean::{self, Import, ImportSource, Item},
-    fold::DocFolder,
-};
+use crate::clean::{self, Import, ImportSource, Item};
+use crate::fold::DocFolder;
 
 /// Get the id's of all items that are `pub use`d in the crate.
 ///
@@ -26,7 +24,7 @@ struct ImportFinder {
 
 impl DocFolder for ImportFinder {
     fn fold_item(&mut self, i: Item) -> Option<Item> {
-        match *i.kind {
+        match i.kind {
             clean::ImportItem(Import { source: ImportSource { did: Some(did), .. }, .. }) => {
                 self.imported.insert(did);
                 Some(i)

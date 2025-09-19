@@ -47,7 +47,7 @@ KIND=PATH` where `KIND` may be one of:
   directory.
 - `native` — Only search for native libraries in this directory.
 - `framework` — Only search for macOS frameworks in this directory.
-- `all` — Search for all library kinds in this directory. This is the default
+- `all` — Search for all library kinds in this directory, except frameworks. This is the default
   if `KIND` is not specified.
 
 <a id="option-l-link-lib"></a>
@@ -96,9 +96,7 @@ This modifier translates to `--whole-archive` for `ld`-like linkers,
 to `/WHOLEARCHIVE` for `link.exe`, and to `-force_load` for `ld64`.
 The modifier does nothing for linkers that don't support it.
 
-The default for this modifier is `-whole-archive`. \
-NOTE: The default may currently be different in some cases for backward compatibility,
-but it is not guaranteed. If you need whole archive semantics use `+whole-archive` explicitly.
+The default for this modifier is `-whole-archive`.
 
 ### Linking modifiers: `bundle`
 
@@ -181,7 +179,7 @@ This informs `rustc` of the name of your crate.
 <a id="option-edition"></a>
 ## `--edition`: specify the edition to use
 
-This flag takes a value of `2015`, `2018` or `2021`. The default is `2015`. More
+This flag takes a value of `2015`, `2018`,`2021`, or `2024`. The default is `2015`. More
 information about editions may be found in the [edition guide].
 
 [edition guide]: ../edition-guide/introduction.html
@@ -213,75 +211,43 @@ The valid emit kinds are:
   `CRATE_NAME.o`.
 
 The output filename can be set with the [`-o` flag](#option-o-output). A
-suffix may be added to the filename with the [`-C extra-filename`
-flag](codegen-options/index.md#extra-filename). The files are written to the
-current directory unless the [`--out-dir` flag](#option-out-dir) is used. Each
-emission type may also specify the output filename with the form `KIND=PATH`,
-which takes precedence over the `-o` flag.
-Specifying `-o -` or `--emit KIND=-` asks rustc to emit to stdout.
-Text output types (`asm`, `dep-info`, `llvm-ir` and `mir`) can be written to
-stdout despite it being a tty or not. This will result in an error if any
-binary output type is written to stdout that is a tty.
-This will also result in an error if multiple output types
-would be written to stdout, because they would be all mixed together.
+suffix may be added to the filename with the
+[`-C extra-filename` flag](codegen-options/index.md#extra-filename).
+
+Output files are written to the current directory unless the
+[`--out-dir` flag](#option-out-dir) is used.
 
 [LLVM bitcode]: https://llvm.org/docs/BitCodeFormat.html
 [LLVM IR]: https://llvm.org/docs/LangRef.html
 
+### Custom paths for individual emit kinds
+
+Each emit type can optionally be followed by `=` to specify an explicit output
+path that only applies to the output of that type. For example:
+
+- `--emit=link,dep-info=/path/to/dep-info.d`
+  - Emit the crate itself as normal,
+    and also emit dependency info to the specified path.
+- `--emit=llvm-ir=-,mir`
+  - Emit MIR to the default filename (based on crate name),
+    and emit LLVM IR to stdout.
+
+### Emitting to stdout
+
+When using `--emit` or [`-o`](#option-o-output), output can be sent to stdout
+by specifying `-` as the path (e.g. `-o -`).
+
+Binary output types can only be written to stdout if it is not a tty.
+Text output types (`asm`, `dep-info`, `llvm-ir` and `mir`) can be written to
+stdout regardless of whether it is a tty or not.
+
+Only one type of output can be written to stdout. Attempting to write multiple
+types to stdout at the same time will result in an error.
+
 <a id="option-print"></a>
 ## `--print`: print compiler information
 
-This flag prints out various information about the compiler. This flag may be
-specified multiple times, and the information is printed in the order the
-flags are specified. Specifying a `--print` flag will usually disable the
-[`--emit`](#option-emit) step and will only print the requested information.
-The valid types of print values are:
-
-- `crate-name` — The name of the crate.
-- `file-names` — The names of the files created by the `link` emit kind.
-- `sysroot` — Path to the sysroot.
-- `target-libdir` - Path to the target libdir.
-- `cfg` — List of cfg values. See [conditional compilation] for more
-  information about cfg values.
-- `target-list` — List of known targets. The target may be selected with the
-  `--target` flag.
-- `target-cpus` — List of available CPU values for the current target. The
-  target CPU may be selected with the [`-C target-cpu=val`
-  flag](codegen-options/index.md#target-cpu).
-- `target-features` — List of available target features for the current
-  target. Target features may be enabled with the [`-C target-feature=val`
-  flag](codegen-options/index.md#target-feature).  This flag is unsafe. See
-  [known issues](targets/known-issues.md) for more details.
-- `relocation-models` — List of relocation models. Relocation models may be
-  selected with the [`-C relocation-model=val`
-  flag](codegen-options/index.md#relocation-model).
-- `code-models` — List of code models. Code models may be selected with the
-  [`-C code-model=val` flag](codegen-options/index.md#code-model).
-- `tls-models` — List of Thread Local Storage models supported. The model may
-  be selected with the `-Z tls-model=val` flag.
-- `native-static-libs` — This may be used when creating a `staticlib` crate
-  type. If this is the only flag, it will perform a full compilation and
-  include a diagnostic note that indicates the linker flags to use when
-  linking the resulting static library. The note starts with the text
-  `native-static-libs:` to make it easier to fetch the output.
-- `link-args` — This flag does not disable the `--emit` step. When linking,
-  this flag causes `rustc` to print the full linker invocation in a
-  human-readable form. This can be useful when debugging linker options. The
-  exact format of this debugging output is not a stable guarantee, other than
-  that it will include the linker executable and the text of each command-line
-  argument passed to the linker.
-- `deployment-target` - The currently selected [deployment target] (or minimum OS version)
-  for the selected Apple platform target. This value can be used or passed along to other
-  components alongside a Rust build that need this information, such as C compilers.
-  This returns rustc's minimum supported deployment target if no `*_DEPLOYMENT_TARGET` variable
-  is present in the environment, or otherwise returns the variable's parsed value.
-
-A filepath may optionally be specified for each requested information kind, in
-the format `--print KIND=PATH`, just like for `--emit`. When a path is
-specified, information will be written there instead of to stdout.
-
-[conditional compilation]: ../reference/conditional-compilation.html
-[deployment target]: https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/cross_development/Configuring/configuring.html
+This flag will allow you to set [print options](command-line-arguments/print-options.md).
 
 <a id="option-g-debug"></a>
 ## `-g`: include debug information
@@ -291,7 +257,7 @@ A synonym for [`-C debuginfo=2`](codegen-options/index.md#debuginfo).
 <a id="option-o-optimize"></a>
 ## `-O`: optimize your code
 
-A synonym for [`-C opt-level=2`](codegen-options/index.md#opt-level).
+A synonym for [`-C opt-level=3`](codegen-options/index.md#opt-level).
 
 <a id="option-o-output"></a>
 ## `-o`: filename of the output
@@ -504,6 +470,9 @@ to customize the output:
 
 - `future-incompat` - includes a JSON message that contains a report if the
   crate contains any code that may fail to compile in the future.
+
+- `timings` - output a JSON message when a certain compilation "section"
+  (such as frontend analysis, code generation, linking) begins or ends.
 
 Note that it is invalid to combine the `--json` argument with the
 [`--color`](#option-color) argument, and it is required to combine `--json`

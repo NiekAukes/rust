@@ -1,81 +1,80 @@
-use rustc_index::IndexSlice;
-use rustc_middle::mir::patch::MirPatch;
-use rustc_middle::mir::*;
-use rustc_middle::ty::{ParamEnv, ScalarInt, Ty, TyCtxt};
-use rustc_target::abi::Size;
 use std::iter;
 
+use rustc_abi::Integer;
+use rustc_index::IndexSlice;
+use rustc_middle::mir::*;
+use rustc_middle::ty::layout::{IntegerExt, TyAndLayout};
+use rustc_middle::ty::{self, ScalarInt, Ty, TyCtxt};
+use tracing::instrument;
+
 use super::simplify::simplify_cfg;
+use crate::patch::MirPatch;
 
-pub struct MatchBranchSimplification;
+pub(super) struct MatchBranchSimplification;
 
-impl<'tcx> MirPass<'tcx> for MatchBranchSimplification {
+impl<'tcx> crate::MirPass<'tcx> for MatchBranchSimplification {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
         sess.mir_opt_level() >= 1
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        let def_id = body.source.def_id();
-        let param_env = tcx.param_env_reveal_all_normalized(def_id);
-
-        let mut should_cleanup = false;
-        for i in 0..body.basic_blocks.len() {
-            let bbs = &*body.basic_blocks;
-            let bb_idx = BasicBlock::from_usize(i);
-            if !tcx.consider_optimizing(|| format!("MatchBranchSimplification {def_id:?} ")) {
-                continue;
-            }
-
-            match bbs[bb_idx].terminator().kind {
+        let typing_env = body.typing_env(tcx);
+        let mut apply_patch = false;
+        let mut patch = MirPatch::new(body);
+        for (bb, bb_data) in body.basic_blocks.iter_enumerated() {
+            match &bb_data.terminator().kind {
                 TerminatorKind::SwitchInt {
-                    discr: ref _discr @ (Operand::Copy(_) | Operand::Move(_)),
-                    ref targets,
+                    discr: Operand::Copy(_) | Operand::Move(_),
+                    targets,
                     ..
                     // We require that the possible target blocks don't contain this block.
-                } if !targets.all_targets().contains(&bb_idx) => {}
+                } if !targets.all_targets().contains(&bb) => {}
                 // Only optimize switch int statements
                 _ => continue,
             };
 
-            if SimplifyToIf.simplify(tcx, body, bb_idx, param_env).is_some() {
-                should_cleanup = true;
+            if SimplifyToIf.simplify(tcx, body, &mut patch, bb, typing_env).is_some() {
+                apply_patch = true;
                 continue;
             }
-            // unsound: https://github.com/rust-lang/rust/issues/124150
-            if tcx.sess.opts.unstable_opts.unsound_mir_opts
-                && SimplifyToExp::default().simplify(tcx, body, bb_idx, param_env).is_some()
-            {
-                should_cleanup = true;
+            if SimplifyToExp::default().simplify(tcx, body, &mut patch, bb, typing_env).is_some() {
+                apply_patch = true;
                 continue;
             }
         }
 
-        if should_cleanup {
-            simplify_cfg(body);
+        if apply_patch {
+            patch.apply(body);
+            simplify_cfg(tcx, body);
         }
+    }
+
+    fn is_required(&self) -> bool {
+        false
     }
 }
 
 trait SimplifyMatch<'tcx> {
-    /// Simplifies a match statement, returning true if the simplification succeeds, false otherwise.
-    /// Generic code is written here, and we generally don't need a custom implementation.
+    /// Simplifies a match statement, returning `Some` if the simplification succeeds, `None`
+    /// otherwise. Generic code is written here, and we generally don't need a custom
+    /// implementation.
     fn simplify(
         &mut self,
         tcx: TyCtxt<'tcx>,
-        body: &mut Body<'tcx>,
+        body: &Body<'tcx>,
+        patch: &mut MirPatch<'tcx>,
         switch_bb_idx: BasicBlock,
-        param_env: ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
     ) -> Option<()> {
         let bbs = &body.basic_blocks;
-        let (discr, targets) = match bbs[switch_bb_idx].terminator().kind {
-            TerminatorKind::SwitchInt { ref discr, ref targets, .. } => (discr, targets),
-            _ => unreachable!(),
+        let TerminatorKind::SwitchInt { discr, targets, .. } =
+            &bbs[switch_bb_idx].terminator().kind
+        else {
+            unreachable!();
         };
 
         let discr_ty = discr.ty(body.local_decls(), tcx);
-        self.can_simplify(tcx, targets, param_env, bbs, discr_ty)?;
-
-        let mut patch = MirPatch::new(body);
+        self.can_simplify(tcx, targets, typing_env, bbs, discr_ty)?;
 
         // Take ownership of items now that we know we can optimize.
         let discr = discr.clone();
@@ -89,10 +88,9 @@ trait SimplifyMatch<'tcx> {
         let parent_end = Location { block: switch_bb_idx, statement_index };
         patch.add_statement(parent_end, StatementKind::StorageLive(discr_local));
         patch.add_assign(parent_end, Place::from(discr_local), Rvalue::Use(discr));
-        self.new_stmts(tcx, targets, param_env, &mut patch, parent_end, bbs, discr_local, discr_ty);
+        self.new_stmts(tcx, targets, typing_env, patch, parent_end, bbs, discr_local, discr_ty);
         patch.add_statement(parent_end, StatementKind::StorageDead(discr_local));
         patch.patch_terminator(switch_bb_idx, bbs[first].terminator().kind.clone());
-        patch.apply(body);
         Some(())
     }
 
@@ -103,7 +101,7 @@ trait SimplifyMatch<'tcx> {
         &mut self,
         tcx: TyCtxt<'tcx>,
         targets: &SwitchTargets,
-        param_env: ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         bbs: &IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
         discr_ty: Ty<'tcx>,
     ) -> Option<()>;
@@ -112,7 +110,7 @@ trait SimplifyMatch<'tcx> {
         &self,
         tcx: TyCtxt<'tcx>,
         targets: &SwitchTargets,
-        param_env: ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         patch: &mut MirPatch<'tcx>,
         parent_end: Location,
         bbs: &IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
@@ -155,20 +153,24 @@ struct SimplifyToIf;
 /// }
 /// ```
 impl<'tcx> SimplifyMatch<'tcx> for SimplifyToIf {
+    #[instrument(level = "debug", skip(self, tcx), ret)]
     fn can_simplify(
         &mut self,
         tcx: TyCtxt<'tcx>,
         targets: &SwitchTargets,
-        param_env: ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         bbs: &IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
         _discr_ty: Ty<'tcx>,
     ) -> Option<()> {
-        if targets.iter().len() != 1 {
-            return None;
-        }
+        let (first, second) = match targets.all_targets() {
+            &[first, otherwise] => (first, otherwise),
+            &[first, second, otherwise] if bbs[otherwise].is_empty_unreachable() => (first, second),
+            _ => {
+                return None;
+            }
+        };
+
         // We require that the possible target blocks all be distinct.
-        let (_, first) = targets.iter().next().unwrap();
-        let second = targets.otherwise();
         if first == second {
             return None;
         }
@@ -196,8 +198,8 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToIf {
                 ) if lhs_f == lhs_s
                     && f_c.const_.ty().is_bool()
                     && s_c.const_.ty().is_bool()
-                    && f_c.const_.try_eval_bool(tcx, param_env).is_some()
-                    && s_c.const_.try_eval_bool(tcx, param_env).is_some() => {}
+                    && f_c.const_.try_eval_bool(tcx, typing_env).is_some()
+                    && s_c.const_.try_eval_bool(tcx, typing_env).is_some() => {}
 
                 // Otherwise we cannot optimize. Try another block.
                 _ => return None,
@@ -210,15 +212,21 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToIf {
         &self,
         tcx: TyCtxt<'tcx>,
         targets: &SwitchTargets,
-        param_env: ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         patch: &mut MirPatch<'tcx>,
         parent_end: Location,
         bbs: &IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
         discr_local: Local,
         discr_ty: Ty<'tcx>,
     ) {
-        let (val, first) = targets.iter().next().unwrap();
-        let second = targets.otherwise();
+        let ((val, first), second) = match (targets.all_targets(), targets.all_values()) {
+            (&[first, otherwise], &[val]) => ((val, first), otherwise),
+            (&[first, second, otherwise], &[val, _]) if bbs[otherwise].is_empty_unreachable() => {
+                ((val, first), second)
+            }
+            _ => unreachable!(),
+        };
+
         // We already checked that first and second are different blocks,
         // and bb_idx has a different terminator from both of them.
         let first = &bbs[first];
@@ -234,14 +242,15 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToIf {
                     StatementKind::Assign(box (_, Rvalue::Use(Operand::Constant(s_c)))),
                 ) => {
                     // From earlier loop we know that we are dealing with bool constants only:
-                    let f_b = f_c.const_.try_eval_bool(tcx, param_env).unwrap();
-                    let s_b = s_c.const_.try_eval_bool(tcx, param_env).unwrap();
+                    let f_b = f_c.const_.try_eval_bool(tcx, typing_env).unwrap();
+                    let s_b = s_c.const_.try_eval_bool(tcx, typing_env).unwrap();
                     if f_b == s_b {
                         // Same value in both blocks. Use statement as is.
                         patch.add_statement(parent_end, f.kind.clone());
                     } else {
-                        // Different value between blocks. Make value conditional on switch condition.
-                        let size = tcx.layout_of(param_env.and(discr_ty)).unwrap().size;
+                        // Different value between blocks. Make value conditional on switch
+                        // condition.
+                        let size = tcx.layout_of(typing_env.as_query_input(discr_ty)).unwrap().size;
                         let const_cmp = Operand::const_from_scalar(
                             tcx,
                             discr_ty,
@@ -263,33 +272,58 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToIf {
     }
 }
 
-#[derive(Default)]
-struct SimplifyToExp {
-    transfrom_types: Vec<TransfromType>,
+/// Check if the cast constant using `IntToInt` is equal to the target constant.
+fn can_cast(
+    tcx: TyCtxt<'_>,
+    src_val: impl Into<u128>,
+    src_layout: TyAndLayout<'_>,
+    cast_ty: Ty<'_>,
+    target_scalar: ScalarInt,
+) -> bool {
+    let from_scalar = ScalarInt::try_from_uint(src_val.into(), src_layout.size).unwrap();
+    let v = match src_layout.ty.kind() {
+        ty::Uint(_) => from_scalar.to_uint(src_layout.size),
+        ty::Int(_) => from_scalar.to_int(src_layout.size) as u128,
+        // We can also transform the values of other integer representations (such as char),
+        // although this may not be practical in real-world scenarios.
+        _ => return false,
+    };
+    let size = match *cast_ty.kind() {
+        ty::Int(t) => Integer::from_int_ty(&tcx, t).size(),
+        ty::Uint(t) => Integer::from_uint_ty(&tcx, t).size(),
+        _ => return false,
+    };
+    let v = size.truncate(v);
+    let cast_scalar = ScalarInt::try_from_uint(v, size).unwrap();
+    cast_scalar == target_scalar
 }
 
-#[derive(Clone, Copy)]
-enum CompareType<'tcx, 'a> {
+#[derive(Default)]
+struct SimplifyToExp {
+    transform_kinds: Vec<TransformKind>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExpectedTransformKind<'a, 'tcx> {
     /// Identical statements.
     Same(&'a StatementKind<'tcx>),
     /// Assignment statements have the same value.
-    Eq(&'a Place<'tcx>, Ty<'tcx>, ScalarInt),
+    SameByEq { place: &'a Place<'tcx>, ty: Ty<'tcx>, scalar: ScalarInt },
     /// Enum variant comparison type.
-    Discr { place: &'a Place<'tcx>, ty: Ty<'tcx>, is_signed: bool },
+    Cast { place: &'a Place<'tcx>, ty: Ty<'tcx> },
 }
 
-enum TransfromType {
+enum TransformKind {
     Same,
-    Eq,
-    Discr,
+    Cast,
 }
 
-impl From<CompareType<'_, '_>> for TransfromType {
-    fn from(compare_type: CompareType<'_, '_>) -> Self {
+impl From<ExpectedTransformKind<'_, '_>> for TransformKind {
+    fn from(compare_type: ExpectedTransformKind<'_, '_>) -> Self {
         match compare_type {
-            CompareType::Same(_) => TransfromType::Same,
-            CompareType::Eq(_, _, _) => TransfromType::Eq,
-            CompareType::Discr { .. } => TransfromType::Discr,
+            ExpectedTransformKind::Same(_) => TransformKind::Same,
+            ExpectedTransformKind::SameByEq { .. } => TransformKind::Same,
+            ExpectedTransformKind::Cast { .. } => TransformKind::Cast,
         }
     }
 }
@@ -334,11 +368,12 @@ impl From<CompareType<'_, '_>> for TransfromType {
 /// }
 /// ```
 impl<'tcx> SimplifyMatch<'tcx> for SimplifyToExp {
+    #[instrument(level = "debug", skip(self, tcx), ret)]
     fn can_simplify(
         &mut self,
         tcx: TyCtxt<'tcx>,
         targets: &SwitchTargets,
-        param_env: ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         bbs: &IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
         discr_ty: Ty<'tcx>,
     ) -> Option<()> {
@@ -353,7 +388,7 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToExp {
             return None;
         }
         let mut target_iter = targets.iter();
-        let (first_val, first_target) = target_iter.next().unwrap();
+        let (first_case_val, first_target) = target_iter.next().unwrap();
         let first_terminator_kind = &bbs[first_target].terminator().kind;
         // Check that destinations are identical, and if not, then don't optimize this block
         if !targets
@@ -363,26 +398,24 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToExp {
             return None;
         }
 
-        let discr_size = tcx.layout_of(param_env.and(discr_ty)).unwrap().size;
+        let discr_layout = tcx.layout_of(typing_env.as_query_input(discr_ty)).unwrap();
         let first_stmts = &bbs[first_target].statements;
-        let (second_val, second_target) = target_iter.next().unwrap();
+        let (second_case_val, second_target) = target_iter.next().unwrap();
         let second_stmts = &bbs[second_target].statements;
         if first_stmts.len() != second_stmts.len() {
             return None;
         }
 
-        fn int_equal(l: ScalarInt, r: impl Into<u128>, size: Size) -> bool {
-            l.assert_int(l.size()) == ScalarInt::try_from_uint(r, size).unwrap().assert_int(size)
-        }
-
-        // We first compare the two branches, and then the other branches need to fulfill the same conditions.
-        let mut compare_types = Vec::new();
+        // We first compare the two branches, and then the other branches need to fulfill the same
+        // conditions.
+        let mut expected_transform_kinds = Vec::new();
         for (f, s) in iter::zip(first_stmts, second_stmts) {
             let compare_type = match (&f.kind, &s.kind) {
                 // If two statements are exactly the same, we can optimize.
-                (f_s, s_s) if f_s == s_s => CompareType::Same(f_s),
+                (f_s, s_s) if f_s == s_s => ExpectedTransformKind::Same(f_s),
 
-                // If two statements are assignments with the match values to the same place, we can optimize.
+                // If two statements are assignments with the match values to the same place, we
+                // can optimize.
                 (
                     StatementKind::Assign(box (lhs_f, Rvalue::Use(Operand::Constant(f_c)))),
                     StatementKind::Assign(box (lhs_s, Rvalue::Use(Operand::Constant(s_c)))),
@@ -391,25 +424,32 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToExp {
                     && f_c.const_.ty().is_integral() =>
                 {
                     match (
-                        f_c.const_.try_eval_scalar_int(tcx, param_env),
-                        s_c.const_.try_eval_scalar_int(tcx, param_env),
+                        f_c.const_.try_eval_scalar_int(tcx, typing_env),
+                        s_c.const_.try_eval_scalar_int(tcx, typing_env),
                     ) {
-                        (Some(f), Some(s)) if f == s => CompareType::Eq(lhs_f, f_c.const_.ty(), f),
-                        // Enum variants can also be simplified to an assignment statement if their values are equal.
-                        // We need to consider both unsigned and signed scenarios here.
+                        (Some(f), Some(s)) if f == s => ExpectedTransformKind::SameByEq {
+                            place: lhs_f,
+                            ty: f_c.const_.ty(),
+                            scalar: f,
+                        },
+                        // Enum variants can also be simplified to an assignment statement,
+                        // if we can use `IntToInt` cast to get an equal value.
                         (Some(f), Some(s))
-                            if ((f_c.const_.ty().is_signed() || discr_ty.is_signed())
-                                && int_equal(f, first_val, discr_size)
-                                && int_equal(s, second_val, discr_size))
-                                || (Some(f) == ScalarInt::try_from_uint(first_val, f.size())
-                                    && Some(s)
-                                        == ScalarInt::try_from_uint(second_val, s.size())) =>
+                            if (can_cast(
+                                tcx,
+                                first_case_val,
+                                discr_layout,
+                                f_c.const_.ty(),
+                                f,
+                            ) && can_cast(
+                                tcx,
+                                second_case_val,
+                                discr_layout,
+                                f_c.const_.ty(),
+                                s,
+                            )) =>
                         {
-                            CompareType::Discr {
-                                place: lhs_f,
-                                ty: f_c.const_.ty(),
-                                is_signed: f_c.const_.ty().is_signed() || discr_ty.is_signed(),
-                            }
+                            ExpectedTransformKind::Cast { place: lhs_f, ty: f_c.const_.ty() }
                         }
                         _ => {
                             return None;
@@ -420,47 +460,36 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToExp {
                 // Otherwise we cannot optimize. Try another block.
                 _ => return None,
             };
-            compare_types.push(compare_type);
+            expected_transform_kinds.push(compare_type);
         }
 
         // All remaining BBs need to fulfill the same pattern as the two BBs from the previous step.
         for (other_val, other_target) in target_iter {
             let other_stmts = &bbs[other_target].statements;
-            if compare_types.len() != other_stmts.len() {
+            if expected_transform_kinds.len() != other_stmts.len() {
                 return None;
             }
-            for (f, s) in iter::zip(&compare_types, other_stmts) {
+            for (f, s) in iter::zip(&expected_transform_kinds, other_stmts) {
                 match (*f, &s.kind) {
-                    (CompareType::Same(f_s), s_s) if f_s == s_s => {}
+                    (ExpectedTransformKind::Same(f_s), s_s) if f_s == s_s => {}
                     (
-                        CompareType::Eq(lhs_f, f_ty, val),
+                        ExpectedTransformKind::SameByEq { place: lhs_f, ty: f_ty, scalar },
                         StatementKind::Assign(box (lhs_s, Rvalue::Use(Operand::Constant(s_c)))),
                     ) if lhs_f == lhs_s
                         && s_c.const_.ty() == f_ty
-                        && s_c.const_.try_eval_scalar_int(tcx, param_env) == Some(val) => {}
+                        && s_c.const_.try_eval_scalar_int(tcx, typing_env) == Some(scalar) => {}
                     (
-                        CompareType::Discr { place: lhs_f, ty: f_ty, is_signed },
+                        ExpectedTransformKind::Cast { place: lhs_f, ty: f_ty },
                         StatementKind::Assign(box (lhs_s, Rvalue::Use(Operand::Constant(s_c)))),
-                    ) if lhs_f == lhs_s && s_c.const_.ty() == f_ty => {
-                        let Some(f) = s_c.const_.try_eval_scalar_int(tcx, param_env) else {
-                            return None;
-                        };
-                        if is_signed
-                            && s_c.const_.ty().is_signed()
-                            && int_equal(f, other_val, discr_size)
-                        {
-                            continue;
-                        }
-                        if Some(f) == ScalarInt::try_from_uint(other_val, f.size()) {
-                            continue;
-                        }
-                        return None;
-                    }
+                    ) if let Some(f) = s_c.const_.try_eval_scalar_int(tcx, typing_env)
+                        && lhs_f == lhs_s
+                        && s_c.const_.ty() == f_ty
+                        && can_cast(tcx, other_val, discr_layout, f_ty, f) => {}
                     _ => return None,
                 }
             }
         }
-        self.transfrom_types = compare_types.into_iter().map(|c| c.into()).collect();
+        self.transform_kinds = expected_transform_kinds.into_iter().map(|c| c.into()).collect();
         Some(())
     }
 
@@ -468,7 +497,7 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToExp {
         &self,
         _tcx: TyCtxt<'tcx>,
         targets: &SwitchTargets,
-        _param_env: ParamEnv<'tcx>,
+        _typing_env: ty::TypingEnv<'tcx>,
         patch: &mut MirPatch<'tcx>,
         parent_end: Location,
         bbs: &IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
@@ -478,13 +507,13 @@ impl<'tcx> SimplifyMatch<'tcx> for SimplifyToExp {
         let (_, first) = targets.iter().next().unwrap();
         let first = &bbs[first];
 
-        for (t, s) in iter::zip(&self.transfrom_types, &first.statements) {
+        for (t, s) in iter::zip(&self.transform_kinds, &first.statements) {
             match (t, &s.kind) {
-                (TransfromType::Same, _) | (TransfromType::Eq, _) => {
+                (TransformKind::Same, _) => {
                     patch.add_statement(parent_end, s.kind.clone());
                 }
                 (
-                    TransfromType::Discr,
+                    TransformKind::Cast,
                     StatementKind::Assign(box (lhs, Rvalue::Use(Operand::Constant(f_c)))),
                 ) => {
                     let operand = Operand::Copy(Place::from(discr_local));

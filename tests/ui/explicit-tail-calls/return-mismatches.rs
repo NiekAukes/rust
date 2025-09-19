@@ -1,4 +1,4 @@
-#![allow(incomplete_features)]
+#![expect(incomplete_features)]
 #![feature(explicit_tail_calls)]
 
 fn _f0<'a>() -> &'static [u8] {
@@ -13,7 +13,7 @@ fn _f1() {
     become _g1(); //~ error: mismatched types
 }
 
-fn _g1() -> ! { //~ WARN: cannot return without recursing
+fn _g1() -> ! {
     become _g1();
 }
 

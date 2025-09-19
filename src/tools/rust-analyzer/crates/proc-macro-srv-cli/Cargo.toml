@@ -1,16 +1,19 @@
 [package]
 name = "proc-macro-srv-cli"
 version = "0.0.0"
-description = "TBD"
+repository.workspace = true
+description = "A standalone binary for the `proc-macro-srv` crate of rust-analyzer."
 
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 proc-macro-srv.workspace = true
 proc-macro-api.workspace = true
+tt.workspace = true
 
 [features]
 sysroot-abi = ["proc-macro-srv/sysroot-abi"]

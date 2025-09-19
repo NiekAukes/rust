@@ -1,9 +1,28 @@
-use crate::elaborate_drops::DropFlagState;
+use rustc_abi::VariantIdx;
 use rustc_middle::mir::{self, Body, Location, Terminator, TerminatorKind};
-use rustc_target::abi::VariantIdx;
+use tracing::debug;
 
 use super::move_paths::{InitKind, LookupResult, MoveData, MovePathIndex};
-use super::MoveDataParamEnv;
+
+/// The value of an inserted drop flag.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum DropFlagState {
+    /// The tracked value is initialized and needs to be dropped when leaving its scope.
+    Present,
+
+    /// The tracked value is uninitialized or was moved out of and does not need to be dropped when
+    /// leaving its scope.
+    Absent,
+}
+
+impl DropFlagState {
+    pub fn value(self) -> bool {
+        match self {
+            DropFlagState::Present => true,
+            DropFlagState::Absent => false,
+        }
+    }
+}
 
 pub fn move_path_children_matching<'tcx, F>(
     move_data: &MoveData<'tcx>,
@@ -69,12 +88,11 @@ pub fn on_all_children_bits<'tcx, F>(
 
 pub fn drop_flag_effects_for_function_entry<'tcx, F>(
     body: &Body<'tcx>,
-    ctxt: &MoveDataParamEnv<'tcx>,
+    move_data: &MoveData<'tcx>,
     mut callback: F,
 ) where
     F: FnMut(MovePathIndex, DropFlagState),
 {
-    let move_data = &ctxt.move_data;
     for arg in body.args_iter() {
         let place = mir::Place::from(arg);
         let lookup_result = move_data.rev_lookup.find(place.as_ref());
@@ -86,13 +104,12 @@ pub fn drop_flag_effects_for_function_entry<'tcx, F>(
 
 pub fn drop_flag_effects_for_location<'tcx, F>(
     body: &Body<'tcx>,
-    ctxt: &MoveDataParamEnv<'tcx>,
+    move_data: &MoveData<'tcx>,
     loc: Location,
     mut callback: F,
 ) where
     F: FnMut(MovePathIndex, DropFlagState),
 {
-    let move_data = &ctxt.move_data;
     debug!("drop_flag_effects_for_location({:?})", loc);
 
     // first, move out of the RHS

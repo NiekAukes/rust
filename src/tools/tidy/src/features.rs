@@ -9,13 +9,13 @@
 //! * All unstable lang features have tests to ensure they are actually unstable.
 //! * Language features in a group are sorted by feature name.
 
-use crate::walk::{filter_dirs, filter_not_rust, walk, walk_many};
 use std::collections::hash_map::{Entry, HashMap};
 use std::ffi::OsStr;
-use std::fmt;
-use std::fs;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::{fmt, fs};
+
+use crate::walk::{filter_dirs, filter_not_rust, walk, walk_many};
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +27,7 @@ const FEATURE_GROUP_START_PREFIX: &str = "// feature-group-start";
 const FEATURE_GROUP_END_PREFIX: &str = "// feature-group-end";
 
 #[derive(Debug, PartialEq, Clone)]
+#[cfg_attr(feature = "build-metrics", derive(serde::Serialize))]
 pub enum Status {
     Accepted,
     Removed,
@@ -45,6 +46,7 @@ impl fmt::Display for Status {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "build-metrics", derive(serde::Serialize))]
 pub struct Feature {
     pub level: Status,
     pub since: Option<Version>,
@@ -52,6 +54,7 @@ pub struct Feature {
     pub tracking_issue: Option<NonZeroU32>,
     pub file: PathBuf,
     pub line: usize,
+    pub description: Option<String>,
 }
 impl Feature {
     fn tracking_issue_display(&self) -> impl fmt::Display {
@@ -112,7 +115,7 @@ pub fn check(
             let file = entry.path();
             let filename = file.file_name().unwrap().to_string_lossy();
             let filen_underscore = filename.replace('-', "_").replace(".rs", "");
-            let filename_is_gate_test = test_filen_gate(&filen_underscore, &mut features);
+            let filename_gate = test_filen_gate(&filen_underscore, &mut features);
 
             for (i, line) in contents.lines().enumerate() {
                 let mut err = |msg: &str| {
@@ -128,7 +131,7 @@ pub fn check(
                 };
                 match features.get_mut(feature_name) {
                     Some(f) => {
-                        if filename_is_gate_test {
+                        if filename_gate == Some(feature_name) {
                             err(&format!(
                                 "The file is already marked as gate test \
                                       through its name, no need for a \
@@ -259,18 +262,18 @@ fn find_attr_val<'a>(line: &'a str, attr: &str) -> Option<&'a str> {
     r.captures(line).and_then(|c| c.get(1)).map(|m| m.as_str())
 }
 
-fn test_filen_gate(filen_underscore: &str, features: &mut Features) -> bool {
+fn test_filen_gate<'f>(filen_underscore: &'f str, features: &mut Features) -> Option<&'f str> {
     let prefix = "feature_gate_";
-    if filen_underscore.starts_with(prefix) {
+    if let Some(suffix) = filen_underscore.strip_prefix(prefix) {
         for (n, f) in features.iter_mut() {
             // Equivalent to filen_underscore == format!("feature_gate_{n}")
-            if &filen_underscore[prefix.len()..] == n {
+            if suffix == n {
                 f.has_gate_test = true;
-                return true;
+                return Some(suffix);
             }
         }
     }
-    false
+    None
 }
 
 pub fn collect_lang_features(base_compiler_path: &Path, bad: &mut bool) -> Features {
@@ -294,6 +297,7 @@ fn collect_lang_features_in(features: &mut Features, base: &Path, file: &str, ba
     let mut prev_names = vec![];
 
     let lines = contents.lines().zip(1..);
+    let mut doc_comments: Vec<String> = Vec::new();
     for (line, line_number) in lines {
         let line = line.trim();
 
@@ -328,6 +332,13 @@ fn collect_lang_features_in(features: &mut Features, base: &Path, file: &str, ba
             in_feature_group = false;
             prev_names = vec![];
             continue;
+        }
+
+        if in_feature_group {
+            if let Some(doc_comment) = line.strip_prefix("///") {
+                doc_comments.push(doc_comment.trim().to_string());
+                continue;
+            }
         }
 
         let mut parts = line.split(',');
@@ -436,9 +447,15 @@ fn collect_lang_features_in(features: &mut Features, base: &Path, file: &str, ba
                     tracking_issue,
                     file: path.to_path_buf(),
                     line: line_number,
+                    description: if doc_comments.is_empty() {
+                        None
+                    } else {
+                        Some(doc_comments.join(" "))
+                    },
                 });
             }
         }
+        doc_comments.clear();
     }
 }
 
@@ -455,9 +472,10 @@ fn get_and_check_lib_features(
                     if f.tracking_issue != s.tracking_issue && f.level != Status::Accepted {
                         tidy_error!(
                             bad,
-                            "{}:{}: `issue` \"{}\" mismatches the {} `issue` of \"{}\"",
+                            "{}:{}: feature gate {} has inconsistent `issue`: \"{}\" mismatches the {} `issue` of \"{}\"",
                             file.display(),
                             line,
+                            name,
                             f.tracking_issue_display(),
                             display,
                             s.tracking_issue_display(),
@@ -561,6 +579,7 @@ fn map_lib_features(
                         tracking_issue: find_attr_val(line, "issue").and_then(handle_issue_none),
                         file: file.to_path_buf(),
                         line: i + 1,
+                        description: None,
                     };
                     mf(Ok((feature_name, feature)), file, i + 1);
                     continue;
@@ -597,6 +616,7 @@ fn map_lib_features(
                     tracking_issue,
                     file: file.to_path_buf(),
                     line: i + 1,
+                    description: None,
                 };
                 if line.contains(']') {
                     mf(Ok((feature_name, feature)), file, i + 1);

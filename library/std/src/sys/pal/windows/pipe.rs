@@ -1,18 +1,11 @@
+use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
+use crate::ops::Neg;
 use crate::os::windows::prelude::*;
-
-use crate::ffi::OsStr;
-use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
-use crate::mem;
-use crate::path::Path;
-use crate::ptr;
-use crate::slice;
-use crate::sync::atomic::AtomicUsize;
-use crate::sync::atomic::Ordering::Relaxed;
+use crate::sys::api::utf16;
 use crate::sys::c;
-use crate::sys::fs::{File, OpenOptions};
 use crate::sys::handle::Handle;
-use crate::sys::hashmap_random_keys;
 use crate::sys_common::{FromInner, IntoInner};
+use crate::{mem, ptr};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Anonymous pipes
@@ -64,110 +57,113 @@ pub fn anon_pipe(ours_readable: bool, their_handle_inheritable: bool) -> io::Res
 
     // Note that we specifically do *not* use `CreatePipe` here because
     // unfortunately the anonymous pipes returned do not support overlapped
-    // operations. Instead, we create a "hopefully unique" name and create a
-    // named pipe which has overlapped operations enabled.
+    // operations. Instead, we use `NtCreateNamedPipeFile` to create the
+    // anonymous pipe with overlapped support.
     //
-    // Once we do this, we connect do it as usual via `CreateFileW`, and then
+    // Once we do this, we connect to it via `NtOpenFile`, and then
     // we return those reader/writer halves. Note that the `ours` pipe return
     // value is always the named pipe, whereas `theirs` is just the normal file.
     // This should hopefully shield us from child processes which assume their
     // stdout is a named pipe, which would indeed be odd!
     unsafe {
-        let ours;
-        let mut name;
-        let mut tries = 0;
-        let mut reject_remote_clients_flag = c::PIPE_REJECT_REMOTE_CLIENTS;
-        loop {
-            tries += 1;
-            name = format!(
-                r"\\.\pipe\__rust_anonymous_pipe1__.{}.{}",
-                c::GetCurrentProcessId(),
-                random_number()
-            );
-            let wide_name = OsStr::new(&name).encode_wide().chain(Some(0)).collect::<Vec<_>>();
-            let mut flags = c::FILE_FLAG_FIRST_PIPE_INSTANCE | c::FILE_FLAG_OVERLAPPED;
-            if ours_readable {
-                flags |= c::PIPE_ACCESS_INBOUND;
-            } else {
-                flags |= c::PIPE_ACCESS_OUTBOUND;
-            }
+        let mut io_status = c::IO_STATUS_BLOCK::default();
+        let mut object_attributes = c::OBJECT_ATTRIBUTES::default();
+        object_attributes.Length = size_of::<c::OBJECT_ATTRIBUTES>() as u32;
 
-            let handle = c::CreateNamedPipeW(
-                wide_name.as_ptr(),
-                flags,
-                c::PIPE_TYPE_BYTE
-                    | c::PIPE_READMODE_BYTE
-                    | c::PIPE_WAIT
-                    | reject_remote_clients_flag,
+        // Open a handle to the pipe filesystem (`\??\PIPE\`).
+        // This will be used when creating a new annon pipe.
+        let pipe_fs = {
+            let path = c::UNICODE_STRING::from_ref(utf16!(r"\??\PIPE\"));
+            object_attributes.ObjectName = &path;
+            let mut pipe_fs = ptr::null_mut();
+            let status = c::NtOpenFile(
+                &mut pipe_fs,
+                c::SYNCHRONIZE | c::GENERIC_READ,
+                &object_attributes,
+                &mut io_status,
+                c::FILE_SHARE_READ | c::FILE_SHARE_WRITE,
+                c::FILE_SYNCHRONOUS_IO_NONALERT, // synchronous access
+            );
+            if c::nt_success(status) {
+                Handle::from_raw_handle(pipe_fs)
+            } else {
+                return Err(io::Error::from_raw_os_error(c::RtlNtStatusToDosError(status) as i32));
+            }
+        };
+
+        // From now on we're using handles instead of paths to create and open pipes.
+        // So set the `ObjectName` to a zero length string.
+        let empty = c::UNICODE_STRING::default();
+        object_attributes.ObjectName = &empty;
+
+        // Create our side of the pipe for async access.
+        let ours = {
+            // Use the pipe filesystem as the root directory.
+            // With no name provided, an anonymous pipe will be created.
+            object_attributes.RootDirectory = pipe_fs.as_raw_handle();
+
+            // A negative timeout value is a relative time (rather than an absolute time).
+            // The time is given in 100's of nanoseconds so this is 50 milliseconds.
+            // This value was chosen to be consistent with the default timeout set by `CreateNamedPipeW`
+            // See: https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew
+            let timeout = (50_i64 * 10000).neg() as u64;
+
+            let mut ours = ptr::null_mut();
+            let status = c::NtCreateNamedPipeFile(
+                &mut ours,
+                c::SYNCHRONIZE | if ours_readable { c::GENERIC_READ } else { c::GENERIC_WRITE },
+                &object_attributes,
+                &mut io_status,
+                if ours_readable { c::FILE_SHARE_WRITE } else { c::FILE_SHARE_READ },
+                c::FILE_CREATE,
+                0,
+                c::FILE_PIPE_BYTE_STREAM_TYPE,
+                c::FILE_PIPE_BYTE_STREAM_MODE,
+                c::FILE_PIPE_QUEUE_OPERATION,
+                // only allow one client pipe
                 1,
                 PIPE_BUFFER_CAPACITY,
                 PIPE_BUFFER_CAPACITY,
-                0,
-                ptr::null_mut(),
+                &timeout,
             );
-
-            // We pass the `FILE_FLAG_FIRST_PIPE_INSTANCE` flag above, and we're
-            // also just doing a best effort at selecting a unique name. If
-            // `ERROR_ACCESS_DENIED` is returned then it could mean that we
-            // accidentally conflicted with an already existing pipe, so we try
-            // again.
-            //
-            // Don't try again too much though as this could also perhaps be a
-            // legit error.
-            // If `ERROR_INVALID_PARAMETER` is returned, this probably means we're
-            // running on pre-Vista version where `PIPE_REJECT_REMOTE_CLIENTS` is
-            // not supported, so we continue retrying without it. This implies
-            // reduced security on Windows versions older than Vista by allowing
-            // connections to this pipe from remote machines.
-            // Proper fix would increase the number of FFI imports and introduce
-            // significant amount of Windows XP specific code with no clean
-            // testing strategy
-            // For more info, see https://github.com/rust-lang/rust/pull/37677.
-            if handle == c::INVALID_HANDLE_VALUE {
-                let err = io::Error::last_os_error();
-                let raw_os_err = err.raw_os_error();
-                if tries < 10 {
-                    if raw_os_err == Some(c::ERROR_ACCESS_DENIED as i32) {
-                        continue;
-                    } else if reject_remote_clients_flag != 0
-                        && raw_os_err == Some(c::ERROR_INVALID_PARAMETER as i32)
-                    {
-                        reject_remote_clients_flag = 0;
-                        tries -= 1;
-                        continue;
-                    }
-                }
-                return Err(err);
+            if c::nt_success(status) {
+                Handle::from_raw_handle(ours)
+            } else {
+                return Err(io::Error::from_raw_os_error(c::RtlNtStatusToDosError(status) as i32));
             }
-            ours = Handle::from_raw_handle(handle);
-            break;
-        }
-
-        // Connect to the named pipe we just created. This handle is going to be
-        // returned in `theirs`, so if `ours` is readable we want this to be
-        // writable, otherwise if `ours` is writable we want this to be
-        // readable.
-        //
-        // Additionally we don't enable overlapped mode on this because most
-        // client processes aren't enabled to work with that.
-        let mut opts = OpenOptions::new();
-        opts.write(ours_readable);
-        opts.read(!ours_readable);
-        opts.share_mode(0);
-        let size = mem::size_of::<c::SECURITY_ATTRIBUTES>();
-        let mut sa = c::SECURITY_ATTRIBUTES {
-            nLength: size as c::DWORD,
-            lpSecurityDescriptor: ptr::null_mut(),
-            bInheritHandle: their_handle_inheritable as i32,
         };
-        opts.security_attributes(&mut sa);
-        let theirs = File::open(Path::new(&name), &opts)?;
-        let theirs = AnonPipe { inner: theirs.into_inner() };
 
-        Ok(Pipes {
-            ours: AnonPipe { inner: ours },
-            theirs: AnonPipe { inner: theirs.into_inner() },
-        })
+        // Open their side of the pipe for synchronous access.
+        let theirs = {
+            // We can reopen the anonymous pipe without a name by setting
+            // RootDirectory to the pipe handle and not setting a path name,
+            object_attributes.RootDirectory = ours.as_raw_handle();
+
+            if their_handle_inheritable {
+                object_attributes.Attributes |= c::OBJ_INHERIT;
+            }
+            let mut theirs = ptr::null_mut();
+            let status = c::NtOpenFile(
+                &mut theirs,
+                c::SYNCHRONIZE
+                    | if ours_readable {
+                        c::GENERIC_WRITE | c::FILE_READ_ATTRIBUTES
+                    } else {
+                        c::GENERIC_READ
+                    },
+                &object_attributes,
+                &mut io_status,
+                0,
+                c::FILE_NON_DIRECTORY_FILE | c::FILE_SYNCHRONOUS_IO_NONALERT,
+            );
+            if c::nt_success(status) {
+                Handle::from_raw_handle(theirs)
+            } else {
+                return Err(io::Error::from_raw_os_error(c::RtlNtStatusToDosError(status) as i32));
+            }
+        };
+
+        Ok(Pipes { ours: AnonPipe { inner: ours }, theirs: AnonPipe { inner: theirs } })
     }
 }
 
@@ -182,7 +178,7 @@ pub fn spawn_pipe_relay(
     their_handle_inheritable: bool,
 ) -> io::Result<AnonPipe> {
     // We need this handle to live for the lifetime of the thread spawned below.
-    let source = source.duplicate()?;
+    let source = source.try_clone()?;
 
     // create a new pair of anon pipes.
     let Pipes { theirs, ours } = anon_pipe(ours_readable, their_handle_inheritable)?;
@@ -211,26 +207,6 @@ pub fn spawn_pipe_relay(
     Ok(theirs)
 }
 
-fn random_number() -> usize {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    loop {
-        if N.load(Relaxed) != 0 {
-            return N.fetch_add(1, Relaxed);
-        }
-
-        N.store(hashmap_random_keys().0 as usize, Relaxed);
-    }
-}
-
-// Abstracts over `ReadFileEx` and `WriteFileEx`
-type AlertableIoFn = unsafe extern "system" fn(
-    BorrowedHandle<'_>,
-    c::LPVOID,
-    c::DWORD,
-    c::LPOVERLAPPED,
-    c::LPOVERLAPPED_COMPLETION_ROUTINE,
-) -> c::BOOL;
-
 impl AnonPipe {
     pub fn handle(&self) -> &Handle {
         &self.inner
@@ -238,14 +214,18 @@ impl AnonPipe {
     pub fn into_handle(self) -> Handle {
         self.inner
     }
-    fn duplicate(&self) -> io::Result<Self> {
+
+    pub fn try_clone(&self) -> io::Result<Self> {
         self.inner.duplicate(0, false, c::DUPLICATE_SAME_ACCESS).map(|inner| AnonPipe { inner })
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         let result = unsafe {
-            let len = crate::cmp::min(buf.len(), c::DWORD::MAX as usize) as c::DWORD;
-            self.alertable_io_internal(c::ReadFileEx, buf.as_mut_ptr() as _, len)
+            let len = crate::cmp::min(buf.len(), u32::MAX as usize) as u32;
+            let ptr = buf.as_mut_ptr();
+            self.alertable_io_internal(|overlapped, callback| {
+                c::ReadFileEx(self.inner.as_raw_handle(), ptr, len, overlapped, callback)
+            })
         };
 
         match result {
@@ -260,8 +240,11 @@ impl AnonPipe {
 
     pub fn read_buf(&self, mut buf: BorrowedCursor<'_>) -> io::Result<()> {
         let result = unsafe {
-            let len = crate::cmp::min(buf.capacity(), c::DWORD::MAX as usize) as c::DWORD;
-            self.alertable_io_internal(c::ReadFileEx, buf.as_mut().as_mut_ptr() as _, len)
+            let len = crate::cmp::min(buf.capacity(), u32::MAX as usize) as u32;
+            let ptr = buf.as_mut().as_mut_ptr().cast::<u8>();
+            self.alertable_io_internal(|overlapped, callback| {
+                c::ReadFileEx(self.inner.as_raw_handle(), ptr, len, overlapped, callback)
+            })
         };
 
         match result {
@@ -295,8 +278,10 @@ impl AnonPipe {
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         unsafe {
-            let len = crate::cmp::min(buf.len(), c::DWORD::MAX as usize) as c::DWORD;
-            self.alertable_io_internal(c::WriteFileEx, buf.as_ptr() as _, len)
+            let len = crate::cmp::min(buf.len(), u32::MAX as usize) as u32;
+            self.alertable_io_internal(|overlapped, callback| {
+                c::WriteFileEx(self.inner.as_raw_handle(), buf.as_ptr(), len, overlapped, callback)
+            })
         }
     }
 
@@ -326,9 +311,7 @@ impl AnonPipe {
     /// [Asynchronous Procedure Call]: https://docs.microsoft.com/en-us/windows/win32/sync/asynchronous-procedure-calls
     unsafe fn alertable_io_internal(
         &self,
-        io: AlertableIoFn,
-        buf: c::LPVOID,
-        len: c::DWORD,
+        io: impl FnOnce(&mut c::OVERLAPPED, c::LPOVERLAPPED_COMPLETION_ROUTINE) -> c::BOOL,
     ) -> io::Result<usize> {
         // Use "alertable I/O" to synchronize the pipe I/O.
         // This has four steps.
@@ -366,20 +349,25 @@ impl AnonPipe {
             lpOverlapped: *mut c::OVERLAPPED,
         ) {
             // Set `async_result` using a pointer smuggled through `hEvent`.
-            let result =
-                AsyncResult { error: dwErrorCode, transferred: dwNumberOfBytesTransferred };
-            *(*lpOverlapped).hEvent.cast::<Option<AsyncResult>>() = Some(result);
+            // SAFETY:
+            // At this point, the OVERLAPPED struct will have been written to by the OS,
+            // except for our `hEvent` field which we set to a valid AsyncResult pointer (see below)
+            unsafe {
+                let result =
+                    AsyncResult { error: dwErrorCode, transferred: dwNumberOfBytesTransferred };
+                *(*lpOverlapped).hEvent.cast::<Option<AsyncResult>>() = Some(result);
+            }
         }
 
         // STEP 1: Start the I/O operation.
-        let mut overlapped: c::OVERLAPPED = crate::mem::zeroed();
+        let mut overlapped: c::OVERLAPPED = unsafe { crate::mem::zeroed() };
         // `hEvent` is unused by `ReadFileEx` and `WriteFileEx`.
         // Therefore the documentation suggests using it to smuggle a pointer to the callback.
-        overlapped.hEvent = core::ptr::addr_of_mut!(async_result) as *mut _;
+        overlapped.hEvent = (&raw mut async_result) as *mut _;
 
         // Asynchronous read of the pipe.
         // If successful, `callback` will be called once it completes.
-        let result = io(self.inner.as_handle(), buf, len, &mut overlapped, Some(callback));
+        let result = io(&mut overlapped, Some(callback));
         if result == c::FALSE {
             // We can return here because the call failed.
             // After this we must not return until the I/O completes.
@@ -390,7 +378,7 @@ impl AnonPipe {
         let result = loop {
             // STEP 2: Enter an alertable state.
             // The second parameter of `SleepEx` is used to make this sleep alertable.
-            c::SleepEx(c::INFINITE, c::TRUE);
+            unsafe { c::SleepEx(c::INFINITE, c::TRUE) };
             if let Some(result) = async_result {
                 break result;
             }
@@ -478,8 +466,11 @@ impl<'a> AsyncPipe<'a> {
     fn schedule_read(&mut self) -> io::Result<bool> {
         assert_eq!(self.state, State::NotReading);
         let amt = unsafe {
-            let slice = slice_to_end(self.dst);
-            self.pipe.read_overlapped(slice, &mut *self.overlapped)?
+            if self.dst.capacity() == self.dst.len() {
+                let additional = if self.dst.capacity() == 0 { 16 } else { 1 };
+                self.dst.reserve(additional);
+            }
+            self.pipe.read_overlapped(self.dst.spare_capacity_mut(), &mut *self.overlapped)?
         };
 
         // If this read finished immediately then our overlapped event will
@@ -558,14 +549,4 @@ impl<'a> Drop for AsyncPipe<'a> {
             mem::forget((buf, overlapped));
         }
     }
-}
-
-unsafe fn slice_to_end(v: &mut Vec<u8>) -> &mut [u8] {
-    if v.capacity() == 0 {
-        v.reserve(16);
-    }
-    if v.capacity() == v.len() {
-        v.reserve(1);
-    }
-    slice::from_raw_parts_mut(v.as_mut_ptr().add(v.len()), v.capacity() - v.len())
 }

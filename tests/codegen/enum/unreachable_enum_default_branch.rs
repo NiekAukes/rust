@@ -1,4 +1,4 @@
-//@ compile-flags: -O
+//@ compile-flags: -Copt-level=3
 
 #![crate_type = "lib"]
 
@@ -22,22 +22,19 @@ const C: Int = Int(153);
 // CHECK-NEXT:    ret i1 [[SPEC_SELECT]]
 #[no_mangle]
 pub fn implicit_match(x: Int) -> bool {
-    (x >= A && x <= B)
-        || x == C
+    (x >= A && x <= B) || x == C
 }
 
 // The code is from https://github.com/rust-lang/rust/issues/110097.
 // We expect it to generate the same optimized code as a full match.
 // CHECK-LABEL: @if_let(
-// CHECK-NEXT:  start:
+// CHECK: start:
+// CHECK-NOT: zext
+// CHECK: select
 // CHECK-NEXT: insertvalue
 // CHECK-NEXT: insertvalue
 // CHECK-NEXT: ret
 #[no_mangle]
 pub fn if_let(val: Result<i32, ()>) -> Result<i32, ()> {
-    if let Ok(x) = val {
-        Ok(x)
-    } else {
-        Err(())
-    }
+    if let Ok(x) = val { Ok(x * 2) } else { Err(()) }
 }

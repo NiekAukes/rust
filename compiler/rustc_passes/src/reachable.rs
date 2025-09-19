@@ -1,30 +1,43 @@
-//! Finds local items that are externally reachable, which means that other crates need access to
-//! their compiled machine code or their MIR.
+//! Finds local items that are "reachable", which means that other crates need access to their
+//! compiled code or their *runtime* MIR. (Compile-time MIR is always encoded anyway, so we don't
+//! worry about that here.)
 //!
-//! An item is "externally reachable" if it is relevant for other crates. This obviously includes
-//! all public items. However, some of these items cannot be compiled to machine code (because they
-//! are generic), and for some the machine code is not sufficient (because we want to cross-crate
-//! inline them). These items "need cross-crate MIR". When a reachable function `f` needs
-//! cross-crate MIR, then all the functions it calls also become reachable, as they will be
-//! necessary to use the MIR of `f` from another crate. Furthermore, an item can become "externally
-//! reachable" by having a `const`/`const fn` return a pointer to that item, so we also need to
-//! recurse into reachable `const`/`const fn`.
+//! An item is "reachable" if codegen that happens in downstream crates can end up referencing this
+//! item. This obviously includes all public items. However, some of these items cannot be codegen'd
+//! (because they are generic), and for some the compiled code is not sufficient (because we want to
+//! cross-crate inline them). These items "need cross-crate MIR". When a reachable function `f`
+//! needs cross-crate MIR, then its MIR may be codegen'd in a downstream crate, and hence items it
+//! mentions need to be considered reachable.
+//!
+//! Furthermore, if a `const`/`const fn` is reachable, then it can return pointers to other items,
+//! making those reachable as well. For instance, consider a `const fn` returning a pointer to an
+//! otherwise entirely private function: if a downstream crate calls that `const fn` to compute the
+//! initial value of a `static`, then it needs to generate a direct reference to this function --
+//! i.e., the function is directly reachable from that downstream crate! Hence we have to recurse
+//! into `const` and `const fn`.
+//!
+//! Conversely, reachability *stops* when it hits a monomorphic non-`const` function that we do not
+//! want to cross-crate inline. That function will just be codegen'd in this crate, which means the
+//! monomorphization collector will consider it a root and then do another graph traversal to
+//! codegen everything called by this function -- but that's a very different graph from what we are
+//! considering here as at that point, everything is monomorphic.
 
 use hir::def_id::LocalDefIdSet;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir as hir;
+use rustc_hir::Node;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
-use rustc_hir::Node;
 use rustc_middle::bug;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::middle::privacy::{self, Level};
-use rustc_middle::mir::interpret::{ConstAllocation, GlobalAlloc};
+use rustc_middle::mir::interpret::{ConstAllocation, ErrorHandled, GlobalAlloc};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, ExistentialTraitRef, TyCtxt};
 use rustc_privacy::DefIdVisitor;
 use rustc_session::config::CrateType;
+use tracing::debug;
 
 /// Determines whether this item is recursive for reachability. See `is_recursively_reachable_local`
 /// below for details.
@@ -53,7 +66,7 @@ impl<'tcx> Visitor<'tcx> for ReachableContext<'tcx> {
     fn visit_nested_body(&mut self, body: hir::BodyId) {
         let old_maybe_typeck_results =
             self.maybe_typeck_results.replace(self.tcx.typeck_body(body));
-        let body = self.tcx.hir().body(body);
+        let body = self.tcx.hir_body(body);
         self.visit_body(body);
         self.maybe_typeck_results = old_maybe_typeck_results;
     }
@@ -128,7 +141,7 @@ impl<'tcx> ReachableContext<'tcx> {
 
         match self.tcx.hir_node_by_def_id(def_id) {
             Node::Item(item) => match item.kind {
-                hir::ItemKind::Fn(..) => recursively_reachable(self.tcx, def_id.into()),
+                hir::ItemKind::Fn { .. } => recursively_reachable(self.tcx, def_id.into()),
                 _ => false,
             },
             Node::TraitItem(trait_method) => match trait_method.kind {
@@ -144,6 +157,7 @@ impl<'tcx> ReachableContext<'tcx> {
                 }
                 hir::ImplItemKind::Type(_) => false,
             },
+            Node::Expr(&hir::Expr { kind: hir::ExprKind::Closure(..), .. }) => true,
             _ => false,
         }
     }
@@ -170,9 +184,7 @@ impl<'tcx> ReachableContext<'tcx> {
                 CodegenFnAttrs::EMPTY
             };
             let is_extern = codegen_attrs.contains_extern_indicator();
-            let std_internal =
-                codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL);
-            if is_extern || std_internal {
+            if is_extern {
                 self.reachable_symbols.insert(search_item);
             }
         } else {
@@ -186,17 +198,30 @@ impl<'tcx> ReachableContext<'tcx> {
         match *node {
             Node::Item(item) => {
                 match item.kind {
-                    hir::ItemKind::Fn(.., body) => {
+                    hir::ItemKind::Fn { body, .. } => {
                         if recursively_reachable(self.tcx, item.owner_id.into()) {
                             self.visit_nested_body(body);
                         }
                     }
 
-                    // Reachable constants will be inlined into other crates
-                    // unconditionally, so we need to make sure that their
-                    // contents are also reachable.
-                    hir::ItemKind::Const(_, _, init) => {
-                        self.visit_nested_body(init);
+                    hir::ItemKind::Const(_, _, _, init) => {
+                        // Only things actually ending up in the final constant value are reachable
+                        // for codegen. Everything else is only needed during const-eval, so even if
+                        // const-eval happens in a downstream crate, all they need is
+                        // `mir_for_ctfe`.
+                        match self.tcx.const_eval_poly_to_alloc(item.owner_id.def_id.into()) {
+                            Ok(alloc) => {
+                                let alloc = self.tcx.global_alloc(alloc.alloc_id).unwrap_memory();
+                                self.propagate_from_alloc(alloc);
+                            }
+                            // We can't figure out which value the constant will evaluate to. In
+                            // lieu of that, we have to consider everything mentioned in the const
+                            // initializer reachable, since it *may* end up in the final value.
+                            Err(ErrorHandled::TooGeneric(_)) => self.visit_nested_body(init),
+                            // If there was an error evaluating the const, nothing can be reachable
+                            // via it, and anyway compilation will fail.
+                            Err(ErrorHandled::Reported(..)) => {}
+                        }
                     }
                     hir::ItemKind::Static(..) => {
                         if let Ok(alloc) = self.tcx.eval_static_initializer(item.owner_id.def_id) {
@@ -207,9 +232,8 @@ impl<'tcx> ReachableContext<'tcx> {
                     // These are normal, nothing reachable about these
                     // inherently and their children are already in the
                     // worklist, as determined by the privacy pass
-                    hir::ItemKind::ExternCrate(_)
+                    hir::ItemKind::ExternCrate(..)
                     | hir::ItemKind::Use(..)
-                    | hir::ItemKind::OpaqueTy(..)
                     | hir::ItemKind::TyAlias(..)
                     | hir::ItemKind::Macro(..)
                     | hir::ItemKind::Mod(..)
@@ -220,7 +244,7 @@ impl<'tcx> ReachableContext<'tcx> {
                     | hir::ItemKind::Struct(..)
                     | hir::ItemKind::Enum(..)
                     | hir::ItemKind::Union(..)
-                    | hir::ItemKind::GlobalAsm(..) => {}
+                    | hir::ItemKind::GlobalAsm { .. } => {}
                 }
             }
             Node::TraitItem(trait_method) => {
@@ -260,11 +284,12 @@ impl<'tcx> ReachableContext<'tcx> {
             | Node::Field(_)
             | Node::Ty(_)
             | Node::Crate(_)
-            | Node::Synthetic => {}
+            | Node::Synthetic
+            | Node::OpaqueTy(..) => {}
             _ => {
                 bug!(
                     "found unexpected node kind in worklist: {} ({:?})",
-                    self.tcx.hir().node_to_string(self.tcx.local_def_id_to_hir_id(search_item)),
+                    self.tcx.hir_id_to_string(self.tcx.local_def_id_to_hir_id(search_item)),
                     node,
                 );
             }
@@ -283,7 +308,7 @@ impl<'tcx> ReachableContext<'tcx> {
                 GlobalAlloc::Static(def_id) => {
                     self.propagate_item(Res::Def(self.tcx.def_kind(def_id), def_id))
                 }
-                GlobalAlloc::Function(instance) => {
+                GlobalAlloc::Function { instance, .. } => {
                     // Manually visit to actually see the instance's `DefId`. Type visitors won't see it
                     self.propagate_item(Res::Def(
                         self.tcx.def_kind(instance.def_id()),
@@ -291,11 +316,11 @@ impl<'tcx> ReachableContext<'tcx> {
                     ));
                     self.visit(instance.args);
                 }
-                GlobalAlloc::VTable(ty, trait_ref) => {
+                GlobalAlloc::VTable(ty, dyn_ty) => {
                     self.visit(ty);
                     // Manually visit to actually see the trait's `DefId`. Type visitors won't see it
-                    if let Some(trait_ref) = trait_ref {
-                        let ExistentialTraitRef { def_id, args } = trait_ref.skip_binder();
+                    if let Some(trait_ref) = dyn_ty.principal() {
+                        let ExistentialTraitRef { def_id, args, .. } = trait_ref.skip_binder();
                         self.visit_def_id(def_id, "", &"");
                         self.visit(args);
                     }
@@ -399,11 +424,10 @@ fn has_custom_linkage(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
     }
     let codegen_attrs = tcx.codegen_fn_attrs(def_id);
     codegen_attrs.contains_extern_indicator()
-        || codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)
         // FIXME(nbdd0121): `#[used]` are marked as reachable here so it's picked up by
         // `linked_symbols` in cg_ssa. They won't be exported in binary or cdylib due to their
         // `SymbolExportLevel::Rust` export level but may end up being exported in dylibs.
-        || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED)
+        || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER)
         || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
 }
 
@@ -411,10 +435,12 @@ fn has_custom_linkage(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
 fn reachable_set(tcx: TyCtxt<'_>, (): ()) -> LocalDefIdSet {
     let effective_visibilities = &tcx.effective_visibilities(());
 
-    let any_library = tcx
-        .crate_types()
-        .iter()
-        .any(|ty| *ty == CrateType::Rlib || *ty == CrateType::Dylib || *ty == CrateType::ProcMacro);
+    let any_library = tcx.crate_types().iter().any(|ty| {
+        *ty == CrateType::Rlib
+            || *ty == CrateType::Dylib
+            || *ty == CrateType::ProcMacro
+            || *ty == CrateType::Sdylib
+    });
     let mut reachable_context = ReachableContext {
         tcx,
         maybe_typeck_results: None,
@@ -473,6 +499,6 @@ fn reachable_set(tcx: TyCtxt<'_>, (): ()) -> LocalDefIdSet {
     reachable_context.reachable_symbols
 }
 
-pub fn provide(providers: &mut Providers) {
+pub(crate) fn provide(providers: &mut Providers) {
     *providers = Providers { reachable_set, ..*providers };
 }

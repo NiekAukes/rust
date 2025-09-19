@@ -1,5 +1,5 @@
+//@ edition: 2015
 //@ check-pass
-//@ pretty-expanded FIXME #23616
 
 trait Foo {
     #[allow(anonymous_parameters)]

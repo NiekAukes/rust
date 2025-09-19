@@ -1,4 +1,4 @@
-//@no-rustfix
+//@no-rustfix: suggestions reference out of scope lifetimes/types
 //@aux-build:proc_macros.rs
 #![warn(clippy::into_iter_without_iter)]
 extern crate proc_macros;
@@ -7,7 +7,7 @@ use std::iter::IntoIterator;
 
 pub struct S1;
 impl<'a> IntoIterator for &'a S1 {
-    //~^ ERROR: `IntoIterator` implemented for a reference type without an `iter` method
+    //~^ into_iter_without_iter
     type IntoIter = std::slice::Iter<'a, u8>;
     type Item = &'a u8;
     fn into_iter(self) -> Self::IntoIter {
@@ -15,7 +15,7 @@ impl<'a> IntoIterator for &'a S1 {
     }
 }
 impl<'a> IntoIterator for &'a mut S1 {
-    //~^ ERROR: `IntoIterator` implemented for a reference type without an `iter_mut` method
+    //~^ into_iter_without_iter
     type IntoIter = std::slice::IterMut<'a, u8>;
     type Item = &'a mut u8;
     fn into_iter(self) -> Self::IntoIter {
@@ -25,7 +25,7 @@ impl<'a> IntoIterator for &'a mut S1 {
 
 pub struct S2<T>(T);
 impl<'a, T> IntoIterator for &'a S2<T> {
-    //~^ ERROR: `IntoIterator` implemented for a reference type without an `iter` method
+    //~^ into_iter_without_iter
     type IntoIter = std::slice::Iter<'a, T>;
     type Item = &'a T;
     fn into_iter(self) -> Self::IntoIter {
@@ -33,7 +33,7 @@ impl<'a, T> IntoIterator for &'a S2<T> {
     }
 }
 impl<'a, T> IntoIterator for &'a mut S2<T> {
-    //~^ ERROR: `IntoIterator` implemented for a reference type without an `iter_mut` method
+    //~^ into_iter_without_iter
     type IntoIter = std::slice::IterMut<'a, T>;
     type Item = &'a mut T;
     fn into_iter(self) -> Self::IntoIter {
@@ -84,7 +84,7 @@ impl<'a, T> IntoIterator for &S4<'a, T> {
 }
 
 impl<'a, T> IntoIterator for &mut S4<'a, T> {
-    //~^ ERROR: `IntoIterator` implemented for a reference type without an `iter_mut` method
+    //~^ into_iter_without_iter
     type IntoIter = std::slice::IterMut<'a, T>;
     type Item = &'a mut T;
     fn into_iter(self) -> Self::IntoIter {
@@ -118,6 +118,7 @@ pub struct Issue12037;
 macro_rules! generate_impl {
     () => {
         impl<'a> IntoIterator for &'a Issue12037 {
+            //~^ into_iter_without_iter
             type IntoIter = std::slice::Iter<'a, u8>;
             type Item = &'a u8;
             fn into_iter(self) -> Self::IntoIter {
@@ -182,6 +183,45 @@ pub mod issue11635 {
 
         fn into_iter(self) -> Self::IntoIter {
             self.0.iter()
+        }
+    }
+}
+
+pub mod issue12964 {
+    pub struct MyIter<'a, T: 'a> {
+        iter: std::slice::Iter<'a, T>,
+    }
+
+    impl<'a, T> Iterator for MyIter<'a, T> {
+        type Item = &'a T;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.iter.next()
+        }
+    }
+
+    pub struct MyContainer<T> {
+        inner: Vec<T>,
+    }
+
+    impl<T> MyContainer<T> {}
+
+    impl<T> MyContainer<T> {
+        #[must_use]
+        pub fn iter(&self) -> MyIter<'_, T> {
+            <&Self as IntoIterator>::into_iter(self)
+        }
+    }
+
+    impl<'a, T> IntoIterator for &'a MyContainer<T> {
+        type Item = &'a T;
+
+        type IntoIter = MyIter<'a, T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            Self::IntoIter {
+                iter: self.inner.as_slice().iter(),
+            }
         }
     }
 }

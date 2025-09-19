@@ -36,13 +36,14 @@ ast_lowering_bad_return_type_notation_inputs =
     argument types not allowed with return type notation
     .suggestion = remove the input types
 
+ast_lowering_bad_return_type_notation_needs_dots = return type notation arguments must be elided with `..`
+    .suggestion = use the correct syntax by adding `..` to the arguments
+
 ast_lowering_bad_return_type_notation_output =
     return type not allowed with return type notation
-    .suggestion = remove the return type
+ast_lowering_bad_return_type_notation_output_suggestion = use the right argument notation and remove the return type
 
-ast_lowering_base_expression_double_dot =
-    base expression required after `..`
-    .suggestion = add a base expression here
+ast_lowering_bad_return_type_notation_position = return type notation not allowed in this position yet
 
 ast_lowering_clobber_abi_not_supported =
     `clobber_abi` is not supported on this target
@@ -51,6 +52,9 @@ ast_lowering_closure_cannot_be_static = closures cannot be static
 
 ast_lowering_coroutine_too_many_parameters =
     too many parameters for a coroutine (expected 0 or 1 parameters)
+
+ast_lowering_default_field_in_tuple = default fields are not supported in tuple structs
+    .label = default fields are only supported on structs
 
 ast_lowering_does_not_support_modifiers =
     the `{$class_name}` register class does not support template modifiers
@@ -78,13 +82,13 @@ ast_lowering_inline_asm_unsupported_target =
 ast_lowering_invalid_abi =
     invalid ABI: found `{$abi}`
     .label = invalid ABI
-    .note = invoke `{$command}` for a full list of supported calling conventions.
+    .note = invoke `{$command}` for a full list of supported calling conventions
 
 ast_lowering_invalid_abi_clobber_abi =
     invalid ABI for `clobber_abi`
     .note = the following ABIs are supported on this target: {$supported_abis}
 
-ast_lowering_invalid_abi_suggestion = did you mean
+ast_lowering_invalid_abi_suggestion = there's a similarly named valid ABI `{$suggestion}`
 
 ast_lowering_invalid_asm_template_modifier_const =
     asm template modifiers are not allowed for `const` arguments
@@ -98,11 +102,18 @@ ast_lowering_invalid_asm_template_modifier_reg_class =
 ast_lowering_invalid_asm_template_modifier_sym =
     asm template modifiers are not allowed for `sym` arguments
 
+ast_lowering_invalid_legacy_const_generic_arg =
+    invalid argument to a legacy const generic: cannot have const blocks, closures, async blocks or items
+
+ast_lowering_invalid_legacy_const_generic_arg_suggestion =
+    try using a const generic argument instead
+
 ast_lowering_invalid_register =
     invalid register `{$reg}`: {$error}
 
 ast_lowering_invalid_register_class =
-    invalid register class `{$reg_class}`: {$error}
+    invalid register class `{$reg_class}`: unknown register class
+    .note = the following register classes are supported on this target: {$supported_register_classes}
 
 ast_lowering_match_arm_with_no_body =
     `match` arm with no body
@@ -128,7 +139,7 @@ ast_lowering_never_pattern_with_guard =
     a guard on a never pattern will never be run
     .suggestion = remove this guard
 
-ast_lowering_no_precise_captures_on_apit = `use<...>` precise capturing syntax not allowed on argument-position `impl Trait`
+ast_lowering_no_precise_captures_on_apit = `use<...>` precise capturing syntax not allowed in argument-position `impl Trait`
 
 ast_lowering_previously_used_here = previously used here
 
@@ -138,6 +149,8 @@ ast_lowering_register2 = register `{$reg2_name}`
 
 ast_lowering_register_class_only_clobber =
     register class `{$reg_class_name}` can only be used as a clobber, not as an input or output
+ast_lowering_register_class_only_clobber_stable =
+    register class `{$reg_class_name}` can only be used as a clobber in stable
 
 ast_lowering_register_conflict =
     register `{$reg1_name}` conflicts with register `{$reg2_name}`
@@ -163,7 +176,16 @@ ast_lowering_underscore_expr_lhs_assign =
     in expressions, `_` can only be used on the left-hand side of an assignment
     .label = `_` not allowed here
 
+ast_lowering_union_default_field_values = unions cannot have default field values
+
+ast_lowering_unstable_inline_assembly = inline assembly is not stable yet on this architecture
+ast_lowering_unstable_inline_assembly_label_operand_with_outputs =
+    using both label and output operands for inline assembly is unstable
+ast_lowering_unstable_may_unwind = the `may_unwind` option is unstable
+
 ast_lowering_use_angle_brackets = use angle brackets instead
+
+ast_lowering_yield = yield syntax is experimental
 ast_lowering_yield_in_closure =
     `yield` can only be used in `#[coroutine]` closures, or `gen` blocks
     .suggestion = use `#[coroutine]` to make this closure a coroutine

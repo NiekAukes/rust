@@ -5,6 +5,7 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     set_rerun();
     set_commit_info();
+    println!("cargo::rustc-check-cfg=cfg(rust_analyzer)");
     if option_env!("CFG_RELEASE").is_none() {
         println!("cargo:rustc-env=POKE_RA_DEVS=1");
     }
@@ -31,6 +32,7 @@ fn set_rerun() {
 }
 
 fn set_commit_info() {
+    #[allow(clippy::disallowed_methods)]
     let output = match Command::new("git")
         .arg("log")
         .arg("-1")

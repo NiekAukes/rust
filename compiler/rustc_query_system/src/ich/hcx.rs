@@ -1,15 +1,15 @@
-use crate::ich;
-
 use rustc_ast as ast;
 use rustc_data_structures::stable_hasher::{HashStable, HashingControls, StableHasher};
-use rustc_data_structures::sync::Lrc;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::definitions::DefPathHash;
-use rustc_session::cstore::Untracked;
 use rustc_session::Session;
+use rustc_session::cstore::Untracked;
 use rustc_span::source_map::SourceMap;
-use rustc_span::symbol::Symbol;
-use rustc_span::{BytePos, CachingSourceMapView, SourceFile, Span, SpanData, DUMMY_SP};
+use rustc_span::{
+    BytePos, CachingSourceMapView, DUMMY_SP, Span, SpanData, StableSourceFileId, Symbol,
+};
+
+use crate::ich;
 
 /// This is the context state available during incr. comp. hashing. It contains
 /// enough information to transform `DefId`s and `HirId`s into stable `DefPath`s (i.e.,
@@ -118,7 +118,7 @@ impl<'a> rustc_span::HashStableContext for StableHashingContext<'a> {
     fn span_data_to_lines_and_cols(
         &mut self,
         span: &SpanData,
-    ) -> Option<(Lrc<SourceFile>, usize, BytePos, usize, BytePos)> {
+    ) -> Option<(StableSourceFileId, usize, BytePos, usize, BytePos)> {
         self.source_map().span_data_to_lines_and_cols(span)
     }
 
@@ -129,3 +129,4 @@ impl<'a> rustc_span::HashStableContext for StableHashingContext<'a> {
 }
 
 impl<'a> rustc_session::HashStableContext for StableHashingContext<'a> {}
+impl<'a> rustc_attr_data_structures::HashStableContext for StableHashingContext<'a> {}

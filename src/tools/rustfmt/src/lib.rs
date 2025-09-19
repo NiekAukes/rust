@@ -5,16 +5,9 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(unreachable_pub)]
 
-#[cfg(test)]
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate tracing;
-
 // N.B. these crates are loaded from the sysroot, so they need extern crate.
 extern crate rustc_ast;
 extern crate rustc_ast_pretty;
-extern crate rustc_builtin_macros;
 extern crate rustc_data_structures;
 extern crate rustc_errors;
 extern crate rustc_expand;
@@ -51,8 +44,8 @@ use crate::shape::Indent;
 use crate::utils::indent_next_line;
 
 pub use crate::config::{
-    load_config, CliOptions, Color, Config, Edition, EmitMode, FileLines, FileName, NewlineStyle,
-    Range, Verbosity,
+    CliOptions, Color, Config, Edition, EmitMode, FileLines, FileName, NewlineStyle, Range,
+    StyleEdition, Verbosity, Version, load_config,
 };
 
 pub use crate::format_report_formatter::{FormatReportFormatter, FormatReportFormatterBuilder};
@@ -61,6 +54,13 @@ pub use crate::rustfmt_diff::{ModifiedChunk, ModifiedLines};
 
 #[macro_use]
 mod utils;
+
+macro_rules! static_regex {
+    ($re:literal) => {{
+        static RE: ::std::sync::OnceLock<::regex::Regex> = ::std::sync::OnceLock::new();
+        RE.get_or_init(|| ::regex::Regex::new($re).unwrap())
+    }};
+}
 
 mod attr;
 mod chains;
@@ -90,6 +90,7 @@ mod rewrite;
 pub(crate) mod rustfmt_diff;
 mod shape;
 mod skip;
+mod sort;
 pub(crate) mod source_file;
 pub(crate) mod source_map;
 mod spanned;
@@ -258,8 +259,8 @@ impl FormatReport {
         self.internal
             .borrow()
             .0
-            .iter()
-            .map(|(_, errors)| errors.len())
+            .values()
+            .map(|errors| errors.len())
             .sum()
     }
 
@@ -305,7 +306,7 @@ fn format_snippet(snippet: &str, config: &Config, is_macro_def: bool) -> Option<
         let mut out: Vec<u8> = Vec::with_capacity(snippet.len() * 2);
         config.set().emit_mode(config::EmitMode::Stdout);
         config.set().verbose(Verbosity::Quiet);
-        config.set().hide_parse_errors(true);
+        config.set().show_parse_errors(false);
         if is_macro_def {
             config.set().error_on_unformatted(true);
         }

@@ -1,9 +1,9 @@
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_middle::ty::{GenericArg, GenericArgKind};
+use rustc_middle::ty::{self, GenericArg, GenericArgKind, Ty, TyCtxt};
 use rustc_span::Span;
+use tracing::debug;
 
 use super::explicit::ExplicitPredicatesMap;
 use super::utils::*;
@@ -15,7 +15,7 @@ use super::utils::*;
 ///     now be filled with inferred predicates.
 pub(super) fn infer_predicates(
     tcx: TyCtxt<'_>,
-) -> FxIndexMap<DefId, ty::EarlyBinder<RequiredPredicates<'_>>> {
+) -> FxIndexMap<DefId, ty::EarlyBinder<'_, RequiredPredicates<'_>>> {
     debug!("infer_predicates");
 
     let mut explicit_map = ExplicitPredicatesMap::new();
@@ -24,11 +24,11 @@ pub(super) fn infer_predicates(
 
     // If new predicates were added then we need to re-calculate
     // all crates since there could be new implied predicates.
-    'outer: loop {
-        let mut predicates_added = false;
+    for i in 0.. {
+        let mut predicates_added = vec![];
 
         // Visit all the crates and infer predicates
-        for id in tcx.hir().items() {
+        for id in tcx.hir_free_items() {
             let item_did = id.owner_id;
 
             debug!("InferVisitor::visit_item(item={:?})", item_did);
@@ -83,14 +83,27 @@ pub(super) fn infer_predicates(
                 .get(&item_did.to_def_id())
                 .map_or(0, |p| p.as_ref().skip_binder().len());
             if item_required_predicates.len() > item_predicates_len {
-                predicates_added = true;
+                predicates_added.push(item_did);
                 global_inferred_outlives
                     .insert(item_did.to_def_id(), ty::EarlyBinder::bind(item_required_predicates));
             }
         }
 
-        if !predicates_added {
-            break 'outer;
+        if predicates_added.is_empty() {
+            // We've reached a fixed point.
+            break;
+        } else if !tcx.recursion_limit().value_within_limit(i) {
+            let msg = if let &[id] = &predicates_added[..] {
+                format!("overflow computing implied lifetime bounds for `{}`", tcx.def_path_str(id),)
+            } else {
+                "overflow computing implied lifetime bounds".to_string()
+            };
+            tcx.dcx()
+                .struct_span_fatal(
+                    predicates_added.iter().map(|id| tcx.def_span(*id)).collect::<Vec<_>>(),
+                    msg,
+                )
+                .emit();
         }
     }
 
@@ -101,12 +114,12 @@ fn insert_required_predicates_to_be_wf<'tcx>(
     tcx: TyCtxt<'tcx>,
     ty: Ty<'tcx>,
     span: Span,
-    global_inferred_outlives: &FxIndexMap<DefId, ty::EarlyBinder<RequiredPredicates<'tcx>>>,
+    global_inferred_outlives: &FxIndexMap<DefId, ty::EarlyBinder<'tcx, RequiredPredicates<'tcx>>>,
     required_predicates: &mut RequiredPredicates<'tcx>,
     explicit_map: &mut ExplicitPredicatesMap<'tcx>,
 ) {
     for arg in ty.walk() {
-        let leaf_ty = match arg.unpack() {
+        let leaf_ty = match arg.kind() {
             GenericArgKind::Type(ty) => ty,
 
             // No predicates from lifetimes or constants, except potentially
@@ -144,10 +157,10 @@ fn insert_required_predicates_to_be_wf<'tcx>(
                 );
             }
 
-            ty::Alias(ty::Weak, alias) => {
+            ty::Alias(ty::Free, alias) => {
                 // This corresponds to a type like `Type<'a, T>`.
                 // We check inferred and explicit predicates.
-                debug!("Weak");
+                debug!("Free");
                 check_inferred_predicates(
                     tcx,
                     alias.def_id,
@@ -249,7 +262,7 @@ fn check_explicit_predicates<'tcx>(
     let explicit_predicates = explicit_map.explicit_predicates_of(tcx, def_id);
 
     for (outlives_predicate, &span) in explicit_predicates.as_ref().skip_binder() {
-        debug!("outlives_predicate = {:?}", &outlives_predicate);
+        debug!("outlives_predicate = {outlives_predicate:?}");
 
         // Careful: If we are inferring the effects of a `dyn Trait<..>`
         // type, then when we look up the predicates for `Trait`,
@@ -286,15 +299,15 @@ fn check_explicit_predicates<'tcx>(
         // binding) and thus infer an outlives requirement that `X:
         // 'b`.
         if let Some(self_ty) = ignored_self_ty
-            && let GenericArgKind::Type(ty) = outlives_predicate.0.unpack()
+            && let GenericArgKind::Type(ty) = outlives_predicate.0.kind()
             && ty.walk().any(|arg| arg == self_ty.into())
         {
-            debug!("skipping self ty = {:?}", &ty);
+            debug!("skipping self ty = {ty:?}");
             continue;
         }
 
         let predicate = explicit_predicates.rebind(*outlives_predicate).instantiate(tcx, args);
-        debug!("predicate = {:?}", &predicate);
+        debug!("predicate = {predicate:?}");
         insert_outlives_predicate(tcx, predicate.0, predicate.1, span, required_predicates);
     }
 }
@@ -322,7 +335,7 @@ fn check_inferred_predicates<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
     args: ty::GenericArgsRef<'tcx>,
-    global_inferred_outlives: &FxIndexMap<DefId, ty::EarlyBinder<RequiredPredicates<'tcx>>>,
+    global_inferred_outlives: &FxIndexMap<DefId, ty::EarlyBinder<'tcx, RequiredPredicates<'tcx>>>,
     required_predicates: &mut RequiredPredicates<'tcx>,
 ) {
     // Load the current set of inferred and explicit predicates from `global_inferred_outlives`

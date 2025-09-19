@@ -1,9 +1,8 @@
-use std::env;
-use std::fs;
-use std::io;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::{env, fs, io};
 
 use crate::path::{Dirs, RelPath};
 use crate::shared_utils::rustflags_to_cmd_env;
@@ -61,6 +60,18 @@ impl Compiler {
             }
         }
     }
+
+    pub(crate) fn run_with_runner(&self, program: impl AsRef<OsStr>) -> Command {
+        if self.runner.is_empty() {
+            Command::new(program)
+        } else {
+            let mut runner_iter = self.runner.iter();
+            let mut cmd = Command::new(runner_iter.next().unwrap());
+            cmd.args(runner_iter);
+            cmd.arg(program);
+            cmd
+        }
+    }
 }
 
 pub(crate) struct CargoProject {
@@ -82,7 +93,7 @@ impl CargoProject {
     }
 
     pub(crate) fn target_dir(&self, dirs: &Dirs) -> PathBuf {
-        RelPath::BUILD.join(self.target).to_path(dirs)
+        dirs.build_dir.join(self.target)
     }
 
     #[must_use]
@@ -94,7 +105,11 @@ impl CargoProject {
             .arg(self.manifest_path(dirs))
             .arg("--target-dir")
             .arg(self.target_dir(dirs))
-            .arg("--locked");
+            .arg("--locked")
+            // bootstrap sets both RUSTC and RUSTC_WRAPPER to the same wrapper. RUSTC is already
+            // respected by the rustc-clif wrapper, but RUSTC_WRAPPER will misinterpret rustc-clif
+            // as filename, so we need to unset it.
+            .env_remove("RUSTC_WRAPPER");
 
         if dirs.frozen {
             cmd.arg("--frozen");
@@ -143,59 +158,6 @@ impl CargoProject {
     }
 }
 
-#[must_use]
-pub(crate) fn hyperfine_command(
-    warmup: u64,
-    runs: u64,
-    prepare: Option<&str>,
-    cmds: &[(&str, &str)],
-    markdown_export: &Path,
-) -> Command {
-    let mut bench = Command::new("hyperfine");
-
-    bench.arg("--export-markdown").arg(markdown_export);
-
-    if warmup != 0 {
-        bench.arg("--warmup").arg(warmup.to_string());
-    }
-
-    if runs != 0 {
-        bench.arg("--runs").arg(runs.to_string());
-    }
-
-    if let Some(prepare) = prepare {
-        bench.arg("--prepare").arg(prepare);
-    }
-
-    for &(name, cmd) in cmds {
-        if name != "" {
-            bench.arg("-n").arg(name);
-        }
-        bench.arg(cmd);
-    }
-
-    bench
-}
-
-#[must_use]
-pub(crate) fn git_command<'a>(repo_dir: impl Into<Option<&'a Path>>, cmd: &str) -> Command {
-    let mut git_cmd = Command::new("git");
-    git_cmd
-        .arg("-c")
-        .arg("user.name=Dummy")
-        .arg("-c")
-        .arg("user.email=dummy@example.com")
-        .arg("-c")
-        .arg("core.autocrlf=false")
-        .arg("-c")
-        .arg("commit.gpgSign=false")
-        .arg(cmd);
-    if let Some(repo_dir) = repo_dir.into() {
-        git_cmd.current_dir(repo_dir);
-    }
-    git_cmd
-}
-
 #[track_caller]
 pub(crate) fn try_hard_link(src: impl AsRef<Path>, dst: impl AsRef<Path>) {
     let src = src.as_ref();
@@ -214,27 +176,33 @@ pub(crate) fn spawn_and_wait(mut cmd: Command) {
     }
 }
 
-// Based on the retry function in rust's src/ci/shared.sh
-#[track_caller]
-pub(crate) fn retry_spawn_and_wait(tries: u64, mut cmd: Command) {
-    for i in 1..tries + 1 {
-        if i != 1 {
-            eprintln!("Command failed. Attempt {i}/{tries}:");
-        }
-        if cmd.spawn().unwrap().wait().unwrap().success() {
+/// Create the specified directory if it doesn't exist yet and delete all contents.
+pub(crate) fn ensure_empty_dir(path: &Path) {
+    fs::create_dir_all(path).unwrap();
+    let read_dir = match fs::read_dir(&path) {
+        Ok(read_dir) => read_dir,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_secs(i * 5));
-    }
-    eprintln!("The command has failed after {tries} attempts.");
-    process::exit(1);
-}
-
-pub(crate) fn remove_dir_if_exists(path: &Path) {
-    match fs::remove_dir_all(&path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => panic!("Failed to remove {path}: {err}", path = path.display()),
+        Err(err) => {
+            panic!("Failed to read contents of {path}: {err}", path = path.display())
+        }
+    };
+    for entry in read_dir {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            match fs::remove_dir_all(entry.path()) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => panic!("Failed to remove {path}: {err}", path = entry.path().display()),
+            }
+        } else {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => panic!("Failed to remove {path}: {err}", path = entry.path().display()),
+            }
+        }
     }
 }
 
@@ -245,11 +213,13 @@ pub(crate) fn copy_dir_recursively(from: &Path, to: &Path) {
         if filename == "." || filename == ".." {
             continue;
         }
+        let src = from.join(&filename);
+        let dst = to.join(&filename);
         if entry.metadata().unwrap().is_dir() {
-            fs::create_dir(to.join(&filename)).unwrap();
-            copy_dir_recursively(&from.join(&filename), &to.join(&filename));
+            fs::create_dir(&dst).unwrap_or_else(|e| panic!("failed to create {dst:?}: {e}"));
+            copy_dir_recursively(&src, &dst);
         } else {
-            fs::copy(from.join(&filename), to.join(&filename)).unwrap();
+            fs::copy(&src, &dst).unwrap_or_else(|e| panic!("failed to copy {src:?}->{dst:?}: {e}"));
         }
     }
 }

@@ -1,4 +1,4 @@
-use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::peel_blocks;
 use rustc_errors::Applicability;
 use rustc_hir::{Body, ExprKind, Impl, ImplItemKind, Item, ItemKind, Node};
@@ -9,7 +9,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for empty `Drop` implementations.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Empty `Drop` implementations have no effect when dropping an instance of the type. They are
     /// most likely useless. However, an empty `Drop` implementation prevents a type from being
     /// destructured, which might be the intention behind adding the implementation as a marker.
@@ -36,7 +36,7 @@ declare_lint_pass!(EmptyDrop => [EMPTY_DROP]);
 impl LateLintPass<'_> for EmptyDrop {
     fn check_item(&mut self, cx: &LateContext<'_>, item: &Item<'_>) {
         if let ItemKind::Impl(Impl {
-            of_trait: Some(ref trait_ref),
+            of_trait: Some(trait_ref),
             items: [child],
             ..
         }) = item.kind
@@ -44,21 +44,20 @@ impl LateLintPass<'_> for EmptyDrop {
             && let impl_item_hir = child.id.hir_id()
             && let Node::ImplItem(impl_item) = cx.tcx.hir_node(impl_item_hir)
             && let ImplItemKind::Fn(_, b) = &impl_item.kind
-            && let Body { value: func_expr, .. } = cx.tcx.hir().body(*b)
+            && let Body { value: func_expr, .. } = cx.tcx.hir_body(*b)
             && let func_expr = peel_blocks(func_expr)
             && let ExprKind::Block(block, _) = func_expr.kind
             && block.stmts.is_empty()
             && block.expr.is_none()
         {
-            span_lint_and_sugg(
-                cx,
-                EMPTY_DROP,
-                item.span,
-                "empty drop implementation",
-                "try removing this impl",
-                String::new(),
-                Applicability::MaybeIncorrect,
-            );
+            span_lint_and_then(cx, EMPTY_DROP, item.span, "empty drop implementation", |diag| {
+                diag.span_suggestion_hidden(
+                    item.span,
+                    "try removing this impl",
+                    String::new(),
+                    Applicability::MaybeIncorrect,
+                );
+            });
         }
     }
 }

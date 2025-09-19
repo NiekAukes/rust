@@ -28,7 +28,7 @@ impl Symbol {
         INTERNER.with_borrow_mut(|i| i.intern(string))
     }
 
-    /// Create a new `Symbol` for an identifier.
+    /// Creates a new `Symbol` for an identifier.
     ///
     /// Validates and normalizes before converting it to a symbol.
     pub(crate) fn new_ident(string: &str, is_raw: bool) -> Self {
@@ -63,7 +63,7 @@ impl Symbol {
         INTERNER.with_borrow_mut(|i| i.clear());
     }
 
-    /// Check if the ident is a valid ASCII identifier.
+    /// Checks if the ident is a valid ASCII identifier.
     ///
     /// This is a short-circuit which is cheap to implement within the
     /// proc-macro client to avoid RPC when creating simple idents, but may
@@ -76,7 +76,7 @@ impl Symbol {
                 .all(|b| matches!(b, b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
     }
 
-    // Mimics the behaviour of `Symbol::can_be_raw` from `rustc_span`
+    // Mimics the behavior of `Symbol::can_be_raw` from `rustc_span`
     fn can_be_raw(string: &str) -> bool {
         match string {
             "_" | "super" | "self" | "Self" | "crate" => false,
@@ -88,12 +88,6 @@ impl Symbol {
 impl fmt::Debug for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.with(|s| fmt::Debug::fmt(s, f))
-    }
-}
-
-impl ToString for Symbol {
-    fn to_string(&self) -> String {
-        self.with(|s| s.to_owned())
     }
 }
 
@@ -177,7 +171,7 @@ impl Interner {
         name
     }
 
-    /// Read a symbol's value from the store while it is held.
+    /// Reads a symbol's value from the store while it is held.
     fn get(&self, symbol: Symbol) -> &str {
         // NOTE: Subtract out the offset which was added to make the symbol
         // nonzero and prevent symbol name re-use.

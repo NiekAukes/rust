@@ -1,10 +1,9 @@
 // ignore-tidy-linelength
-//@ revisions:m68k wasm x86_64-linux x86_64-windows i686-linux i686-windows
+//@ add-core-stubs
+//@ revisions:m68k x86_64-linux x86_64-windows i686-linux i686-windows
 
 //@[m68k] compile-flags: --target m68k-unknown-linux-gnu
 //@[m68k] needs-llvm-components: m68k
-//@[wasm] compile-flags: --target wasm32-unknown-emscripten
-//@[wasm] needs-llvm-components: webassembly
 //@[x86_64-linux] compile-flags: --target x86_64-unknown-linux-gnu
 //@[x86_64-linux] needs-llvm-components: x86
 //@[x86_64-windows] compile-flags: --target x86_64-pc-windows-msvc
@@ -15,20 +14,16 @@
 //@[i686-windows] needs-llvm-components: x86
 
 // Tests that `byval` alignment is properly specified (#80127).
-// The only targets that use `byval` are m68k, wasm, x86-64, and x86.
+// The only targets that use `byval` are m68k, x86-64, and x86.
 // Note also that Windows mandates a by-ref ABI here, so it does not use byval.
 
-#![feature(no_core, lang_items)]
+#![feature(no_core)]
 #![crate_type = "lib"]
 #![no_std]
 #![no_core]
 
-#[lang="sized"] trait Sized { }
-#[lang="freeze"] trait Freeze { }
-#[lang="copy"] trait Copy { }
-
-impl Copy for i32 {}
-impl Copy for i64 {}
+extern crate minicore;
+use minicore::*;
 
 // This struct can be represented as a pair, so it exercises the OperandValue::Pair
 // codepath in `codegen_argument`.
@@ -58,7 +53,7 @@ pub struct ForceAlign4 {
 pub struct NaturalAlign8 {
     a: i64,
     b: i64,
-    c: i64
+    c: i64,
 }
 
 // On i686-windows, this is passed by reference (because alignment is >4 and requested/forced),
@@ -68,7 +63,7 @@ pub struct NaturalAlign8 {
 pub struct ForceAlign8 {
     a: i64,
     b: i64,
-    c: i64
+    c: i64,
 }
 
 // On i686-windows, this is passed on stack, because requested alignment is <=4.
@@ -77,28 +72,28 @@ pub struct ForceAlign8 {
 pub struct LowerFA8 {
     a: i64,
     b: i64,
-    c: i64
+    c: i64,
 }
 
 // On i686-windows, this is passed by reference, because it contains a field with
 // requested/forced alignment.
 #[repr(C)]
 pub struct WrappedFA8 {
-    a: ForceAlign8
+    a: ForceAlign8,
 }
 
 // On i686-windows, this has the same ABI as ForceAlign8, i.e. passed by reference.
 #[repr(transparent)]
 pub struct TransparentFA8 {
     _0: (),
-    a: ForceAlign8
+    a: ForceAlign8,
 }
 
 #[repr(C)]
 #[repr(align(16))]
 pub struct ForceAlign16 {
     a: [i32; 16],
-    b: i8
+    b: i8,
 }
 
 // CHECK-LABEL: @call_na1
@@ -108,9 +103,6 @@ pub unsafe fn call_na1(x: NaturalAlign1) {
 
     // m68k: [[ALLOCA:%[a-z0-9+]]] = alloca [2 x i8], align 1
     // m68k: call void @natural_align_1({{.*}}byval([2 x i8]) align 1{{.*}} [[ALLOCA]])
-
-    // wasm: [[ALLOCA:%[a-z0-9+]]] = alloca [2 x i8], align 1
-    // wasm: call void @natural_align_1({{.*}}byval([2 x i8]) align 1{{.*}} [[ALLOCA]])
 
     // x86_64-linux: call void @natural_align_1(i16
 
@@ -130,7 +122,6 @@ pub unsafe fn call_na2(x: NaturalAlign2) {
     // CHECK: start:
 
     // m68k-NEXT: call void @natural_align_2
-    // wasm-NEXT: call void @natural_align_2
     // x86_64-linux-NEXT: call void @natural_align_2
     // x86_64-windows-NEXT: call void @natural_align_2
 
@@ -201,8 +192,6 @@ pub unsafe fn call_fa16(x: ForceAlign16) {
 extern "C" {
     // m68k: declare void @natural_align_1({{.*}}byval([2 x i8]) align 1{{.*}})
 
-    // wasm: declare void @natural_align_1({{.*}}byval([2 x i8]) align 1{{.*}})
-
     // x86_64-linux: declare void @natural_align_1(i16)
 
     // x86_64-windows: declare void @natural_align_1(i16)
@@ -213,8 +202,6 @@ extern "C" {
     fn natural_align_1(x: NaturalAlign1);
 
     // m68k: declare void @natural_align_2({{.*}}byval([34 x i8]) align 2{{.*}})
-
-    // wasm: declare void @natural_align_2({{.*}}byval([34 x i8]) align 2{{.*}})
 
     // x86_64-linux: declare void @natural_align_2({{.*}}byval([34 x i8]) align 2{{.*}})
 
@@ -229,8 +216,6 @@ extern "C" {
 
     // m68k: declare void @force_align_4({{.*}}byval([20 x i8]) align 4{{.*}})
 
-    // wasm: declare void @force_align_4({{.*}}byval([20 x i8]) align 4{{.*}})
-
     // x86_64-linux: declare void @force_align_4({{.*}}byval([20 x i8]) align 4{{.*}})
 
     // x86_64-windows: declare void @force_align_4(
@@ -244,8 +229,6 @@ extern "C" {
 
     // m68k: declare void @natural_align_8({{.*}}byval([24 x i8]) align 4{{.*}})
 
-    // wasm: declare void @natural_align_8({{.*}}byval([24 x i8]) align 8{{.*}})
-
     // x86_64-linux: declare void @natural_align_8({{.*}}byval([24 x i8]) align 8{{.*}})
 
     // x86_64-windows: declare void @natural_align_8(
@@ -258,8 +241,6 @@ extern "C" {
     fn natural_align_8(x: NaturalAlign8);
 
     // m68k: declare void @force_align_8({{.*}}byval([24 x i8]) align 8{{.*}})
-
-    // wasm: declare void @force_align_8({{.*}}byval([24 x i8]) align 8{{.*}})
 
     // x86_64-linux: declare void @force_align_8({{.*}}byval([24 x i8]) align 8{{.*}})
 
@@ -276,8 +257,6 @@ extern "C" {
 
     // m68k: declare void @lower_fa8({{.*}}byval([24 x i8]) align 4{{.*}})
 
-    // wasm: declare void @lower_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
-
     // x86_64-linux: declare void @lower_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
 
     // x86_64-windows: declare void @lower_fa8(
@@ -290,8 +269,6 @@ extern "C" {
     fn lower_fa8(x: LowerFA8);
 
     // m68k: declare void @wrapped_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
-
-    // wasm: declare void @wrapped_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
 
     // x86_64-linux: declare void @wrapped_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
 
@@ -308,8 +285,6 @@ extern "C" {
 
     // m68k: declare void @transparent_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
 
-    // wasm: declare void @transparent_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
-
     // x86_64-linux: declare void @transparent_fa8({{.*}}byval([24 x i8]) align 8{{.*}})
 
     // x86_64-windows: declare void @transparent_fa8(
@@ -324,8 +299,6 @@ extern "C" {
     fn transparent_fa8(x: TransparentFA8);
 
     // m68k: declare void @force_align_16({{.*}}byval([80 x i8]) align 16{{.*}})
-
-    // wasm: declare void @force_align_16({{.*}}byval([80 x i8]) align 16{{.*}})
 
     // x86_64-linux: declare void @force_align_16({{.*}}byval([80 x i8]) align 16{{.*}})
 

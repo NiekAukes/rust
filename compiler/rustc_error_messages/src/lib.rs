@@ -1,48 +1,33 @@
-#![doc(rust_logo)]
-#![feature(rustdoc_internals)]
-#![feature(lazy_cell)]
-#![feature(rustc_attrs)]
-#![feature(type_alias_impl_trait)]
+// tidy-alphabetical-start
 #![allow(internal_features)]
+#![doc(rust_logo)]
+#![feature(rustc_attrs)]
+#![feature(rustdoc_internals)]
+#![feature(type_alias_impl_trait)]
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate tracing;
-
-use fluent_bundle::FluentResource;
-use fluent_syntax::parser::ParserError;
-use icu_provider_adapters::fallback::{LocaleFallbackProvider, LocaleFallbacker};
-use rustc_data_structures::sync::{IntoDynSyncSend, Lrc};
-use rustc_macros::{Decodable, Encodable};
-use rustc_span::Span;
 use std::borrow::Cow;
 use std::error::Error;
-use std::fmt;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
+use std::{fmt, fs, io};
 
-#[cfg(not(parallel_compiler))]
-use std::cell::LazyCell as Lazy;
-#[cfg(parallel_compiler)]
-use std::sync::LazyLock as Lazy;
-
-#[cfg(parallel_compiler)]
+use fluent_bundle::FluentResource;
+pub use fluent_bundle::types::FluentType;
+pub use fluent_bundle::{self, FluentArgs, FluentError, FluentValue};
+use fluent_syntax::parser::ParserError;
+use icu_provider_adapters::fallback::{LocaleFallbackProvider, LocaleFallbacker};
 use intl_memoizer::concurrent::IntlLangMemoizer;
-#[cfg(not(parallel_compiler))]
-use intl_memoizer::IntlLangMemoizer;
-
-pub use fluent_bundle::{self, types::FluentType, FluentArgs, FluentError, FluentValue};
-pub use unic_langid::{langid, LanguageIdentifier};
+use rustc_data_structures::sync::{DynSend, IntoDynSyncSend};
+use rustc_macros::{Decodable, Encodable};
+use rustc_span::Span;
+use smallvec::SmallVec;
+use tracing::{instrument, trace};
+pub use unic_langid::{LanguageIdentifier, langid};
 
 pub type FluentBundle =
     IntoDynSyncSend<fluent_bundle::bundle::FluentBundle<FluentResource, IntlLangMemoizer>>;
 
-#[cfg(not(parallel_compiler))]
-fn new_bundle(locales: Vec<LanguageIdentifier>) -> FluentBundle {
-    IntoDynSyncSend(fluent_bundle::bundle::FluentBundle::new(locales))
-}
-
-#[cfg(parallel_compiler)]
 fn new_bundle(locales: Vec<LanguageIdentifier>) -> FluentBundle {
     IntoDynSyncSend(fluent_bundle::bundle::FluentBundle::new_concurrent(locales))
 }
@@ -122,12 +107,11 @@ impl From<Vec<FluentError>> for TranslationBundleError {
 /// (overriding any conflicting messages).
 #[instrument(level = "trace")]
 pub fn fluent_bundle(
-    mut user_provided_sysroot: Option<PathBuf>,
-    mut sysroot_candidates: Vec<PathBuf>,
+    sysroot_candidates: SmallVec<[PathBuf; 2]>,
     requested_locale: Option<LanguageIdentifier>,
     additional_ftl_path: Option<&Path>,
     with_directionality_markers: bool,
-) -> Result<Option<Lrc<FluentBundle>>, TranslationBundleError> {
+) -> Result<Option<Arc<FluentBundle>>, TranslationBundleError> {
     if requested_locale.is_none() && additional_ftl_path.is_none() {
         return Ok(None);
     }
@@ -157,7 +141,7 @@ pub fn fluent_bundle(
     // If the user requests the default locale then don't try to load anything.
     if let Some(requested_locale) = requested_locale {
         let mut found_resources = false;
-        for sysroot in user_provided_sysroot.iter_mut().chain(sysroot_candidates.iter_mut()) {
+        for mut sysroot in sysroot_candidates {
             sysroot.push("share");
             sysroot.push("locale");
             sysroot.push(requested_locale.to_string());
@@ -205,7 +189,7 @@ pub fn fluent_bundle(
         bundle.add_resource_overriding(resource);
     }
 
-    let bundle = Lrc::new(bundle);
+    let bundle = Arc::new(bundle);
     Ok(Some(bundle))
 }
 
@@ -220,7 +204,8 @@ fn register_functions(bundle: &mut FluentBundle) {
 
 /// Type alias for the result of `fallback_fluent_bundle` - a reference-counted pointer to a lazily
 /// evaluated fluent bundle.
-pub type LazyFallbackBundle = Lrc<Lazy<FluentBundle, impl FnOnce() -> FluentBundle>>;
+pub type LazyFallbackBundle =
+    Arc<LazyLock<FluentBundle, Box<dyn FnOnce() -> FluentBundle + DynSend>>>;
 
 /// Return the default `FluentBundle` with standard "en-US" diagnostic messages.
 #[instrument(level = "trace", skip(resources))]
@@ -228,7 +213,7 @@ pub fn fallback_fluent_bundle(
     resources: Vec<&'static str>,
     with_directionality_markers: bool,
 ) -> LazyFallbackBundle {
-    Lrc::new(Lazy::new(move || {
+    Arc::new(LazyLock::new(Box::new(move || {
         let mut fallback_bundle = new_bundle(vec![langid!("en-US")]);
 
         register_functions(&mut fallback_bundle);
@@ -243,7 +228,7 @@ pub fn fallback_fluent_bundle(
         }
 
         fallback_bundle
-    }))
+    })))
 }
 
 /// Identifier for the Fluent message/attribute corresponding to a diagnostic message.
@@ -367,25 +352,14 @@ impl From<Cow<'static, str>> for DiagMessage {
     }
 }
 
-/// A workaround for must_produce_diag ICEs when formatting types in disabled lints.
-///
-/// Delays formatting until `.into(): DiagMessage` is used.
-pub struct DelayDm<F>(pub F);
-
-impl<F: FnOnce() -> String> From<DelayDm<F>> for DiagMessage {
-    fn from(DelayDm(f): DelayDm<F>) -> Self {
-        DiagMessage::from(f())
-    }
-}
-
 /// Translating *into* a subdiagnostic message from a diagnostic message is a little strange - but
 /// the subdiagnostic functions (e.g. `span_label`) take a `SubdiagMessage` and the
 /// subdiagnostic derive refers to typed identifiers that are `DiagMessage`s, so need to be
 /// able to convert between these, as much as they'll be converted back into `DiagMessage`
 /// using `with_subdiagnostic_message` eventually. Don't use this other than for the derive.
-impl Into<SubdiagMessage> for DiagMessage {
-    fn into(self) -> SubdiagMessage {
-        match self {
+impl From<DiagMessage> for SubdiagMessage {
+    fn from(val: DiagMessage) -> Self {
+        match val {
             DiagMessage::Str(s) => SubdiagMessage::Str(s),
             DiagMessage::Translated(s) => SubdiagMessage::Translated(s),
             DiagMessage::FluentIdentifier(id, None) => SubdiagMessage::FluentIdentifier(id),
@@ -562,15 +536,6 @@ pub fn fluent_value_from_str_list_sep_by_and(l: Vec<Cow<'_, str>>) -> FluentValu
             Cow::Owned(result)
         }
 
-        #[cfg(not(parallel_compiler))]
-        fn as_string_threadsafe(
-            &self,
-            _intls: &intl_memoizer::concurrent::IntlLangMemoizer,
-        ) -> Cow<'static, str> {
-            unreachable!("`as_string_threadsafe` is not used in non-parallel rustc")
-        }
-
-        #[cfg(parallel_compiler)]
         fn as_string_threadsafe(
             &self,
             intls: &intl_memoizer::concurrent::IntlLangMemoizer,

@@ -1,7 +1,7 @@
 fn main() {
-    let start_ptr = &4 as *const _ as *const u8;
-    let length = 10;
-    let end_ptr = start_ptr.wrapping_add(length);
-    // Even if the offset is 0, a dangling OOB pointer is not allowed.
-    unsafe { end_ptr.offset_from(end_ptr) }; //~ERROR: pointer at offset 10 is out-of-bounds
+    let mem = [0u8; 1];
+    let ptr = mem.as_ptr();
+    unsafe {
+        ptr.wrapping_add(4).offset_from(ptr); //~ERROR: the memory range between them is not in-bounds of an allocation
+    }
 }

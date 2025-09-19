@@ -4,6 +4,7 @@ use std::fmt::Write;
 
 use cranelift_codegen::isa::CallConv;
 use rustc_ast::ast::{InlineAsmOptions, InlineAsmTemplatePiece};
+use rustc_hir::LangItem;
 use rustc_span::sym;
 use rustc_target::asm::*;
 use target_lexicon::BinaryFormat;
@@ -45,10 +46,8 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
     // Used by panic_abort on Windows, but uses a syntax which only happens to work with
     // asm!() by accident and breaks with the GNU assembler as well as global_asm!() for
     // the LLVM backend.
-    if template.len() == 1
-        && template[0] == InlineAsmTemplatePiece::String("int $$0x29".to_string())
-    {
-        fx.bcx.ins().trap(TrapCode::User(1));
+    if template.len() == 1 && template[0] == InlineAsmTemplatePiece::String("int $$0x29".into()) {
+        fx.bcx.ins().trap(TrapCode::user(2).unwrap());
         return;
     }
 
@@ -93,7 +92,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                 if let ty::FnDef(def_id, args) = *const_.ty().kind() {
                     let instance = ty::Instance::resolve_for_fn_ptr(
                         fx.tcx,
-                        ty::ParamEnv::reveal_all(),
+                        ty::TypingEnv::fully_monomorphized(),
                         def_id,
                         args,
                     )
@@ -103,22 +102,15 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                     // Pass a wrapper rather than the function itself as the function itself may not
                     // be exported from the main codegen unit and may thus be unreachable from the
                     // object file created by an external assembler.
-                    let inline_asm_index = fx.cx.inline_asm_index.get();
-                    fx.cx.inline_asm_index.set(inline_asm_index + 1);
                     let wrapper_name = format!(
                         "__inline_asm_{}_wrapper_n{}",
                         fx.cx.cgu_name.as_str().replace('.', "__").replace('-', "_"),
-                        inline_asm_index
+                        fx.cx.inline_asm_index
                     );
+                    fx.cx.inline_asm_index += 1;
                     let sig =
                         get_function_sig(fx.tcx, fx.target_config.default_call_conv, instance);
-                    create_wrapper_function(
-                        fx.module,
-                        &mut fx.cx.unwind_context,
-                        sig,
-                        &wrapper_name,
-                        symbol.name,
-                    );
+                    create_wrapper_function(fx.module, sig, &wrapper_name, symbol.name);
 
                     CInlineAsmOperand::Symbol { symbol: wrapper_name }
                 } else {
@@ -127,7 +119,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
             }
             InlineAsmOperand::SymStatic { def_id } => {
                 assert!(fx.tcx.is_static(def_id));
-                let instance = Instance::mono(fx.tcx, def_id).polymorphize(fx.tcx);
+                let instance = Instance::mono(fx.tcx, def_id);
                 CInlineAsmOperand::Symbol { symbol: fx.tcx.symbol_name(instance).name.to_owned() }
             }
             InlineAsmOperand::Label { .. } => {
@@ -144,7 +136,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
             fx.bcx.ins().jump(destination_block, &[]);
         }
         None => {
-            fx.bcx.ins().trap(TrapCode::UnreachableCodeReached);
+            fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
         }
     }
 }
@@ -173,13 +165,12 @@ pub(crate) fn codegen_inline_asm_inner<'tcx>(
     asm_gen.allocate_registers();
     asm_gen.allocate_stack_slots();
 
-    let inline_asm_index = fx.cx.inline_asm_index.get();
-    fx.cx.inline_asm_index.set(inline_asm_index + 1);
     let asm_name = format!(
         "__inline_asm_{}_n{}",
         fx.cx.cgu_name.as_str().replace('.', "__").replace('-', "_"),
-        inline_asm_index
+        fx.cx.inline_asm_index
     );
+    fx.cx.inline_asm_index += 1;
 
     let generated_asm = asm_gen.generate_asm_wrapper(&asm_name);
     fx.cx.global_asm.push_str(&generated_asm);
@@ -354,9 +345,13 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
         let mut slots_output = vec![None; self.operands.len()];
 
         let new_slot_fn = |slot_size: &mut Size, reg_class: InlineAsmRegClass| {
-            let reg_size =
-                reg_class.supported_types(self.arch).iter().map(|(ty, _)| ty.size()).max().unwrap();
-            let align = rustc_target::abi::Align::from_bytes(reg_size.bytes()).unwrap();
+            let reg_size = reg_class
+                .supported_types(self.arch, true)
+                .iter()
+                .map(|(ty, _)| ty.size())
+                .max()
+                .unwrap();
+            let align = rustc_abi::Align::from_bytes(reg_size.bytes()).unwrap();
             let offset = slot_size.align_to(align);
             *slot_size = offset + reg_size;
             offset
@@ -364,9 +359,14 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
         let mut new_slot = |x| new_slot_fn(&mut slot_size, x);
 
         // Allocate stack slots for saving clobbered registers
-        let abi_clobber = InlineAsmClobberAbi::parse(self.arch, &self.tcx.sess.target, sym::C)
-            .unwrap()
-            .clobbered_regs();
+        let abi_clobber = InlineAsmClobberAbi::parse(
+            self.arch,
+            &self.tcx.sess.target,
+            &self.tcx.sess.unstable_target_features,
+            sym::C,
+        )
+        .unwrap()
+        .clobbered_regs();
         for (i, reg) in self.registers.iter().enumerate().filter_map(|(i, r)| r.map(|r| (i, r))) {
             let mut need_save = true;
             // If the register overlaps with a register clobbered by function call, then
@@ -468,6 +468,7 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
         if is_x86 {
             generated_asm.push_str(".intel_syntax noprefix\n");
         }
+
         Self::prologue(&mut generated_asm, self.arch);
 
         // Save clobbered registers
@@ -494,6 +495,15 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
 
         if is_x86 && self.options.contains(InlineAsmOptions::ATT_SYNTAX) {
             generated_asm.push_str(".att_syntax\n");
+        }
+
+        if self.arch == InlineAsmArch::AArch64 {
+            for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
+                if feature.name == sym::neon {
+                    continue;
+                }
+                writeln!(generated_asm, ".arch_extension {}", feature.name).unwrap();
+            }
         }
 
         // The actual inline asm
@@ -536,6 +546,20 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
                                         .emit(&mut generated_asm, InlineAsmArch::X86_64, *modifier)
                                         .unwrap(),
                                 },
+                                InlineAsmArch::AArch64 => match reg {
+                                    InlineAsmReg::AArch64(reg) if reg.vreg_index().is_some() => {
+                                        // rustc emits v0 rather than q0
+                                        reg.emit(
+                                            &mut generated_asm,
+                                            InlineAsmArch::AArch64,
+                                            Some(modifier.unwrap_or('q')),
+                                        )
+                                        .unwrap()
+                                    }
+                                    _ => reg
+                                        .emit(&mut generated_asm, InlineAsmArch::AArch64, *modifier)
+                                        .unwrap(),
+                                },
                                 _ => reg.emit(&mut generated_asm, self.arch, *modifier).unwrap(),
                             }
                         }
@@ -548,6 +572,15 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
             }
         }
         generated_asm.push('\n');
+
+        if self.arch == InlineAsmArch::AArch64 {
+            for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
+                if feature.name == sym::neon {
+                    continue;
+                }
+                writeln!(generated_asm, ".arch_extension no{}", feature.name).unwrap();
+            }
+        }
 
         if is_x86 && self.options.contains(InlineAsmOptions::ATT_SYNTAX) {
             generated_asm.push_str(".intel_syntax noprefix\n");
@@ -691,7 +724,13 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
             }
             InlineAsmArch::AArch64 => {
                 generated_asm.push_str("    str ");
-                reg.emit(generated_asm, InlineAsmArch::AArch64, None).unwrap();
+                match reg {
+                    InlineAsmReg::AArch64(reg) if reg.vreg_index().is_some() => {
+                        // rustc emits v0 rather than q0
+                        reg.emit(generated_asm, InlineAsmArch::AArch64, Some('q')).unwrap()
+                    }
+                    _ => reg.emit(generated_asm, InlineAsmArch::AArch64, None).unwrap(),
+                }
                 writeln!(generated_asm, ", [x19, 0x{:x}]", offset.bytes()).unwrap();
             }
             InlineAsmArch::RiscV64 => {
@@ -733,7 +772,13 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
             }
             InlineAsmArch::AArch64 => {
                 generated_asm.push_str("    ldr ");
-                reg.emit(generated_asm, InlineAsmArch::AArch64, None).unwrap();
+                match reg {
+                    InlineAsmReg::AArch64(reg) if reg.vreg_index().is_some() => {
+                        // rustc emits v0 rather than q0
+                        reg.emit(generated_asm, InlineAsmArch::AArch64, Some('q')).unwrap()
+                    }
+                    _ => reg.emit(generated_asm, InlineAsmArch::AArch64, None).unwrap(),
+                }
                 writeln!(generated_asm, ", [x19, 0x{:x}]", offset.bytes()).unwrap();
             }
             InlineAsmArch::RiscV64 => {
@@ -753,7 +798,8 @@ fn call_inline_asm<'tcx>(
     inputs: Vec<(Size, Value)>,
     outputs: Vec<(Size, CPlace<'tcx>)>,
 ) {
-    let stack_slot = fx.create_stack_slot(u32::try_from(slot_size.bytes()).unwrap(), 16);
+    let stack_slot =
+        fx.create_stack_slot(u32::try_from(slot_size.bytes().next_multiple_of(16)).unwrap(), 16);
 
     let inline_asm_func = fx
         .module
@@ -802,9 +848,9 @@ fn call_inline_asm<'tcx>(
 fn asm_clif_type<'tcx>(fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> Option<types::Type> {
     match ty.kind() {
         // Adapted from https://github.com/rust-lang/rust/blob/f3c66088610c1b80110297c2d9a8b5f9265b013f/compiler/rustc_hir_analysis/src/check/intrinsicck.rs#L136-L151
-        ty::Adt(adt, args) if Some(adt.did()) == fx.tcx.lang_items().maybe_uninit() => {
+        ty::Adt(adt, args) if fx.tcx.is_lang_item(adt.did(), LangItem::MaybeUninit) => {
             let fields = &adt.non_enum_variant().fields;
-            let ty = fields[FieldIdx::from_u32(1)].ty(fx.tcx, args);
+            let ty = fields[FieldIdx::ONE].ty(fx.tcx, args);
             let ty::Adt(ty, args) = ty.kind() else {
                 unreachable!("expected first field of `MaybeUninit` to be an ADT")
             };

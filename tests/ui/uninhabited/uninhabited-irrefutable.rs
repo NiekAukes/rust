@@ -1,6 +1,5 @@
-//@ revisions: min_exhaustive_patterns exhaustive_patterns
+//@ revisions: normal exhaustive_patterns
 #![cfg_attr(exhaustive_patterns, feature(exhaustive_patterns))]
-#![cfg_attr(min_exhaustive_patterns, feature(min_exhaustive_patterns))]
 #![feature(never_type)]
 
 mod foo {
@@ -30,7 +29,7 @@ fn main() {
     let x: Foo = Foo::D(123, 456);
     let Foo::D(_y, _z) = x;
     //~^ ERROR refutable pattern in local binding
-    //~| `Foo::A(_)` not covered
+    //~| NOTE `Foo::A(_)` not covered
     //~| NOTE `let` bindings require an "irrefutable pattern"
     //~| NOTE for more information
     //~| NOTE pattern `Foo::A(_)` is currently uninhabited

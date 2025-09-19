@@ -1,11 +1,9 @@
 //! A readers-writer lock implementation backed by the SOLID kernel extension.
-use crate::sys::pal::{
-    abi,
-    itron::{
-        error::{expect_success, expect_success_aborting, fail, ItronError},
-        spin::SpinIdOnceCell,
-    },
-};
+#![forbid(unsafe_op_in_unsafe_fn)]
+
+use crate::sys::pal::abi;
+use crate::sys::pal::itron::error::{ItronError, expect_success, expect_success_aborting, fail};
+use crate::sys::pal::itron::spin::SpinIdOnceCell;
 
 pub struct RwLock {
     /// The ID of the underlying mutex object
@@ -26,7 +24,7 @@ impl RwLock {
         RwLock { rwl: SpinIdOnceCell::new() }
     }
 
-    /// Get the inner mutex's ID, which is lazily created.
+    /// Gets the inner mutex's ID, which is lazily created.
     fn raw(&self) -> abi::ID {
         match self.rwl.get_or_try_init(|| new_rwl().map(|id| (id, ()))) {
             Ok((id, ())) => id,
@@ -80,6 +78,12 @@ impl RwLock {
     pub unsafe fn write_unlock(&self) {
         let rwl = self.raw();
         expect_success_aborting(unsafe { abi::rwl_unl_rwl(rwl) }, &"rwl_unl_rwl");
+    }
+
+    #[inline]
+    pub unsafe fn downgrade(&self) {
+        // The SOLID platform does not support the `downgrade` operation for reader writer locks, so
+        // this function is simply a no-op as only 1 reader can read: the original writer.
     }
 }
 

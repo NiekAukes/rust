@@ -1,14 +1,12 @@
+// The diff marker detection was removed for this example, because it relied on
+// the lexer having a dependency on the parser, which was horrible.
+
 mod tests {
     #[test]
 <<<<<<< HEAD
-//~^ ERROR encountered diff marker
-//~| NOTE after this is the code before the merge
-//~| NOTE for an explanation on these markers
     fn test1() {
 =======
-//~^ NOTE
     fn test2() {
 >>>>>>> 7a4f13c blah blah blah
-//~^ NOTE above this are the incoming code changes
     }
-}
+} //~ ERROR this file contains an unclosed delimiter

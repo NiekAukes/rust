@@ -1,6 +1,8 @@
 //! A thin wrapper around [`stdx::thread::Pool`] which threads a sender through spawned jobs.
 //! It is used in [`crate::global_state::GlobalState`] throughout the main loop.
 
+use std::panic::UnwindSafe;
+
 use crossbeam_channel::Sender;
 use stdx::thread::{Pool, ThreadIntent};
 
@@ -18,7 +20,7 @@ impl<T> TaskPool<T> {
 
     pub(crate) fn spawn<F>(&mut self, intent: ThreadIntent, task: F)
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce() -> T + Send + UnwindSafe + 'static,
         T: Send + 'static,
     {
         self.pool.spawn(intent, {
@@ -29,7 +31,7 @@ impl<T> TaskPool<T> {
 
     pub(crate) fn spawn_with_sender<F>(&mut self, intent: ThreadIntent, task: F)
     where
-        F: FnOnce(Sender<T>) + Send + 'static,
+        F: FnOnce(Sender<T>) + Send + UnwindSafe + 'static,
         T: Send + 'static,
     {
         self.pool.spawn(intent, {
@@ -45,7 +47,7 @@ impl<T> TaskPool<T> {
 
 /// `TaskQueue`, like its name suggests, queues tasks.
 ///
-/// This should only be used used if a task must run after [`GlobalState::process_changes`]
+/// This should only be used if a task must run after [`GlobalState::process_changes`]
 /// has been called.
 pub(crate) struct TaskQueue {
     pub(crate) sender: crossbeam_channel::Sender<QueuedTask>,

@@ -1,16 +1,21 @@
 use std::collections::hash_map::Entry;
 
-use hir::{HirFileIdExt, InFile, InRealFile, Module, ModuleSource};
+use hir::{
+    FileRange, InFile, InRealFile, Module, ModuleDef, ModuleSource, PathResolution,
+    PathResolutionPerNs,
+};
+use ide_db::text_edit::TextRange;
 use ide_db::{
-    base_db::FileRange,
+    FxHashMap, RootDatabase,
     defs::Definition,
     search::{FileReference, ReferenceCategory, SearchScope},
-    FxHashMap, RootDatabase,
 };
-use syntax::{ast, AstNode};
-use text_edit::TextRange;
+use syntax::{
+    AstNode,
+    ast::{self, Rename},
+};
 
-use crate::{AssistContext, AssistId, AssistKind, Assists};
+use crate::{AssistContext, AssistId, Assists};
 
 // Assist: remove_unused_imports
 //
@@ -75,22 +80,17 @@ pub(crate) fn remove_unused_imports(acc: &mut Assists, ctx: &AssistContext<'_>) 
             };
 
             // Get the actual definition associated with this use item.
-            let res = match ctx.sema.resolve_path(&path) {
-                Some(x) => x,
-                None => {
+            let res = match ctx.sema.resolve_path_per_ns(&path) {
+                Some(x) if x.any().is_some() => x,
+                Some(_) | None => {
                     return None;
                 }
             };
 
-            let def = match res {
-                hir::PathResolution::Def(d) => Definition::from(d),
-                _ => return None,
-            };
-
             if u.star_token().is_some() {
                 // Check if any of the children of this module are used
-                let def_mod = match def {
-                    Definition::Module(module) => module,
+                let def_mod = match res.type_ns {
+                    Some(PathResolution::Def(ModuleDef::Module(module))) => module,
                     _ => return None,
                 };
 
@@ -101,30 +101,22 @@ pub(crate) fn remove_unused_imports(acc: &mut Assists, ctx: &AssistContext<'_>) 
                         hir::ScopeDef::ModuleDef(d) => Some(Definition::from(*d)),
                         _ => None,
                     })
-                    .any(|d| used_once_in_scope(ctx, d, scope))
+                    .any(|d| used_once_in_scope(ctx, d, u.rename(), scope))
                 {
-                    return Some(u);
+                    Some(u)
+                } else {
+                    None
                 }
-            } else if let Definition::Trait(ref t) = def {
-                // If the trait or any item is used.
-                if !std::iter::once(def)
-                    .chain(t.items(ctx.db()).into_iter().map(Definition::from))
-                    .any(|d| used_once_in_scope(ctx, d, scope))
-                {
-                    return Some(u);
-                }
-            } else if !used_once_in_scope(ctx, def, scope) {
-                return Some(u);
+            } else {
+                is_path_per_ns_unused_in_scope(ctx, &u, scope, &res).then_some(u)
             }
-
-            None
         })
         .peekable();
 
     // Peek so we terminate early if an unused use is found. Only do the rest of the work if the user selects the assist.
     if unused.peek().is_some() {
         acc.add(
-            AssistId("remove_unused_imports", AssistKind::QuickFix),
+            AssistId::quick_fix("remove_unused_imports"),
             "Remove all the unused imports",
             selected_el.text_range(),
             |builder| {
@@ -139,7 +131,58 @@ pub(crate) fn remove_unused_imports(acc: &mut Assists, ctx: &AssistContext<'_>) 
     }
 }
 
-fn used_once_in_scope(ctx: &AssistContext<'_>, def: Definition, scopes: &Vec<SearchScope>) -> bool {
+fn is_path_per_ns_unused_in_scope(
+    ctx: &AssistContext<'_>,
+    u: &ast::UseTree,
+    scope: &mut Vec<SearchScope>,
+    path: &PathResolutionPerNs,
+) -> bool {
+    if let Some(PathResolution::Def(ModuleDef::Trait(ref t))) = path.type_ns {
+        if is_trait_unused_in_scope(ctx, u, scope, t) {
+            let path = [path.value_ns, path.macro_ns];
+            is_path_unused_in_scope(ctx, u, scope, &path)
+        } else {
+            false
+        }
+    } else {
+        let path = [path.type_ns, path.value_ns, path.macro_ns];
+        is_path_unused_in_scope(ctx, u, scope, &path)
+    }
+}
+
+fn is_path_unused_in_scope(
+    ctx: &AssistContext<'_>,
+    u: &ast::UseTree,
+    scope: &mut Vec<SearchScope>,
+    path: &[Option<PathResolution>],
+) -> bool {
+    !path
+        .iter()
+        .filter_map(|path| *path)
+        .filter_map(|res| match res {
+            PathResolution::Def(d) => Some(Definition::from(d)),
+            _ => None,
+        })
+        .any(|def| used_once_in_scope(ctx, def, u.rename(), scope))
+}
+
+fn is_trait_unused_in_scope(
+    ctx: &AssistContext<'_>,
+    u: &ast::UseTree,
+    scope: &mut Vec<SearchScope>,
+    t: &hir::Trait,
+) -> bool {
+    !std::iter::once((Definition::Trait(*t), u.rename()))
+        .chain(t.items(ctx.db()).into_iter().map(|item| (item.into(), None)))
+        .any(|(d, rename)| used_once_in_scope(ctx, d, rename, scope))
+}
+
+fn used_once_in_scope(
+    ctx: &AssistContext<'_>,
+    def: Definition,
+    rename: Option<Rename>,
+    scopes: &Vec<SearchScope>,
+) -> bool {
     let mut found = false;
 
     for scope in scopes {
@@ -152,7 +195,10 @@ fn used_once_in_scope(ctx: &AssistContext<'_>, def: Definition, scopes: &Vec<Sea
                 false
             }
         };
-        def.usages(&ctx.sema).in_scope(scope).search(&mut search_non_import);
+        def.usages(&ctx.sema)
+            .in_scope(scope)
+            .with_rename(rename.as_ref())
+            .search(&mut search_non_import);
         if found {
             break;
         }
@@ -331,7 +377,7 @@ fn w() {
     }
 
     #[test]
-    fn ranamed_trait_item_use_is_use() {
+    fn renamed_trait_item_use_is_use() {
         check_assist_not_applicable(
             remove_unused_imports,
             r#"
@@ -357,7 +403,7 @@ fn w() {
     }
 
     #[test]
-    fn ranamed_underscore_trait_item_use_is_use() {
+    fn renamed_underscore_trait_item_use_is_use() {
         check_assist_not_applicable(
             remove_unused_imports,
             r#"
@@ -777,6 +823,40 @@ mod z {
     }
 
     #[test]
+    fn remove_unused_fixes_nested_self() {
+        check_assist(
+            remove_unused_imports,
+            r#"
+mod inner {
+    pub struct X();
+    pub struct Y();
+}
+
+mod z {
+    use super::inner::{self, X}$0;
+
+    fn f() {
+        let y = inner::Y();
+    }
+}
+"#,
+            r#"mod inner {
+    pub struct X();
+    pub struct Y();
+}
+
+mod z {
+    use super::inner::{self};
+
+    fn f() {
+        let y = inner::Y();
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
     fn dont_remove_used_glob() {
         check_assist_not_applicable(
             remove_unused_imports,
@@ -908,6 +988,168 @@ pub struct X();
 
 mod z {
     mod foo;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn use_as_alias() {
+        check_assist_not_applicable(
+            remove_unused_imports,
+            r#"
+mod foo {
+    pub struct Foo {}
+}
+
+use foo::Foo as Bar$0;
+
+fn test(_: Bar) {}
+"#,
+        );
+
+        check_assist(
+            remove_unused_imports,
+            r#"
+mod foo {
+    pub struct Foo {}
+    pub struct Bar {}
+    pub struct Qux {}
+    pub trait Quux {
+        fn quxx(&self) {}
+    }
+    impl<T> Quxx for T {}
+}
+
+use foo::{Foo as Bar, Bar as Baz, Qux as _, Quxx as _}$0;
+
+fn test(_: Bar) {
+    let a = ();
+    a.quxx();
+}
+"#,
+            r#"
+mod foo {
+    pub struct Foo {}
+    pub struct Bar {}
+    pub struct Qux {}
+    pub trait Quux {
+        fn quxx(&self) {}
+    }
+    impl<T> Quxx for T {}
+}
+
+use foo::{Foo as Bar, Quxx as _};
+
+fn test(_: Bar) {
+    let a = ();
+    a.quxx();
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn test_unused_macro() {
+        check_assist(
+            remove_unused_imports,
+            r#"
+//- /foo.rs crate:foo
+#[macro_export]
+macro_rules! m { () => {} }
+
+//- /main.rs crate:main deps:foo
+use foo::m;$0
+fn main() {}
+"#,
+            r#"
+fn main() {}
+"#,
+        );
+
+        check_assist_not_applicable(
+            remove_unused_imports,
+            r#"
+//- /foo.rs crate:foo
+#[macro_export]
+macro_rules! m { () => {} }
+
+//- /main.rs crate:main deps:foo
+use foo::m;$0
+fn main() {
+    m!();
+}
+"#,
+        );
+
+        check_assist_not_applicable(
+            remove_unused_imports,
+            r#"
+//- /foo.rs crate:foo
+#[macro_export]
+macro_rules! m { () => {} }
+
+//- /bar.rs crate:bar deps:foo
+pub use foo::m;
+fn m() {}
+
+
+//- /main.rs crate:main deps:bar
+use bar::m;$0
+fn main() {
+    m!();
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn test_conflict_derive_macro() {
+        check_assist_not_applicable(
+            remove_unused_imports,
+            r#"
+//- proc_macros: derive_identity
+//- minicore: derive
+//- /bar.rs crate:bar
+pub use proc_macros::DeriveIdentity;
+pub trait DeriveIdentity {}
+
+//- /main.rs crate:main deps:bar
+$0use bar::DeriveIdentity;$0
+#[derive(DeriveIdentity)]
+struct S;
+"#,
+        );
+
+        check_assist_not_applicable(
+            remove_unused_imports,
+            r#"
+//- proc_macros: derive_identity
+//- minicore: derive
+//- /bar.rs crate:bar
+pub use proc_macros::DeriveIdentity;
+pub fn DeriveIdentity() {}
+
+//- /main.rs crate:main deps:bar
+$0use bar::DeriveIdentity;$0
+#[derive(DeriveIdentity)]
+struct S;
+"#,
+        );
+
+        check_assist_not_applicable(
+            remove_unused_imports,
+            r#"
+//- proc_macros: derive_identity
+//- minicore: derive
+//- /bar.rs crate:bar
+pub use proc_macros::DeriveIdentity;
+pub fn DeriveIdentity() {}
+
+//- /main.rs crate:main deps:bar
+$0use bar::DeriveIdentity;$0
+fn main() {
+    DeriveIdentity();
 }
 "#,
         );

@@ -1,5 +1,4 @@
 use either::Either;
-
 use rustc_data_structures::fx::FxHashSet;
 
 use crate::*;
@@ -10,11 +9,34 @@ pub trait VisitProvenance {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>);
 }
 
+// Trivial impls for types that do not contain any provenance
+macro_rules! no_provenance {
+    ($($ty:ident)+) => {
+        $(
+            impl VisitProvenance for $ty {
+                fn visit_provenance(&self, _visit: &mut VisitWith<'_>) {}
+            }
+        )+
+    }
+}
+no_provenance!(i8 i16 i32 i64 isize u8 u16 u32 u64 usize ThreadId);
+
 impl<T: VisitProvenance> VisitProvenance for Option<T> {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         if let Some(x) = self {
             x.visit_provenance(visit);
         }
+    }
+}
+
+impl<A, B> VisitProvenance for (A, B)
+where
+    A: VisitProvenance,
+    B: VisitProvenance,
+{
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
+        self.0.visit_provenance(visit);
+        self.1.visit_provenance(visit);
     }
 }
 
@@ -44,25 +66,37 @@ impl VisitProvenance for Provenance {
     }
 }
 
-impl VisitProvenance for Pointer<Provenance> {
+impl VisitProvenance for StrictPointer {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         let (prov, _offset) = self.into_parts();
         prov.visit_provenance(visit);
     }
 }
 
-impl VisitProvenance for Pointer<Option<Provenance>> {
+impl VisitProvenance for Pointer {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         let (prov, _offset) = self.into_parts();
         prov.visit_provenance(visit);
     }
 }
 
-impl VisitProvenance for Scalar<Provenance> {
+impl VisitProvenance for Scalar {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         match self {
             Scalar::Ptr(ptr, _) => ptr.visit_provenance(visit),
             Scalar::Int(_) => (),
+        }
+    }
+}
+
+impl VisitProvenance for IoError {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
+        use crate::shims::io_error::IoError::*;
+        match self {
+            LibcError(_name) => (),
+            WindowsError(_name) => (),
+            HostError(_io_error) => (),
+            Raw(scalar) => scalar.visit_provenance(visit),
         }
     }
 }
@@ -91,20 +125,20 @@ impl VisitProvenance for MemPlaceMeta<Provenance> {
     }
 }
 
-impl VisitProvenance for ImmTy<'_, Provenance> {
+impl VisitProvenance for ImmTy<'_> {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         (**self).visit_provenance(visit)
     }
 }
 
-impl VisitProvenance for MPlaceTy<'_, Provenance> {
+impl VisitProvenance for MPlaceTy<'_> {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         self.ptr().visit_provenance(visit);
         self.meta().visit_provenance(visit);
     }
 }
 
-impl VisitProvenance for PlaceTy<'_, Provenance> {
+impl VisitProvenance for PlaceTy<'_> {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         match self.as_mplace_or_local() {
             Either::Left(mplace) => mplace.visit_provenance(visit),
@@ -113,7 +147,7 @@ impl VisitProvenance for PlaceTy<'_, Provenance> {
     }
 }
 
-impl VisitProvenance for OpTy<'_, Provenance> {
+impl VisitProvenance for OpTy<'_> {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         match self.as_mplace_or_imm() {
             Either::Left(mplace) => mplace.visit_provenance(visit),
@@ -122,7 +156,7 @@ impl VisitProvenance for OpTy<'_, Provenance> {
     }
 }
 
-impl VisitProvenance for Allocation<Provenance, AllocExtra<'_>> {
+impl VisitProvenance for Allocation<Provenance, AllocExtra<'_>, MiriAllocBytes> {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         for prov in self.provenance().provenances() {
             prov.visit_provenance(visit);
@@ -132,7 +166,7 @@ impl VisitProvenance for Allocation<Provenance, AllocExtra<'_>> {
     }
 }
 
-impl VisitProvenance for crate::MiriInterpCx<'_, '_> {
+impl VisitProvenance for crate::MiriInterpCx<'_> {
     fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         // Visit the contents of the allocations and the IDs themselves, to account for all
         // live allocation IDs and all provenance in the allocation bytes, even if they are leaked.
@@ -150,23 +184,46 @@ impl VisitProvenance for crate::MiriInterpCx<'_, '_> {
     }
 }
 
-pub struct LiveAllocs<'a, 'mir, 'tcx> {
+pub struct LiveAllocs<'a, 'tcx> {
     collected: FxHashSet<AllocId>,
-    ecx: &'a MiriInterpCx<'mir, 'tcx>,
+    ecx: &'a MiriInterpCx<'tcx>,
 }
 
-impl LiveAllocs<'_, '_, '_> {
+impl LiveAllocs<'_, '_> {
     pub fn is_live(&self, id: AllocId) -> bool {
         self.collected.contains(&id) || self.ecx.is_alloc_live(id)
     }
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
+fn remove_unreachable_tags<'tcx>(ecx: &mut MiriInterpCx<'tcx>, tags: FxHashSet<BorTag>) {
+    // Avoid iterating all allocations if there's no borrow tracker anyway.
+    if ecx.machine.borrow_tracker.is_some() {
+        ecx.memory.alloc_map().iter(|it| {
+            for (_id, (_kind, alloc)) in it {
+                alloc.extra.borrow_tracker.as_ref().unwrap().remove_unreachable_tags(&tags);
+            }
+        });
+    }
+}
+
+fn remove_unreachable_allocs<'tcx>(ecx: &mut MiriInterpCx<'tcx>, allocs: FxHashSet<AllocId>) {
+    let allocs = LiveAllocs { ecx, collected: allocs };
+    ecx.machine.allocation_spans.borrow_mut().retain(|id, _| allocs.is_live(*id));
+    ecx.machine.symbolic_alignment.borrow_mut().retain(|id, _| allocs.is_live(*id));
+    ecx.machine.alloc_addresses.borrow_mut().remove_unreachable_allocs(&allocs);
+    if let Some(borrow_tracker) = &ecx.machine.borrow_tracker {
+        borrow_tracker.borrow_mut().remove_unreachable_allocs(&allocs);
+    }
+    // Clean up core (non-Miri-specific) state.
+    ecx.remove_unreachable_allocs(&allocs.collected);
+}
+
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: MiriInterpCxExt<'tcx> {
     fn run_provenance_gc(&mut self) {
-        // We collect all tags from various parts of the interpreter, but also
         let this = self.eval_context_mut();
 
+        // We collect all tags and AllocId from every part of the interpreter.
         let mut tags = FxHashSet::default();
         let mut alloc_ids = FxHashSet::default();
         this.visit_provenance(&mut |id, tag| {
@@ -177,30 +234,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
                 tags.insert(tag);
             }
         });
-        self.remove_unreachable_tags(tags);
-        self.remove_unreachable_allocs(alloc_ids);
-    }
 
-    fn remove_unreachable_tags(&mut self, tags: FxHashSet<BorTag>) {
-        let this = self.eval_context_mut();
-        this.memory.alloc_map().iter(|it| {
-            for (_id, (_kind, alloc)) in it {
-                if let Some(bt) = &alloc.extra.borrow_tracker {
-                    bt.remove_unreachable_tags(&tags);
-                }
-            }
-        });
-    }
-
-    fn remove_unreachable_allocs(&mut self, allocs: FxHashSet<AllocId>) {
-        let this = self.eval_context_mut();
-        let allocs = LiveAllocs { ecx: this, collected: allocs };
-        this.machine.allocation_spans.borrow_mut().retain(|id, _| allocs.is_live(*id));
-        this.machine.symbolic_alignment.borrow_mut().retain(|id, _| allocs.is_live(*id));
-        this.machine.alloc_addresses.borrow_mut().remove_unreachable_allocs(&allocs);
-        if let Some(borrow_tracker) = &this.machine.borrow_tracker {
-            borrow_tracker.borrow_mut().remove_unreachable_allocs(&allocs);
-        }
-        this.remove_unreachable_allocs(&allocs.collected);
+        // Based on this, clean up the interpreter state.
+        remove_unreachable_tags(this, tags);
+        remove_unreachable_allocs(this, alloc_ids);
     }
 }

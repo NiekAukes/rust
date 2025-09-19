@@ -1,20 +1,17 @@
 //! This module is responsible for implementing handlers for Language Server
 //! Protocol. This module specifically handles requests.
 
-use std::{
-    fs,
-    io::Write as _,
-    process::{self, Stdio},
-};
+use std::{fs, io::Write as _, ops::Not, process::Stdio};
 
 use anyhow::Context;
 
+use base64::{Engine, prelude::BASE64_STANDARD};
 use ide::{
-    AnnotationConfig, AssistKind, AssistResolveStrategy, Cancellable, FilePosition, FileRange,
-    HoverAction, HoverGotoTypeData, InlayFieldsToResolve, Query, RangeInfo, ReferenceCategory,
-    Runnable, RunnableKind, SingleResolve, SourceChange, TextEdit,
+    AnnotationConfig, AssistKind, AssistResolveStrategy, Cancellable, CompletionFieldsToResolve,
+    FilePosition, FileRange, HoverAction, HoverGotoTypeData, InlayFieldsToResolve, Query,
+    RangeInfo, ReferenceCategory, Runnable, RunnableKind, SingleResolve, SourceChange, TextEdit,
 };
-use ide_db::SymbolKind;
+use ide_db::{FxHashMap, SymbolKind};
 use itertools::Itertools;
 use lsp_server::ErrorCode;
 use lsp_types::{
@@ -27,36 +24,42 @@ use lsp_types::{
     SemanticTokensResult, SymbolInformation, SymbolTag, TextDocumentIdentifier, Url, WorkspaceEdit,
 };
 use paths::Utf8PathBuf;
-use project_model::{ManifestPath, ProjectWorkspace, TargetKind};
+use project_model::{CargoWorkspace, ManifestPath, ProjectWorkspaceKind, TargetKind};
 use serde_json::json;
 use stdx::{format_to, never};
-use syntax::{algo, ast, AstNode, TextRange, TextSize};
+use syntax::{TextRange, TextSize};
 use triomphe::Arc;
 use vfs::{AbsPath, AbsPathBuf, FileId, VfsPath};
 
 use crate::{
-    cargo_target_spec::CargoTargetSpec,
     config::{Config, RustfmtConfig, WorkspaceSymbolConfig},
-    diff::diff,
-    global_state::{GlobalState, GlobalStateSnapshot},
-    hack_recover_crate_name,
+    diagnostics::convert_diagnostic,
+    global_state::{FetchWorkspaceRequest, GlobalState, GlobalStateSnapshot},
     line_index::LineEndings,
     lsp::{
+        LspError, completion_item_hash,
+        ext::{
+            InternalTestingFetchConfigOption, InternalTestingFetchConfigParams,
+            InternalTestingFetchConfigResponse,
+        },
         from_proto, to_proto,
         utils::{all_edits_are_disjoint, invalid_params_error},
-        LspError,
     },
     lsp_ext::{
         self, CrateInfoResult, ExternalDocsPair, ExternalDocsResponse, FetchDependencyListParams,
         FetchDependencyListResult, PositionOrRange, ViewCrateGraphParams, WorkspaceSymbolParams,
     },
+    target_spec::{CargoTargetSpec, TargetSpec},
+    test_runner::{CargoTestHandle, TestTarget},
+    try_default,
 };
 
 pub(crate) fn handle_workspace_reload(state: &mut GlobalState, _: ()) -> anyhow::Result<()> {
     state.proc_macro_clients = Arc::from_iter([]);
     state.build_deps_changed = false;
 
-    state.fetch_workspaces_queue.request_op("reload workspace request".to_owned(), false);
+    let req = FetchWorkspaceRequest { path: None, force_crate_graph_reload: false };
+    state.fetch_workspaces_queue.request_op("reload workspace request".to_owned(), req);
     Ok(())
 }
 
@@ -72,14 +75,15 @@ pub(crate) fn handle_analyzer_status(
     snap: GlobalStateSnapshot,
     params: lsp_ext::AnalyzerStatusParams,
 ) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_analyzer_status").entered();
+    let _p = tracing::info_span!("handle_analyzer_status").entered();
 
     let mut buf = String::new();
 
     let mut file_id = None;
     if let Some(tdi) = params.text_document {
         match from_proto::file_id(&snap, &tdi.uri) {
-            Ok(it) => file_id = Some(it),
+            Ok(Some(it)) => file_id = Some(it),
+            Ok(None) => {}
             Err(_) => format_to!(buf, "file {} not found in vfs", tdi.uri),
         }
     }
@@ -99,10 +103,7 @@ pub(crate) fn handle_analyzer_status(
         format_to!(
             buf,
             "Workspace root folders: {:?}",
-            snap.workspaces
-                .iter()
-                .map(|ws| ws.workspace_definition_path())
-                .collect::<Vec<&AbsPath>>()
+            snap.workspaces.iter().map(|ws| ws.manifest_or_root()).collect::<Vec<&AbsPath>>()
         );
     }
     buf.push_str("\nAnalysis:\n");
@@ -112,11 +113,18 @@ pub(crate) fn handle_analyzer_status(
             .status(file_id)
             .unwrap_or_else(|_| "Analysis retrieval was cancelled".to_owned()),
     );
+
+    buf.push_str("\nVersion: \n");
+    format_to!(buf, "{}", crate::version());
+
+    buf.push_str("\nConfiguration: \n");
+    format_to!(buf, "{:#?}", snap.config);
+
     Ok(buf)
 }
 
 pub(crate) fn handle_memory_usage(state: &mut GlobalState, _: ()) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_memory_usage").entered();
+    let _p = tracing::info_span!("handle_memory_usage").entered();
     let mem = state.analysis_host.per_query_memory_usage();
 
     let mut out = String::new();
@@ -128,20 +136,13 @@ pub(crate) fn handle_memory_usage(state: &mut GlobalState, _: ()) -> anyhow::Res
     Ok(out)
 }
 
-pub(crate) fn handle_shuffle_crate_graph(state: &mut GlobalState, _: ()) -> anyhow::Result<()> {
-    state.analysis_host.shuffle_crate_graph();
-    Ok(())
-}
-
-pub(crate) fn handle_syntax_tree(
+pub(crate) fn handle_view_syntax_tree(
     snap: GlobalStateSnapshot,
-    params: lsp_ext::SyntaxTreeParams,
+    params: lsp_ext::ViewSyntaxTreeParams,
 ) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_syntax_tree").entered();
-    let id = from_proto::file_id(&snap, &params.text_document.uri)?;
-    let line_index = snap.file_line_index(id)?;
-    let text_range = params.range.and_then(|r| from_proto::text_range(&line_index, r).ok());
-    let res = snap.analysis.syntax_tree(id, text_range)?;
+    let _p = tracing::info_span!("handle_view_syntax_tree").entered();
+    let id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
+    let res = snap.analysis.view_syntax_tree(id)?;
     Ok(res)
 }
 
@@ -149,8 +150,8 @@ pub(crate) fn handle_view_hir(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_view_hir").entered();
-    let position = from_proto::file_position(&snap, params)?;
+    let _p = tracing::info_span!("handle_view_hir").entered();
+    let position = try_default!(from_proto::file_position(&snap, params)?);
     let res = snap.analysis.view_hir(position)?;
     Ok(res)
 }
@@ -159,8 +160,8 @@ pub(crate) fn handle_view_mir(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_view_mir").entered();
-    let position = from_proto::file_position(&snap, params)?;
+    let _p = tracing::info_span!("handle_view_mir").entered();
+    let position = try_default!(from_proto::file_position(&snap, params)?);
     let res = snap.analysis.view_mir(position)?;
     Ok(res)
 }
@@ -169,8 +170,8 @@ pub(crate) fn handle_interpret_function(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_interpret_function").entered();
-    let position = from_proto::file_position(&snap, params)?;
+    let _p = tracing::info_span!("handle_interpret_function").entered();
+    let position = try_default!(from_proto::file_position(&snap, params)?);
     let res = snap.analysis.interpret_function(position)?;
     Ok(res)
 }
@@ -179,7 +180,7 @@ pub(crate) fn handle_view_file_text(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentIdentifier,
 ) -> anyhow::Result<String> {
-    let file_id = from_proto::file_id(&snap, &params.uri)?;
+    let file_id = try_default!(from_proto::file_id(&snap, &params.uri)?);
     Ok(snap.analysis.file_text(file_id)?.to_string())
 }
 
@@ -187,10 +188,42 @@ pub(crate) fn handle_view_item_tree(
     snap: GlobalStateSnapshot,
     params: lsp_ext::ViewItemTreeParams,
 ) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_view_item_tree").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_view_item_tree").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let res = snap.analysis.view_item_tree(file_id)?;
     Ok(res)
+}
+
+// cargo test requires:
+// - the package is a member of the workspace
+// - the target in the package is not a build script (custom-build)
+// - the package name - the root of the test identifier supplied to this handler can be
+//   a package or a target inside a package.
+// - the target name - if the test identifier is a target, it's needed in addition to the
+//   package name to run the right test
+// - real names - the test identifier uses the namespace form where hyphens are replaced with
+//   underscores. cargo test requires the real name.
+// - the target kind e.g. bin or lib
+fn all_test_targets(cargo: &CargoWorkspace) -> impl Iterator<Item = TestTarget> {
+    cargo.packages().filter(|p| cargo[*p].is_member).flat_map(|p| {
+        let package = &cargo[p];
+        package.targets.iter().filter_map(|t| {
+            let target = &cargo[*t];
+            if target.kind == TargetKind::BuildScript {
+                None
+            } else {
+                Some(TestTarget {
+                    package: package.name.clone(),
+                    target: target.name.clone(),
+                    kind: target.kind,
+                })
+            }
+        })
+    })
+}
+
+fn find_test_target(namespace_root: &str, cargo: &CargoWorkspace) -> Option<TestTarget> {
+    all_test_targets(cargo).find(|t| namespace_root == t.target.replace('-', "_"))
 }
 
 pub(crate) fn handle_run_test(
@@ -200,42 +233,41 @@ pub(crate) fn handle_run_test(
     if let Some(_session) = state.test_run_session.take() {
         state.send_notification::<lsp_ext::EndRunTest>(());
     }
-    // We detect the lowest common ansector of all included tests, and
-    // run it. We ignore excluded tests for now, the client will handle
-    // it for us.
-    let lca = match params.include {
-        Some(tests) => tests
-            .into_iter()
-            .reduce(|x, y| {
-                let mut common_prefix = "".to_owned();
-                for (xc, yc) in x.chars().zip(y.chars()) {
-                    if xc != yc {
-                        break;
-                    }
-                    common_prefix.push(xc);
-                }
-                common_prefix
-            })
-            .unwrap_or_default(),
-        None => "".to_owned(),
-    };
-    let test_path = if lca.is_empty() {
-        None
-    } else if let Some((_, path)) = lca.split_once("::") {
-        Some(path)
-    } else {
-        None
-    };
+
     let mut handles = vec![];
     for ws in &*state.workspaces {
-        if let ProjectWorkspace::Cargo { cargo, .. } = ws {
-            let handle = flycheck::CargoTestHandle::new(
-                test_path,
-                state.config.cargo_test_options(),
-                cargo.workspace_root(),
-                state.test_run_sender.clone(),
-            )?;
-            handles.push(handle);
+        if let ProjectWorkspaceKind::Cargo { cargo, .. } = &ws.kind {
+            // need to deduplicate `include` to avoid redundant test runs
+            let tests = match params.include {
+                Some(ref include) => include
+                    .iter()
+                    .unique()
+                    .filter_map(|test| {
+                        let (root, remainder) = match test.split_once("::") {
+                            Some((root, remainder)) => (root.to_owned(), Some(remainder)),
+                            None => (test.clone(), None),
+                        };
+                        if let Some(target) = find_test_target(&root, cargo) {
+                            Some((target, remainder))
+                        } else {
+                            tracing::error!("Test target not found for: {test}");
+                            None
+                        }
+                    })
+                    .collect_vec(),
+                None => all_test_targets(cargo).map(|target| (target, None)).collect(),
+            };
+
+            for (target, path) in tests {
+                let handle = CargoTestHandle::new(
+                    path,
+                    state.config.cargo_test_options(None),
+                    cargo.workspace_root(),
+                    target,
+                    state.test_run_sender.clone(),
+                )?;
+                handles.push(handle);
+            }
         }
     }
     // Each process send finished signal twice, once for stdout and once for stderr
@@ -248,7 +280,7 @@ pub(crate) fn handle_discover_test(
     snap: GlobalStateSnapshot,
     params: lsp_ext::DiscoverTestParams,
 ) -> anyhow::Result<lsp_ext::DiscoverTestResults> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_discover_test").entered();
+    let _p = tracing::info_span!("handle_discover_test").entered();
     let (tests, scope) = match params.test_id {
         Some(id) => {
             let crate_id = id.split_once("::").map(|it| it.0).unwrap_or(&id);
@@ -259,9 +291,7 @@ pub(crate) fn handle_discover_test(
         }
         None => (snap.analysis.discover_test_roots()?, None),
     };
-    for t in &tests {
-        hack_recover_crate_name::insert_name(t.id.clone());
-    }
+
     Ok(lsp_ext::DiscoverTestResults {
         tests: tests
             .into_iter()
@@ -279,7 +309,7 @@ pub(crate) fn handle_view_crate_graph(
     snap: GlobalStateSnapshot,
     params: ViewCrateGraphParams,
 ) -> anyhow::Result<String> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_view_crate_graph").entered();
+    let _p = tracing::info_span!("handle_view_crate_graph").entered();
     let dot = snap.analysis.view_crate_graph(params.full)?.map_err(anyhow::Error::msg)?;
     Ok(dot)
 }
@@ -288,8 +318,8 @@ pub(crate) fn handle_expand_macro(
     snap: GlobalStateSnapshot,
     params: lsp_ext::ExpandMacroParams,
 ) -> anyhow::Result<Option<lsp_ext::ExpandedMacro>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_expand_macro").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_expand_macro").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let line_index = snap.file_line_index(file_id)?;
     let offset = from_proto::offset(&line_index, params.position)?;
 
@@ -301,8 +331,8 @@ pub(crate) fn handle_selection_range(
     snap: GlobalStateSnapshot,
     params: lsp_types::SelectionRangeParams,
 ) -> anyhow::Result<Option<Vec<lsp_types::SelectionRange>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_selection_range").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_selection_range").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let line_index = snap.file_line_index(file_id)?;
     let res: anyhow::Result<Vec<lsp_types::SelectionRange>> = params
         .positions
@@ -344,8 +374,8 @@ pub(crate) fn handle_matching_brace(
     snap: GlobalStateSnapshot,
     params: lsp_ext::MatchingBraceParams,
 ) -> anyhow::Result<Vec<Position>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_matching_brace").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_matching_brace").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let line_index = snap.file_line_index(file_id)?;
     params
         .positions
@@ -367,11 +397,10 @@ pub(crate) fn handle_join_lines(
     snap: GlobalStateSnapshot,
     params: lsp_ext::JoinLinesParams,
 ) -> anyhow::Result<Vec<lsp_types::TextEdit>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_join_lines").entered();
+    let _p = tracing::info_span!("handle_join_lines").entered();
 
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
-    let source_root = snap.analysis.source_root(file_id)?;
-    let config = snap.config.join_lines(Some(source_root));
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
+    let config = snap.config.join_lines();
     let line_index = snap.file_line_index(file_id)?;
 
     let mut res = TextEdit::default();
@@ -393,14 +422,19 @@ pub(crate) fn handle_on_enter(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<Option<Vec<lsp_ext::SnippetTextEdit>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_on_enter").entered();
-    let position = from_proto::file_position(&snap, params)?;
+    let _p = tracing::info_span!("handle_on_enter").entered();
+    let position = try_default!(from_proto::file_position(&snap, params)?);
     let edit = match snap.analysis.on_enter(position)? {
         None => return Ok(None),
         Some(it) => it,
     };
     let line_index = snap.file_line_index(position.file_id)?;
-    let edit = to_proto::snippet_text_edit_vec(&line_index, true, edit);
+    let edit = to_proto::snippet_text_edit_vec(
+        &line_index,
+        true,
+        edit,
+        snap.config.change_annotation_support(),
+    );
     Ok(Some(edit))
 }
 
@@ -408,30 +442,26 @@ pub(crate) fn handle_on_type_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentOnTypeFormattingParams,
 ) -> anyhow::Result<Option<Vec<lsp_ext::SnippetTextEdit>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_on_type_formatting").entered();
-    let mut position = from_proto::file_position(&snap, params.text_document_position)?;
+    let _p = tracing::info_span!("handle_on_type_formatting").entered();
+    let char_typed = params.ch.chars().next().unwrap_or('\0');
+    if !snap.config.typing_trigger_chars().contains(char_typed) {
+        return Ok(None);
+    }
+
+    let mut position =
+        try_default!(from_proto::file_position(&snap, params.text_document_position)?);
     let line_index = snap.file_line_index(position.file_id)?;
 
     // in `ide`, the `on_type` invariant is that
     // `text.char_at(position) == typed_char`.
     position.offset -= TextSize::of('.');
-    let char_typed = params.ch.chars().next().unwrap_or('\0');
 
     let text = snap.analysis.file_text(position.file_id)?;
     if stdx::never!(!text[usize::from(position.offset)..].starts_with(char_typed)) {
         return Ok(None);
     }
 
-    // We have an assist that inserts ` ` after typing `->` in `fn foo() ->{`,
-    // but it requires precise cursor positioning to work, and one can't
-    // position the cursor with on_type formatting. So, let's just toggle this
-    // feature off here, hoping that we'll enable it one day, 😿.
-    if char_typed == '>' {
-        return Ok(None);
-    }
-
-    let edit =
-        snap.analysis.on_char_typed(position, char_typed, snap.config.typing_autoclose_angle())?;
+    let edit = snap.analysis.on_char_typed(position, char_typed)?;
     let edit = match edit {
         Some(it) => it,
         None => return Ok(None),
@@ -441,16 +471,99 @@ pub(crate) fn handle_on_type_formatting(
     let (_, (text_edit, snippet_edit)) = edit.source_file_edits.into_iter().next().unwrap();
     stdx::always!(snippet_edit.is_none(), "on type formatting shouldn't use structured snippets");
 
-    let change = to_proto::snippet_text_edit_vec(&line_index, edit.is_snippet, text_edit);
+    let change = to_proto::snippet_text_edit_vec(
+        &line_index,
+        edit.is_snippet,
+        text_edit,
+        snap.config.change_annotation_support(),
+    );
     Ok(Some(change))
+}
+
+pub(crate) fn empty_diagnostic_report() -> lsp_types::DocumentDiagnosticReportResult {
+    lsp_types::DocumentDiagnosticReportResult::Report(lsp_types::DocumentDiagnosticReport::Full(
+        lsp_types::RelatedFullDocumentDiagnosticReport {
+            related_documents: None,
+            full_document_diagnostic_report: lsp_types::FullDocumentDiagnosticReport {
+                result_id: Some("rust-analyzer".to_owned()),
+                items: vec![],
+            },
+        },
+    ))
+}
+
+pub(crate) fn handle_document_diagnostics(
+    snap: GlobalStateSnapshot,
+    params: lsp_types::DocumentDiagnosticParams,
+) -> anyhow::Result<lsp_types::DocumentDiagnosticReportResult> {
+    let file_id = match from_proto::file_id(&snap, &params.text_document.uri)? {
+        Some(it) => it,
+        None => return Ok(empty_diagnostic_report()),
+    };
+    let source_root = snap.analysis.source_root_id(file_id)?;
+    if !snap.analysis.is_local_source_root(source_root)? {
+        return Ok(empty_diagnostic_report());
+    }
+    let source_root = snap.analysis.source_root_id(file_id)?;
+    let config = snap.config.diagnostics(Some(source_root));
+    if !config.enabled {
+        return Ok(empty_diagnostic_report());
+    }
+    let line_index = snap.file_line_index(file_id)?;
+    let supports_related = snap.config.text_document_diagnostic_related_document_support();
+
+    let mut related_documents = FxHashMap::default();
+    let diagnostics = snap
+        .analysis
+        .full_diagnostics(&config, AssistResolveStrategy::None, file_id)?
+        .into_iter()
+        .filter_map(|d| {
+            let file = d.range.file_id;
+            if file == file_id {
+                let diagnostic = convert_diagnostic(&line_index, d);
+                return Some(diagnostic);
+            }
+            if supports_related {
+                let (diagnostics, line_index) = related_documents
+                    .entry(file)
+                    .or_insert_with(|| (Vec::new(), snap.file_line_index(file).ok()));
+                let diagnostic = convert_diagnostic(line_index.as_mut()?, d);
+                diagnostics.push(diagnostic);
+            }
+            None
+        });
+    Ok(lsp_types::DocumentDiagnosticReportResult::Report(
+        lsp_types::DocumentDiagnosticReport::Full(lsp_types::RelatedFullDocumentDiagnosticReport {
+            full_document_diagnostic_report: lsp_types::FullDocumentDiagnosticReport {
+                result_id: Some("rust-analyzer".to_owned()),
+                items: diagnostics.collect(),
+            },
+            related_documents: related_documents.is_empty().not().then(|| {
+                related_documents
+                    .into_iter()
+                    .map(|(id, (items, _))| {
+                        (
+                            to_proto::url(&snap, id),
+                            lsp_types::DocumentDiagnosticReportKind::Full(
+                                lsp_types::FullDocumentDiagnosticReport {
+                                    result_id: Some("rust-analyzer".to_owned()),
+                                    items,
+                                },
+                            ),
+                        )
+                    })
+                    .collect()
+            }),
+        }),
+    ))
 }
 
 pub(crate) fn handle_document_symbol(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentSymbolParams,
 ) -> anyhow::Result<Option<lsp_types::DocumentSymbolResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_document_symbol").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_document_symbol").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let line_index = snap.file_line_index(file_id)?;
 
     let mut parents: Vec<(lsp_types::DocumentSymbol, Option<usize>)> = Vec::new();
@@ -511,18 +624,11 @@ pub(crate) fn handle_document_symbol(
         url: &Url,
         res: &mut Vec<SymbolInformation>,
     ) {
-        let mut tags = Vec::new();
-
-        #[allow(deprecated)]
-        if let Some(true) = symbol.deprecated {
-            tags.push(SymbolTag::DEPRECATED)
-        }
-
         #[allow(deprecated)]
         res.push(SymbolInformation {
             name: symbol.name.clone(),
             kind: symbol.kind,
-            tags: Some(tags),
+            tags: symbol.tags.clone(),
             deprecated: symbol.deprecated,
             location: Location::new(url.clone(), symbol.range),
             container_name,
@@ -538,9 +644,9 @@ pub(crate) fn handle_workspace_symbol(
     snap: GlobalStateSnapshot,
     params: WorkspaceSymbolParams,
 ) -> anyhow::Result<Option<lsp_types::WorkspaceSymbolResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_workspace_symbol").entered();
+    let _p = tracing::info_span!("handle_workspace_symbol").entered();
 
-    let config = snap.config.workspace_symbol();
+    let config = snap.config.workspace_symbol(None);
     let (all_symbols, libs) = decide_search_scope_and_kind(&params, &config);
 
     let query = {
@@ -551,6 +657,9 @@ pub(crate) fn handle_workspace_symbol(
         }
         if libs {
             q.libs();
+        }
+        if config.search_exclude_imports {
+            q.exclude_imports();
         }
         q
     };
@@ -630,7 +739,7 @@ pub(crate) fn handle_will_rename_files(
     snap: GlobalStateSnapshot,
     params: lsp_types::RenameFilesParams,
 ) -> anyhow::Result<Option<lsp_types::WorkspaceEdit>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_will_rename_files").entered();
+    let _p = tracing::info_span!("handle_will_rename_files").entered();
 
     let source_changes: Vec<SourceChange> = params
         .files
@@ -671,7 +780,7 @@ pub(crate) fn handle_will_rename_files(
             }
         })
         .filter_map(|(file_id, new_name)| {
-            snap.analysis.will_rename_file(file_id, &new_name).ok()?
+            snap.analysis.will_rename_file(file_id?, &new_name).ok()?
         })
         .collect();
 
@@ -692,8 +801,9 @@ pub(crate) fn handle_goto_definition(
     snap: GlobalStateSnapshot,
     params: lsp_types::GotoDefinitionParams,
 ) -> anyhow::Result<Option<lsp_types::GotoDefinitionResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_goto_definition").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position_params)?;
+    let _p = tracing::info_span!("handle_goto_definition").entered();
+    let position =
+        try_default!(from_proto::file_position(&snap, params.text_document_position_params)?);
     let nav_info = match snap.analysis.goto_definition(position)? {
         None => return Ok(None),
         Some(it) => it,
@@ -707,8 +817,11 @@ pub(crate) fn handle_goto_declaration(
     snap: GlobalStateSnapshot,
     params: lsp_types::request::GotoDeclarationParams,
 ) -> anyhow::Result<Option<lsp_types::request::GotoDeclarationResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_goto_declaration").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position_params.clone())?;
+    let _p = tracing::info_span!("handle_goto_declaration").entered();
+    let position = try_default!(from_proto::file_position(
+        &snap,
+        params.text_document_position_params.clone()
+    )?);
     let nav_info = match snap.analysis.goto_declaration(position)? {
         None => return handle_goto_definition(snap, params),
         Some(it) => it,
@@ -722,8 +835,9 @@ pub(crate) fn handle_goto_implementation(
     snap: GlobalStateSnapshot,
     params: lsp_types::request::GotoImplementationParams,
 ) -> anyhow::Result<Option<lsp_types::request::GotoImplementationResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_goto_implementation").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position_params)?;
+    let _p = tracing::info_span!("handle_goto_implementation").entered();
+    let position =
+        try_default!(from_proto::file_position(&snap, params.text_document_position_params)?);
     let nav_info = match snap.analysis.goto_implementation(position)? {
         None => return Ok(None),
         Some(it) => it,
@@ -737,8 +851,9 @@ pub(crate) fn handle_goto_type_definition(
     snap: GlobalStateSnapshot,
     params: lsp_types::request::GotoTypeDefinitionParams,
 ) -> anyhow::Result<Option<lsp_types::request::GotoTypeDefinitionResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_goto_type_definition").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position_params)?;
+    let _p = tracing::info_span!("handle_goto_type_definition").entered();
+    let position =
+        try_default!(from_proto::file_position(&snap, params.text_document_position_params)?);
     let nav_info = match snap.analysis.goto_type_definition(position)? {
         None => return Ok(None),
         Some(it) => it,
@@ -752,13 +867,16 @@ pub(crate) fn handle_parent_module(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<Option<lsp_types::GotoDefinitionResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_parent_module").entered();
+    let _p = tracing::info_span!("handle_parent_module").entered();
     if let Ok(file_path) = &params.text_document.uri.to_file_path() {
         if file_path.file_name().unwrap_or_default() == "Cargo.toml" {
             // search workspaces for parent packages or fallback to workspace root
-            let abs_path_buf = match AbsPathBuf::try_from(file_path.to_path_buf()).ok() {
-                Some(abs_path_buf) => abs_path_buf,
-                None => return Ok(None),
+            let abs_path_buf = match Utf8PathBuf::from_path_buf(file_path.to_path_buf())
+                .ok()
+                .map(AbsPathBuf::try_from)
+            {
+                Some(Ok(abs_path_buf)) => abs_path_buf,
+                _ => return Ok(None),
             };
 
             let manifest_path = match ManifestPath::try_from(abs_path_buf).ok() {
@@ -769,8 +887,11 @@ pub(crate) fn handle_parent_module(
             let links: Vec<LocationLink> = snap
                 .workspaces
                 .iter()
-                .filter_map(|ws| match ws {
-                    ProjectWorkspace::Cargo { cargo, .. } => cargo.parent_manifests(&manifest_path),
+                .filter_map(|ws| match &ws.kind {
+                    ProjectWorkspaceKind::Cargo { cargo, .. }
+                    | ProjectWorkspaceKind::DetachedFile { cargo: Some((cargo, _, _)), .. } => {
+                        cargo.parent_manifests(&manifest_path)
+                    }
                     _ => None,
                 })
                 .flatten()
@@ -785,14 +906,14 @@ pub(crate) fn handle_parent_module(
         }
 
         // check if invoked at the crate root
-        let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+        let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
         let crate_id = match snap.analysis.crates_for(file_id)?.first() {
             Some(&crate_id) => crate_id,
             None => return Ok(None),
         };
-        let cargo_spec = match CargoTargetSpec::for_file(&snap, file_id)? {
-            Some(it) => it,
-            None => return Ok(None),
+        let cargo_spec = match TargetSpec::for_file(&snap, file_id)? {
+            Some(TargetSpec::Cargo(it)) => it,
+            Some(TargetSpec::ProjectJson(_)) | None => return Ok(None),
         };
 
         if snap.analysis.crate_root(crate_id)? == file_id {
@@ -809,8 +930,20 @@ pub(crate) fn handle_parent_module(
     }
 
     // locate parent module by semantics
-    let position = from_proto::file_position(&snap, params)?;
+    let position = try_default!(from_proto::file_position(&snap, params)?);
     let navs = snap.analysis.parent_module(position)?;
+    let res = to_proto::goto_definition_response(&snap, None, navs)?;
+    Ok(Some(res))
+}
+
+pub(crate) fn handle_child_modules(
+    snap: GlobalStateSnapshot,
+    params: lsp_types::TextDocumentPositionParams,
+) -> anyhow::Result<Option<lsp_types::GotoDefinitionResponse>> {
+    let _p = tracing::info_span!("handle_child_modules").entered();
+    // locate child module by semantics
+    let position = try_default!(from_proto::file_position(&snap, params)?);
+    let navs = snap.analysis.child_modules(position)?;
     let res = to_proto::goto_definition_response(&snap, None, navs)?;
     Ok(Some(res))
 }
@@ -819,49 +952,62 @@ pub(crate) fn handle_runnables(
     snap: GlobalStateSnapshot,
     params: lsp_ext::RunnablesParams,
 ) -> anyhow::Result<Vec<lsp_ext::Runnable>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_runnables").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_runnables").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
+    let source_root = snap.analysis.source_root_id(file_id).ok();
     let line_index = snap.file_line_index(file_id)?;
     let offset = params.position.and_then(|it| from_proto::offset(&line_index, it).ok());
-    let cargo_spec = CargoTargetSpec::for_file(&snap, file_id)?;
-
-    let expect_test = match offset {
-        Some(offset) => {
-            let source_file = snap.analysis.parse(file_id)?;
-            algo::find_node_at_offset::<ast::MacroCall>(source_file.syntax(), offset)
-                .and_then(|it| it.path()?.segment()?.name_ref())
-                .map_or(false, |it| it.text() == "expect" || it.text() == "expect_file")
-        }
-        None => false,
-    };
+    let target_spec = TargetSpec::for_file(&snap, file_id)?;
 
     let mut res = Vec::new();
     for runnable in snap.analysis.runnables(file_id)? {
-        if should_skip_for_offset(&runnable, offset) {
+        if should_skip_for_offset(&runnable, offset)
+            || should_skip_target(&runnable, target_spec.as_ref())
+        {
             continue;
         }
-        if should_skip_target(&runnable, cargo_spec.as_ref()) {
-            continue;
+
+        let update_test = runnable.update_test;
+        if let Some(mut runnable) = to_proto::runnable(&snap, runnable)? {
+            if let Some(runnable) = to_proto::make_update_runnable(&runnable, update_test) {
+                res.push(runnable);
+            }
+
+            if let lsp_ext::RunnableArgs::Cargo(r) = &mut runnable.args {
+                if let Some(TargetSpec::Cargo(CargoTargetSpec {
+                    sysroot_root: Some(sysroot_root),
+                    ..
+                })) = &target_spec
+                {
+                    r.environment.insert("RUSTC_TOOLCHAIN".to_owned(), sysroot_root.to_string());
+                }
+            };
+
+            res.push(runnable);
         }
-        let mut runnable = to_proto::runnable(&snap, runnable)?;
-        if expect_test {
-            runnable.label = format!("{} + expect", runnable.label);
-            runnable.args.expect_test = Some(true);
-        }
-        res.push(runnable);
     }
 
     // Add `cargo check` and `cargo test` for all targets of the whole package
-    let config = snap.config.runnables();
-    match cargo_spec {
-        Some(spec) => {
-            let all_targets = !snap.analysis.is_crate_no_std(spec.crate_id)?;
-            for cmd in ["check", "test"] {
+    let config = snap.config.runnables(source_root);
+    match target_spec {
+        Some(TargetSpec::Cargo(spec)) => {
+            let is_crate_no_std = snap.analysis.is_crate_no_std(spec.crate_id)?;
+            for cmd in ["check", "run", "test"] {
+                if cmd == "run" && spec.target_kind != TargetKind::Bin {
+                    continue;
+                }
+                let cwd = if cmd != "test" || spec.target_kind == TargetKind::Bin {
+                    spec.workspace_root.clone()
+                } else {
+                    spec.cargo_toml.parent().to_path_buf()
+                };
                 let mut cargo_args =
                     vec![cmd.to_owned(), "--package".to_owned(), spec.package.clone()];
+                let all_targets = cmd != "run" && !is_crate_no_std;
                 if all_targets {
                     cargo_args.push("--all-targets".to_owned());
                 }
+                cargo_args.extend(config.cargo_extra_args.iter().cloned());
                 res.push(lsp_ext::Runnable {
                     label: format!(
                         "cargo {cmd} -p {}{all_targets}",
@@ -870,32 +1016,42 @@ pub(crate) fn handle_runnables(
                     ),
                     location: None,
                     kind: lsp_ext::RunnableKind::Cargo,
-                    args: lsp_ext::CargoRunnable {
+                    args: lsp_ext::RunnableArgs::Cargo(lsp_ext::CargoRunnableArgs {
                         workspace_root: Some(spec.workspace_root.clone().into()),
+                        cwd: cwd.into(),
                         override_cargo: config.override_cargo.clone(),
                         cargo_args,
-                        cargo_extra_args: config.cargo_extra_args.clone(),
                         executable_args: Vec::new(),
-                        expect_test: None,
-                    },
+                        environment: spec
+                            .sysroot_root
+                            .as_ref()
+                            .map(|root| ("RUSTC_TOOLCHAIN".to_owned(), root.to_string()))
+                            .into_iter()
+                            .collect(),
+                    }),
                 })
             }
         }
+        Some(TargetSpec::ProjectJson(_)) => {}
         None => {
             if !snap.config.linked_or_discovered_projects().is_empty() {
-                res.push(lsp_ext::Runnable {
-                    label: "cargo check --workspace".to_owned(),
-                    location: None,
-                    kind: lsp_ext::RunnableKind::Cargo,
-                    args: lsp_ext::CargoRunnable {
-                        workspace_root: None,
-                        override_cargo: config.override_cargo,
-                        cargo_args: vec!["check".to_owned(), "--workspace".to_owned()],
-                        cargo_extra_args: config.cargo_extra_args,
-                        executable_args: Vec::new(),
-                        expect_test: None,
-                    },
-                });
+                if let Some(path) = snap.file_id_to_file_path(file_id).parent() {
+                    let mut cargo_args = vec!["check".to_owned(), "--workspace".to_owned()];
+                    cargo_args.extend(config.cargo_extra_args.iter().cloned());
+                    res.push(lsp_ext::Runnable {
+                        label: "cargo check --workspace".to_owned(),
+                        location: None,
+                        kind: lsp_ext::RunnableKind::Cargo,
+                        args: lsp_ext::RunnableArgs::Cargo(lsp_ext::CargoRunnableArgs {
+                            workspace_root: None,
+                            cwd: path.as_path().unwrap().to_path_buf().into(),
+                            override_cargo: config.override_cargo,
+                            cargo_args,
+                            executable_args: Vec::new(),
+                            environment: Default::default(),
+                        }),
+                    });
+                };
             }
         }
     }
@@ -914,13 +1070,13 @@ pub(crate) fn handle_related_tests(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<Vec<lsp_ext::TestInfo>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_related_tests").entered();
-    let position = from_proto::file_position(&snap, params)?;
+    let _p = tracing::info_span!("handle_related_tests").entered();
+    let position = try_default!(from_proto::file_position(&snap, params)?);
 
     let tests = snap.analysis.related_tests(position, None)?;
     let mut res = Vec::new();
     for it in tests {
-        if let Ok(runnable) = to_proto::runnable(&snap, it) {
+        if let Ok(Some(runnable)) = to_proto::runnable(&snap, it) {
             res.push(lsp_ext::TestInfo { runnable })
         }
     }
@@ -930,16 +1086,23 @@ pub(crate) fn handle_related_tests(
 
 pub(crate) fn handle_completion(
     snap: GlobalStateSnapshot,
-    params: lsp_types::CompletionParams,
+    lsp_types::CompletionParams {
+        text_document_position,
+        context,
+        ..
+    }: lsp_types::CompletionParams,
 ) -> anyhow::Result<Option<lsp_types::CompletionResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_completion").entered();
-    let text_document_position = params.text_document_position.clone();
-    let position = from_proto::file_position(&snap, params.text_document_position)?;
+    let _p = tracing::info_span!("handle_completion").entered();
+    let mut position =
+        try_default!(from_proto::file_position(&snap, text_document_position.clone())?);
+    let line_index = snap.file_line_index(position.file_id)?;
     let completion_trigger_character =
-        params.context.and_then(|ctx| ctx.trigger_character).and_then(|s| s.chars().next());
+        context.and_then(|ctx| ctx.trigger_character).and_then(|s| s.chars().next());
 
-    let source_root = snap.analysis.source_root(position.file_id)?;
+    let source_root = snap.analysis.source_root_id(position.file_id)?;
     let completion_config = &snap.config.completion(Some(source_root));
+    // FIXME: We should fix up the position when retrying the cancelled request instead
+    position.offset = position.offset.min(line_index.index.len());
     let items = match snap.analysis.completions(
         completion_config,
         position,
@@ -948,10 +1111,16 @@ pub(crate) fn handle_completion(
         None => return Ok(None),
         Some(items) => items,
     };
-    let line_index = snap.file_line_index(position.file_id)?;
 
-    let items =
-        to_proto::completion_items(&snap.config, &line_index, text_document_position, items);
+    let items = to_proto::completion_items(
+        &snap.config,
+        &completion_config.fields_to_resolve,
+        &line_index,
+        snap.file_version(position.file_id),
+        text_document_position,
+        completion_trigger_character,
+        items,
+    );
 
     let completion_list = lsp_types::CompletionList { is_incomplete: true, items };
     Ok(Some(completion_list.into()))
@@ -961,7 +1130,7 @@ pub(crate) fn handle_completion_resolve(
     snap: GlobalStateSnapshot,
     mut original_completion: CompletionItem,
 ) -> anyhow::Result<CompletionItem> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_completion_resolve").entered();
+    let _p = tracing::info_span!("handle_completion_resolve").entered();
 
     if !all_edits_are_disjoint(&original_completion, &[]) {
         return Err(invalid_params_error(
@@ -970,56 +1139,97 @@ pub(crate) fn handle_completion_resolve(
         .into());
     }
 
-    let data = match original_completion.data.take() {
-        Some(it) => it,
-        None => return Ok(original_completion),
+    let Some(data) = original_completion.data.take() else {
+        return Ok(original_completion);
     };
 
     let resolve_data: lsp_ext::CompletionResolveData = serde_json::from_value(data)?;
 
-    let file_id = from_proto::file_id(&snap, &resolve_data.position.text_document.uri)?;
+    let file_id = from_proto::file_id(&snap, &resolve_data.position.text_document.uri)?
+        .expect("we never provide completions for excluded files");
     let line_index = snap.file_line_index(file_id)?;
-    let offset = from_proto::offset(&line_index, resolve_data.position.position)?;
-    let source_root = snap.analysis.source_root(file_id)?;
+    // FIXME: We should fix up the position when retrying the cancelled request instead
+    let Ok(offset) = from_proto::offset(&line_index, resolve_data.position.position) else {
+        return Ok(original_completion);
+    };
+    let source_root = snap.analysis.source_root_id(file_id)?;
 
-    let additional_edits = snap
-        .analysis
-        .resolve_completion_edits(
-            &snap.config.completion(Some(source_root)),
-            FilePosition { file_id, offset },
-            resolve_data
-                .imports
-                .into_iter()
-                .map(|import| (import.full_import_path, import.imported_name)),
-        )?
-        .into_iter()
-        .flat_map(|edit| edit.into_iter().map(|indel| to_proto::text_edit(&line_index, indel)))
-        .collect::<Vec<_>>();
+    let mut forced_resolve_completions_config = snap.config.completion(Some(source_root));
+    forced_resolve_completions_config.fields_to_resolve = CompletionFieldsToResolve::empty();
 
-    if !all_edits_are_disjoint(&original_completion, &additional_edits) {
-        return Err(LspError::new(
-            ErrorCode::InternalError as i32,
-            "Import edit overlaps with the original completion edits, this is not LSP-compliant"
-                .into(),
-        )
-        .into());
+    let position = FilePosition { file_id, offset };
+    let Some(completions) = snap.analysis.completions(
+        &forced_resolve_completions_config,
+        position,
+        resolve_data.trigger_character,
+    )?
+    else {
+        return Ok(original_completion);
+    };
+    let Ok(resolve_data_hash) = BASE64_STANDARD.decode(resolve_data.hash) else {
+        return Ok(original_completion);
+    };
+
+    let Some(corresponding_completion) = completions.into_iter().find(|completion_item| {
+        // Avoid computing hashes for items that obviously do not match
+        // r-a might append a detail-based suffix to the label, so we cannot check for equality
+        original_completion.label.starts_with(completion_item.label.primary.as_str())
+            && resolve_data_hash == completion_item_hash(completion_item, resolve_data.for_ref)
+    }) else {
+        return Ok(original_completion);
+    };
+
+    let mut resolved_completions = to_proto::completion_items(
+        &snap.config,
+        &forced_resolve_completions_config.fields_to_resolve,
+        &line_index,
+        snap.file_version(position.file_id),
+        resolve_data.position,
+        resolve_data.trigger_character,
+        vec![corresponding_completion],
+    );
+    let Some(mut resolved_completion) = resolved_completions.pop() else {
+        return Ok(original_completion);
+    };
+
+    if !resolve_data.imports.is_empty() {
+        let additional_edits = snap
+            .analysis
+            .resolve_completion_edits(
+                &forced_resolve_completions_config,
+                position,
+                resolve_data.imports.into_iter().map(|import| import.full_import_path),
+            )?
+            .into_iter()
+            .flat_map(|edit| edit.into_iter().map(|indel| to_proto::text_edit(&line_index, indel)))
+            .collect::<Vec<_>>();
+
+        if !all_edits_are_disjoint(&resolved_completion, &additional_edits) {
+            return Err(LspError::new(
+                ErrorCode::InternalError as i32,
+                "Import edit overlaps with the original completion edits, this is not LSP-compliant"
+                    .into(),
+            )
+            .into());
+        }
+
+        if let Some(original_additional_edits) = resolved_completion.additional_text_edits.as_mut()
+        {
+            original_additional_edits.extend(additional_edits)
+        } else {
+            resolved_completion.additional_text_edits = Some(additional_edits);
+        }
     }
 
-    if let Some(original_additional_edits) = original_completion.additional_text_edits.as_mut() {
-        original_additional_edits.extend(additional_edits)
-    } else {
-        original_completion.additional_text_edits = Some(additional_edits);
-    }
-
-    Ok(original_completion)
+    Ok(resolved_completion)
 }
 
 pub(crate) fn handle_folding_range(
     snap: GlobalStateSnapshot,
     params: FoldingRangeParams,
 ) -> anyhow::Result<Option<Vec<FoldingRange>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_folding_range").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_folding_range").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let folds = snap.analysis.folding_ranges(file_id)?;
     let text = snap.analysis.file_text(file_id)?;
     let line_index = snap.file_line_index(file_id)?;
@@ -1035,8 +1245,9 @@ pub(crate) fn handle_signature_help(
     snap: GlobalStateSnapshot,
     params: lsp_types::SignatureHelpParams,
 ) -> anyhow::Result<Option<lsp_types::SignatureHelp>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_signature_help").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position_params)?;
+    let _p = tracing::info_span!("handle_signature_help").entered();
+    let position =
+        try_default!(from_proto::file_position(&snap, params.text_document_position_params)?);
     let help = match snap.analysis.signature_help(position)? {
         Some(it) => it,
         None => return Ok(None),
@@ -1050,12 +1261,12 @@ pub(crate) fn handle_hover(
     snap: GlobalStateSnapshot,
     params: lsp_ext::HoverParams,
 ) -> anyhow::Result<Option<lsp_ext::Hover>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_hover").entered();
+    let _p = tracing::info_span!("handle_hover").entered();
     let range = match params.position {
         PositionOrRange::Position(position) => Range::new(position, position),
         PositionOrRange::Range(range) => range,
     };
-    let file_range = from_proto::file_range(&snap, &params.text_document, range)?;
+    let file_range = try_default!(from_proto::file_range(&snap, &params.text_document, range)?);
 
     let hover = snap.config.hover();
     let info = match snap.analysis.hover(&hover, file_range)? {
@@ -1088,8 +1299,8 @@ pub(crate) fn handle_prepare_rename(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<Option<PrepareRenameResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_prepare_rename").entered();
-    let position = from_proto::file_position(&snap, params)?;
+    let _p = tracing::info_span!("handle_prepare_rename").entered();
+    let position = try_default!(from_proto::file_position(&snap, params)?);
 
     let change = snap.analysis.prepare_rename(position)?.map_err(to_proto::rename_error)?;
 
@@ -1102,8 +1313,8 @@ pub(crate) fn handle_rename(
     snap: GlobalStateSnapshot,
     params: RenameParams,
 ) -> anyhow::Result<Option<WorkspaceEdit>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_rename").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position)?;
+    let _p = tracing::info_span!("handle_rename").entered();
+    let position = try_default!(from_proto::file_position(&snap, params.text_document_position)?);
 
     let mut change =
         snap.analysis.rename(position, &params.new_name)?.map_err(to_proto::rename_error)?;
@@ -1137,8 +1348,8 @@ pub(crate) fn handle_references(
     snap: GlobalStateSnapshot,
     params: lsp_types::ReferenceParams,
 ) -> anyhow::Result<Option<Vec<Location>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_references").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position)?;
+    let _p = tracing::info_span!("handle_references").entered();
+    let position = try_default!(from_proto::file_position(&snap, params.text_document_position)?);
 
     let exclude_imports = snap.config.find_all_refs_exclude_imports();
     let exclude_tests = snap.config.find_all_refs_exclude_tests();
@@ -1182,7 +1393,7 @@ pub(crate) fn handle_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentFormattingParams,
 ) -> anyhow::Result<Option<Vec<lsp_types::TextEdit>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_formatting").entered();
+    let _p = tracing::info_span!("handle_formatting").entered();
 
     run_rustfmt(&snap, params.text_document, None)
 }
@@ -1191,7 +1402,7 @@ pub(crate) fn handle_range_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentRangeFormattingParams,
 ) -> anyhow::Result<Option<Vec<lsp_types::TextEdit>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_range_formatting").entered();
+    let _p = tracing::info_span!("handle_range_formatting").entered();
 
     run_rustfmt(&snap, params.text_document, Some(params.range))
 }
@@ -1200,7 +1411,7 @@ pub(crate) fn handle_code_action(
     snap: GlobalStateSnapshot,
     params: lsp_types::CodeActionParams,
 ) -> anyhow::Result<Option<Vec<lsp_ext::CodeAction>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_code_action").entered();
+    let _p = tracing::info_span!("handle_code_action").entered();
 
     if !snap.config.code_action_literals() {
         // We intentionally don't support command-based actions, as those either
@@ -1209,10 +1420,10 @@ pub(crate) fn handle_code_action(
         return Ok(None);
     }
 
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let line_index = snap.file_line_index(file_id)?;
-    let frange = from_proto::file_range(&snap, &params.text_document, params.range)?;
-    let source_root = snap.analysis.source_root(file_id)?;
+    let frange = try_default!(from_proto::file_range(&snap, &params.text_document, params.range)?);
+    let source_root = snap.analysis.source_root_id(file_id)?;
 
     let mut assists_config = snap.config.assist(Some(source_root));
     assists_config.allowed = params
@@ -1231,13 +1442,16 @@ pub(crate) fn handle_code_action(
     };
     let assists = snap.analysis.assists_with_fixes(
         &assists_config,
-        &snap.config.diagnostics(Some(source_root)),
+        &snap.config.diagnostic_fixes(Some(source_root)),
         resolve,
         frange,
     )?;
     for (index, assist) in assists.into_iter().enumerate() {
-        let resolve_data =
-            if code_action_resolve_cap { Some((index, params.clone())) } else { None };
+        let resolve_data = if code_action_resolve_cap {
+            Some((index, params.clone(), snap.file_version(file_id)))
+        } else {
+            None
+        };
         let code_action = to_proto::code_action(&snap, assist, resolve_data)?;
 
         // Check if the client supports the necessary `ResourceOperation`s.
@@ -1254,7 +1468,13 @@ pub(crate) fn handle_code_action(
     }
 
     // Fixes from `cargo check`.
-    for fix in snap.check_fixes.values().filter_map(|it| it.get(&frange.file_id)).flatten() {
+    for fix in snap
+        .check_fixes
+        .iter()
+        .flat_map(|it| it.values())
+        .filter_map(|it| it.get(&frange.file_id))
+        .flatten()
+    {
         // FIXME: this mapping is awkward and shouldn't exist. Refactor
         // `snap.check_fixes` to not convert to LSP prematurely.
         let intersect_fix_range = fix
@@ -1275,17 +1495,20 @@ pub(crate) fn handle_code_action_resolve(
     snap: GlobalStateSnapshot,
     mut code_action: lsp_ext::CodeAction,
 ) -> anyhow::Result<lsp_ext::CodeAction> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_code_action_resolve").entered();
-    let params = match code_action.data.take() {
-        Some(it) => it,
-        None => return Err(invalid_params_error("code action without data".to_owned()).into()),
+    let _p = tracing::info_span!("handle_code_action_resolve").entered();
+    let Some(params) = code_action.data.take() else {
+        return Ok(code_action);
     };
 
-    let file_id = from_proto::file_id(&snap, &params.code_action_params.text_document.uri)?;
+    let file_id = from_proto::file_id(&snap, &params.code_action_params.text_document.uri)?
+        .expect("we never provide code actions for excluded files");
+    if snap.file_version(file_id) != params.version {
+        return Err(invalid_params_error("stale code action".to_owned()).into());
+    }
     let line_index = snap.file_line_index(file_id)?;
     let range = from_proto::text_range(&line_index, params.code_action_params.range)?;
     let frange = FileRange { file_id, range };
-    let source_root = snap.analysis.source_root(file_id)?;
+    let source_root = snap.analysis.source_root_id(file_id)?;
 
     let mut assists_config = snap.config.assist(Some(source_root));
     assists_config.allowed = params
@@ -1301,7 +1524,7 @@ pub(crate) fn handle_code_action_resolve(
                 "Failed to parse action id string '{}': {e}",
                 params.id
             ))
-            .into())
+            .into());
         }
     };
 
@@ -1310,7 +1533,7 @@ pub(crate) fn handle_code_action_resolve(
 
     let assists = snap.analysis.assists_with_fixes(
         &assists_config,
-        &snap.config.diagnostics(Some(source_root)),
+        &snap.config.diagnostic_fixes(Some(source_root)),
         AssistResolveStrategy::Single(assist_resolve),
         frange,
     )?;
@@ -1350,13 +1573,21 @@ pub(crate) fn handle_code_action_resolve(
 fn parse_action_id(action_id: &str) -> anyhow::Result<(usize, SingleResolve), String> {
     let id_parts = action_id.split(':').collect::<Vec<_>>();
     match id_parts.as_slice() {
-        [assist_id_string, assist_kind_string, index_string] => {
+        [assist_id_string, assist_kind_string, index_string, subtype_str] => {
             let assist_kind: AssistKind = assist_kind_string.parse()?;
             let index: usize = match index_string.parse() {
                 Ok(index) => index,
                 Err(e) => return Err(format!("Incorrect index string: {e}")),
             };
-            Ok((index, SingleResolve { assist_id: assist_id_string.to_string(), assist_kind }))
+            let assist_subtype = subtype_str.parse::<usize>().ok();
+            Ok((
+                index,
+                SingleResolve {
+                    assist_id: assist_id_string.to_string(),
+                    assist_kind,
+                    assist_subtype,
+                },
+            ))
         }
         _ => Err("Action id contains incorrect number of segments".to_owned()),
     }
@@ -1366,7 +1597,7 @@ pub(crate) fn handle_code_lens(
     snap: GlobalStateSnapshot,
     params: lsp_types::CodeLensParams,
 ) -> anyhow::Result<Option<Vec<CodeLens>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_code_lens").entered();
+    let _p = tracing::info_span!("handle_code_lens").entered();
 
     let lens_config = snap.config.lens();
     if lens_config.none() {
@@ -1374,15 +1605,15 @@ pub(crate) fn handle_code_lens(
         return Ok(Some(Vec::default()));
     }
 
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
-    let cargo_target_spec = CargoTargetSpec::for_file(&snap, file_id)?;
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
+    let target_spec = TargetSpec::for_file(&snap, file_id)?;
 
     let annotations = snap.analysis.annotations(
         &AnnotationConfig {
-            binary_target: cargo_target_spec
+            binary_target: target_spec
                 .map(|spec| {
                     matches!(
-                        spec.target_kind,
+                        spec.target_kind(),
                         TargetKind::Bin | TargetKind::Example | TargetKind::Test
                     )
                 })
@@ -1407,12 +1638,13 @@ pub(crate) fn handle_code_lens(
 
 pub(crate) fn handle_code_lens_resolve(
     snap: GlobalStateSnapshot,
-    code_lens: CodeLens,
+    mut code_lens: CodeLens,
 ) -> anyhow::Result<CodeLens> {
-    if code_lens.data.is_none() {
+    let Some(data) = code_lens.data.take() else {
         return Ok(code_lens);
-    }
-    let Some(annotation) = from_proto::annotation(&snap, code_lens.clone())? else {
+    };
+    let resolve = serde_json::from_value::<lsp_ext::CodeLensResolveData>(data)?;
+    let Some(annotation) = from_proto::annotation(&snap, code_lens.range, resolve)? else {
         return Ok(code_lens);
     };
     let annotation = snap.analysis.resolve_annotation(annotation)?;
@@ -1436,10 +1668,11 @@ pub(crate) fn handle_document_highlight(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentHighlightParams,
 ) -> anyhow::Result<Option<Vec<lsp_types::DocumentHighlight>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_document_highlight").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position_params)?;
+    let _p = tracing::info_span!("handle_document_highlight").entered();
+    let position =
+        try_default!(from_proto::file_position(&snap, params.text_document_position_params)?);
     let line_index = snap.file_line_index(position.file_id)?;
-    let source_root = snap.analysis.source_root(position.file_id)?;
+    let source_root = snap.analysis.source_root_id(position.file_id)?;
 
     let refs = match snap
         .analysis
@@ -1462,13 +1695,15 @@ pub(crate) fn handle_ssr(
     snap: GlobalStateSnapshot,
     params: lsp_ext::SsrParams,
 ) -> anyhow::Result<lsp_types::WorkspaceEdit> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_ssr").entered();
-    let selections = params
-        .selections
-        .iter()
-        .map(|range| from_proto::file_range(&snap, &params.position.text_document, *range))
-        .collect::<Result<Vec<_>, _>>()?;
-    let position = from_proto::file_position(&snap, params.position)?;
+    let _p = tracing::info_span!("handle_ssr").entered();
+    let selections = try_default!(
+        params
+            .selections
+            .iter()
+            .map(|range| from_proto::file_range(&snap, &params.position.text_document, *range))
+            .collect::<Result<Option<Vec<_>>, _>>()?
+    );
+    let position = try_default!(from_proto::file_position(&snap, params.position)?);
     let source_change = snap.analysis.structural_search_replace(
         &params.query,
         params.parse_only,
@@ -1482,17 +1717,20 @@ pub(crate) fn handle_inlay_hints(
     snap: GlobalStateSnapshot,
     params: InlayHintParams,
 ) -> anyhow::Result<Option<Vec<InlayHint>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_inlay_hints").entered();
+    let _p = tracing::info_span!("handle_inlay_hints").entered();
     let document_uri = &params.text_document.uri;
-    let FileRange { file_id, range } = from_proto::file_range(
+    let FileRange { file_id, range } = try_default!(from_proto::file_range(
         &snap,
         &TextDocumentIdentifier::new(document_uri.to_owned()),
         params.range,
-    )?;
+    )?);
     let line_index = snap.file_line_index(file_id)?;
-    let source_root = snap.analysis.source_root(file_id)?;
+    let range = TextRange::new(
+        range.start().min(line_index.index.len()),
+        range.end().min(line_index.index.len()),
+    );
 
-    let inlay_hints_config = snap.config.inlay_hints(Some(source_root));
+    let inlay_hints_config = snap.config.inlay_hints();
     Ok(Some(
         snap.analysis
             .inlay_hints(&inlay_hints_config, file_id, Some(range))?
@@ -1514,24 +1752,31 @@ pub(crate) fn handle_inlay_hints_resolve(
     snap: GlobalStateSnapshot,
     mut original_hint: InlayHint,
 ) -> anyhow::Result<InlayHint> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_inlay_hints_resolve").entered();
+    let _p = tracing::info_span!("handle_inlay_hints_resolve").entered();
 
-    let Some(data) = original_hint.data.take() else { return Ok(original_hint) };
+    let Some(data) = original_hint.data.take() else {
+        return Ok(original_hint);
+    };
     let resolve_data: lsp_ext::InlayHintResolveData = serde_json::from_value(data)?;
-    let Some(hash) = resolve_data.hash.parse().ok() else { return Ok(original_hint) };
     let file_id = FileId::from_raw(resolve_data.file_id);
+    if resolve_data.version != snap.file_version(file_id) {
+        tracing::warn!("Inlay hint resolve data is outdated");
+        return Ok(original_hint);
+    }
+    let Some(hash) = resolve_data.hash.parse().ok() else {
+        return Ok(original_hint);
+    };
     anyhow::ensure!(snap.file_exists(file_id), "Invalid LSP resolve data");
 
     let line_index = snap.file_line_index(file_id)?;
-    let hint_position = from_proto::offset(&line_index, original_hint.position)?;
-    let source_root = snap.analysis.source_root(file_id)?;
+    let range = from_proto::text_range(&line_index, resolve_data.resolve_range)?;
 
-    let mut forced_resolve_inlay_hints_config = snap.config.inlay_hints(Some(source_root));
+    let mut forced_resolve_inlay_hints_config = snap.config.inlay_hints();
     forced_resolve_inlay_hints_config.fields_to_resolve = InlayFieldsToResolve::empty();
     let resolve_hints = snap.analysis.inlay_hints_resolve(
         &forced_resolve_inlay_hints_config,
         file_id,
-        hint_position,
+        range,
         hash,
         |hint| {
             std::hash::BuildHasher::hash_one(
@@ -1561,8 +1806,9 @@ pub(crate) fn handle_call_hierarchy_prepare(
     snap: GlobalStateSnapshot,
     params: CallHierarchyPrepareParams,
 ) -> anyhow::Result<Option<Vec<CallHierarchyItem>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_call_hierarchy_prepare").entered();
-    let position = from_proto::file_position(&snap, params.text_document_position_params)?;
+    let _p = tracing::info_span!("handle_call_hierarchy_prepare").entered();
+    let position =
+        try_default!(from_proto::file_position(&snap, params.text_document_position_params)?);
 
     let nav_info = match snap.analysis.call_hierarchy(position)? {
         None => return Ok(None),
@@ -1583,14 +1829,15 @@ pub(crate) fn handle_call_hierarchy_incoming(
     snap: GlobalStateSnapshot,
     params: CallHierarchyIncomingCallsParams,
 ) -> anyhow::Result<Option<Vec<CallHierarchyIncomingCall>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_call_hierarchy_incoming").entered();
+    let _p = tracing::info_span!("handle_call_hierarchy_incoming").entered();
     let item = params.item;
 
     let doc = TextDocumentIdentifier::new(item.uri);
-    let frange = from_proto::file_range(&snap, &doc, item.selection_range)?;
+    let frange = try_default!(from_proto::file_range(&snap, &doc, item.selection_range)?);
     let fpos = FilePosition { file_id: frange.file_id, offset: frange.range.start() };
 
-    let call_items = match snap.analysis.incoming_calls(fpos)? {
+    let config = snap.config.call_hierarchy();
+    let call_items = match snap.analysis.incoming_calls(config, fpos)? {
         None => return Ok(None),
         Some(it) => it,
     };
@@ -1606,7 +1853,9 @@ pub(crate) fn handle_call_hierarchy_incoming(
             from_ranges: call_item
                 .ranges
                 .into_iter()
-                .map(|it| to_proto::range(&line_index, it))
+                // This is the range relative to the item
+                .filter(|it| it.file_id == file_id)
+                .map(|it| to_proto::range(&line_index, it.range))
                 .collect(),
         });
     }
@@ -1618,14 +1867,16 @@ pub(crate) fn handle_call_hierarchy_outgoing(
     snap: GlobalStateSnapshot,
     params: CallHierarchyOutgoingCallsParams,
 ) -> anyhow::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_call_hierarchy_outgoing").entered();
+    let _p = tracing::info_span!("handle_call_hierarchy_outgoing").entered();
     let item = params.item;
 
     let doc = TextDocumentIdentifier::new(item.uri);
-    let frange = from_proto::file_range(&snap, &doc, item.selection_range)?;
+    let frange = try_default!(from_proto::file_range(&snap, &doc, item.selection_range)?);
     let fpos = FilePosition { file_id: frange.file_id, offset: frange.range.start() };
+    let line_index = snap.file_line_index(fpos.file_id)?;
 
-    let call_items = match snap.analysis.outgoing_calls(fpos)? {
+    let config = snap.config.call_hierarchy();
+    let call_items = match snap.analysis.outgoing_calls(config, fpos)? {
         None => return Ok(None),
         Some(it) => it,
     };
@@ -1633,15 +1884,15 @@ pub(crate) fn handle_call_hierarchy_outgoing(
     let mut res = vec![];
 
     for call_item in call_items.into_iter() {
-        let file_id = call_item.target.file_id;
-        let line_index = snap.file_line_index(file_id)?;
         let item = to_proto::call_hierarchy_item(&snap, call_item.target)?;
         res.push(CallHierarchyOutgoingCall {
             to: item,
             from_ranges: call_item
                 .ranges
                 .into_iter()
-                .map(|it| to_proto::range(&line_index, it))
+                // This is the range relative to the caller
+                .filter(|it| it.file_id == fpos.file_id)
+                .map(|it| to_proto::range(&line_index, it.range))
                 .collect(),
         });
     }
@@ -1653,14 +1904,13 @@ pub(crate) fn handle_semantic_tokens_full(
     snap: GlobalStateSnapshot,
     params: SemanticTokensParams,
 ) -> anyhow::Result<Option<SemanticTokensResult>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_semantic_tokens_full").entered();
+    let _p = tracing::info_span!("handle_semantic_tokens_full").entered();
 
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let text = snap.analysis.file_text(file_id)?;
     let line_index = snap.file_line_index(file_id)?;
-    let source_root = snap.analysis.source_root(file_id)?;
 
-    let mut highlight_config = snap.config.highlighting_config(Some(source_root));
+    let mut highlight_config = snap.config.highlighting_config();
     // Avoid flashing a bunch of unresolved references when the proc-macro servers haven't been spawned yet.
     highlight_config.syntactic_name_ref_highlighting =
         snap.workspaces.is_empty() || !snap.proc_macros_loaded;
@@ -1671,7 +1921,7 @@ pub(crate) fn handle_semantic_tokens_full(
         &line_index,
         highlights,
         snap.config.semantics_tokens_augments_syntax_tokens(),
-        snap.config.highlighting_non_standard_tokens(Some(source_root)),
+        snap.config.highlighting_non_standard_tokens(),
     );
 
     // Unconditionally cache the tokens
@@ -1684,14 +1934,13 @@ pub(crate) fn handle_semantic_tokens_full_delta(
     snap: GlobalStateSnapshot,
     params: SemanticTokensDeltaParams,
 ) -> anyhow::Result<Option<SemanticTokensFullDeltaResult>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_semantic_tokens_full_delta").entered();
+    let _p = tracing::info_span!("handle_semantic_tokens_full_delta").entered();
 
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let text = snap.analysis.file_text(file_id)?;
     let line_index = snap.file_line_index(file_id)?;
-    let source_root = snap.analysis.source_root(file_id)?;
 
-    let mut highlight_config = snap.config.highlighting_config(Some(source_root));
+    let mut highlight_config = snap.config.highlighting_config();
     // Avoid flashing a bunch of unresolved references when the proc-macro servers haven't been spawned yet.
     highlight_config.syntactic_name_ref_highlighting =
         snap.workspaces.is_empty() || !snap.proc_macros_loaded;
@@ -1702,7 +1951,7 @@ pub(crate) fn handle_semantic_tokens_full_delta(
         &line_index,
         highlights,
         snap.config.semantics_tokens_augments_syntax_tokens(),
-        snap.config.highlighting_non_standard_tokens(Some(source_root)),
+        snap.config.highlighting_non_standard_tokens(),
     );
 
     let cached_tokens = snap.semantic_tokens_cache.lock().remove(&params.text_document.uri);
@@ -1728,14 +1977,13 @@ pub(crate) fn handle_semantic_tokens_range(
     snap: GlobalStateSnapshot,
     params: SemanticTokensRangeParams,
 ) -> anyhow::Result<Option<SemanticTokensRangeResult>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_semantic_tokens_range").entered();
+    let _p = tracing::info_span!("handle_semantic_tokens_range").entered();
 
-    let frange = from_proto::file_range(&snap, &params.text_document, params.range)?;
+    let frange = try_default!(from_proto::file_range(&snap, &params.text_document, params.range)?);
     let text = snap.analysis.file_text(frange.file_id)?;
     let line_index = snap.file_line_index(frange.file_id)?;
-    let source_root = snap.analysis.source_root(frange.file_id)?;
 
-    let mut highlight_config = snap.config.highlighting_config(Some(source_root));
+    let mut highlight_config = snap.config.highlighting_config();
     // Avoid flashing a bunch of unresolved references when the proc-macro servers haven't been spawned yet.
     highlight_config.syntactic_name_ref_highlighting =
         snap.workspaces.is_empty() || !snap.proc_macros_loaded;
@@ -1746,7 +1994,7 @@ pub(crate) fn handle_semantic_tokens_range(
         &line_index,
         highlights,
         snap.config.semantics_tokens_augments_syntax_tokens(),
-        snap.config.highlighting_non_standard_tokens(Some(source_root)),
+        snap.config.highlighting_non_standard_tokens(),
     );
     Ok(Some(semantic_tokens.into()))
 }
@@ -1755,23 +2003,24 @@ pub(crate) fn handle_open_docs(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<ExternalDocsResponse> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_open_docs").entered();
-    let position = from_proto::file_position(&snap, params)?;
+    let _p = tracing::info_span!("handle_open_docs").entered();
+    let position = try_default!(from_proto::file_position(&snap, params)?);
 
-    let ws_and_sysroot = snap.workspaces.iter().find_map(|ws| match ws {
-        ProjectWorkspace::Cargo { cargo, sysroot, .. } => Some((cargo, sysroot.as_ref().ok())),
-        ProjectWorkspace::Json { .. } => None,
-        ProjectWorkspace::DetachedFile { cargo_script, sysroot, .. } => {
-            cargo_script.as_ref().zip(Some(sysroot.as_ref().ok()))
+    let ws_and_sysroot = snap.workspaces.iter().find_map(|ws| match &ws.kind {
+        ProjectWorkspaceKind::Cargo { cargo, .. }
+        | ProjectWorkspaceKind::DetachedFile { cargo: Some((cargo, _, _)), .. } => {
+            Some((cargo, &ws.sysroot))
         }
+        ProjectWorkspaceKind::Json { .. } => None,
+        ProjectWorkspaceKind::DetachedFile { .. } => None,
     });
 
     let (cargo, sysroot) = match ws_and_sysroot {
-        Some((ws, sysroot)) => (Some(ws), sysroot),
+        Some((ws, sysroot)) => (Some(ws), Some(sysroot)),
         _ => (None, None),
     };
 
-    let sysroot = sysroot.map(|p| p.root().as_str());
+    let sysroot = sysroot.and_then(|p| p.root()).map(|it| it.as_str());
     let target_dir = cargo.map(|cargo| cargo.target_directory()).map(|p| p.as_str());
 
     let Ok(remote_urls) = snap.analysis.external_docs(position, target_dir, sysroot) else {
@@ -1796,12 +2045,12 @@ pub(crate) fn handle_open_cargo_toml(
     snap: GlobalStateSnapshot,
     params: lsp_ext::OpenCargoTomlParams,
 ) -> anyhow::Result<Option<lsp_types::GotoDefinitionResponse>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_open_cargo_toml").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_open_cargo_toml").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
 
-    let cargo_spec = match CargoTargetSpec::for_file(&snap, file_id)? {
-        Some(it) => it,
-        None => return Ok(None),
+    let cargo_spec = match TargetSpec::for_file(&snap, file_id)? {
+        Some(TargetSpec::Cargo(it)) => it,
+        Some(TargetSpec::ProjectJson(_)) | None => return Ok(None),
     };
 
     let cargo_toml_url = to_proto::url_from_abs_path(&cargo_spec.cargo_toml);
@@ -1814,9 +2063,9 @@ pub(crate) fn handle_move_item(
     snap: GlobalStateSnapshot,
     params: lsp_ext::MoveItemParams,
 ) -> anyhow::Result<Vec<lsp_ext::SnippetTextEdit>> {
-    let _p = tracing::span!(tracing::Level::INFO, "handle_move_item").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
-    let range = from_proto::file_range(&snap, &params.text_document, params.range)?;
+    let _p = tracing::info_span!("handle_move_item").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
+    let range = try_default!(from_proto::file_range(&snap, &params.text_document, params.range)?);
 
     let direction = match params.direction {
         lsp_ext::MoveItemDirection::Up => ide::Direction::Up,
@@ -1826,7 +2075,12 @@ pub(crate) fn handle_move_item(
     match snap.analysis.move_item(range, direction)? {
         Some(text_edit) => {
             let line_index = snap.file_line_index(file_id)?;
-            Ok(to_proto::snippet_text_edit_vec(&line_index, true, text_edit))
+            Ok(to_proto::snippet_text_edit_vec(
+                &line_index,
+                true,
+                text_edit,
+                snap.config.change_annotation_support(),
+            ))
         }
         None => Ok(vec![]),
     }
@@ -1836,8 +2090,8 @@ pub(crate) fn handle_view_recursive_memory_layout(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
 ) -> anyhow::Result<Option<lsp_ext::RecursiveMemoryLayout>> {
-    let _p = tracing::span!(tracing::Level::INFO, "view_recursive_memory_layout").entered();
-    let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
+    let _p = tracing::info_span!("handle_view_recursive_memory_layout").entered();
+    let file_id = try_default!(from_proto::file_id(&snap, &params.text_document.uri)?);
     let line_index = snap.file_line_index(file_id)?;
     let offset = from_proto::offset(&line_index, params.position)?;
 
@@ -1929,8 +2183,8 @@ fn runnable_action_links(
         return None;
     }
 
-    let cargo_spec = CargoTargetSpec::for_file(snap, runnable.nav.file_id).ok()?;
-    if should_skip_target(&runnable, cargo_spec.as_ref()) {
+    let target_spec = TargetSpec::for_file(snap, runnable.nav.file_id).ok()?;
+    if should_skip_target(&runnable, target_spec.as_ref()) {
         return None;
     }
 
@@ -1940,7 +2194,8 @@ fn runnable_action_links(
     }
 
     let title = runnable.title();
-    let r = to_proto::runnable(snap, runnable).ok()?;
+    let update_test = runnable.update_test;
+    let r = to_proto::runnable(snap, runnable).ok()??;
 
     let mut group = lsp_ext::CommandLinkGroup::default();
 
@@ -1951,7 +2206,15 @@ fn runnable_action_links(
 
     if hover_actions_config.debug && client_commands_config.debug_single {
         let dbg_command = to_proto::command::debug_single(&r);
-        group.commands.push(to_command_link(dbg_command, r.label));
+        group.commands.push(to_command_link(dbg_command, r.label.clone()));
+    }
+
+    if hover_actions_config.update_test && client_commands_config.run_single {
+        let label = update_test.label();
+        if let Some(r) = to_proto::make_update_runnable(&r, update_test) {
+            let update_command = to_proto::command::run_single(&r, label.unwrap().as_str());
+            group.commands.push(to_command_link(update_command, r.label));
+        }
     }
 
     Some(group)
@@ -1961,8 +2224,8 @@ fn goto_type_action_links(
     snap: &GlobalStateSnapshot,
     nav_targets: &[HoverGotoTypeData],
 ) -> Option<lsp_ext::CommandLinkGroup> {
-    if nav_targets.is_empty()
-        || !snap.config.hover_actions().goto_type_def
+    if !snap.config.hover_actions().goto_type_def
+        || nav_targets.is_empty()
         || !snap.config.client_commands().goto_location
     {
         return None;
@@ -1995,13 +2258,13 @@ fn prepare_hover_actions(
         .collect()
 }
 
-fn should_skip_target(runnable: &Runnable, cargo_spec: Option<&CargoTargetSpec>) -> bool {
+fn should_skip_target(runnable: &Runnable, cargo_spec: Option<&TargetSpec>) -> bool {
     match runnable.kind {
         RunnableKind::Bin => {
             // Do not suggest binary run on other target than binary
             match &cargo_spec {
                 Some(spec) => !matches!(
-                    spec.target_kind,
+                    spec.target_kind(),
                     TargetKind::Bin | TargetKind::Example | TargetKind::Test
                 ),
                 None => true,
@@ -2016,7 +2279,7 @@ fn run_rustfmt(
     text_document: TextDocumentIdentifier,
     range: Option<lsp_types::Range>,
 ) -> anyhow::Result<Option<Vec<lsp_types::TextEdit>>> {
-    let file_id = from_proto::file_id(snap, &text_document.uri)?;
+    let file_id = try_default!(from_proto::file_id(snap, &text_document.uri)?);
     let file = snap.analysis.file_text(file_id)?;
 
     // Determine the edition of the crate the file belongs to (if there's multiple, we pick the
@@ -2033,12 +2296,33 @@ fn run_rustfmt(
     let edition = editions.iter().copied().max();
 
     let line_index = snap.file_line_index(file_id)?;
+    let source_root_id = snap.analysis.source_root_id(file_id).ok();
 
-    let mut command = match snap.config.rustfmt() {
+    // try to chdir to the file so we can respect `rustfmt.toml`
+    // FIXME: use `rustfmt --config-path` once
+    // https://github.com/rust-lang/rustfmt/issues/4660 gets fixed
+    let current_dir = match text_document.uri.to_file_path() {
+        Ok(mut path) => {
+            // pop off file name
+            if path.pop() && path.is_dir() { path } else { std::env::current_dir()? }
+        }
+        Err(_) => {
+            tracing::error!(
+                text_document = ?text_document.uri,
+                "Unable to get path, rustfmt.toml might be ignored"
+            );
+            std::env::current_dir()?
+        }
+    };
+
+    let mut command = match snap.config.rustfmt(source_root_id) {
         RustfmtConfig::Rustfmt { extra_args, enable_range_formatting } => {
             // FIXME: Set RUSTUP_TOOLCHAIN
-            let mut cmd = process::Command::new(toolchain::Tool::Rustfmt.path());
-            cmd.envs(snap.config.extra_env());
+            let mut cmd = toolchain::command(
+                toolchain::Tool::Rustfmt.path(),
+                current_dir,
+                snap.config.extra_env(source_root_id),
+            );
             cmd.args(extra_args);
 
             if let Some(edition) = edition {
@@ -2059,7 +2343,7 @@ fn run_rustfmt(
                     .into());
                 }
 
-                let frange = from_proto::file_range(snap, &text_document, range)?;
+                let frange = try_default!(from_proto::file_range(snap, &text_document, range)?);
                 let start_line = line_index.index.line_col(frange.range.start()).line;
                 let end_line = line_index.index.line_col(frange.range.end()).line;
 
@@ -2068,7 +2352,8 @@ fn run_rustfmt(
                 cmd.arg(
                     json!([{
                         "file": "stdin",
-                        "range": [start_line, end_line]
+                        // LineCol is 0-based, but rustfmt is 1-based.
+                        "range": [start_line + 1, end_line + 1]
                     }])
                     .to_string(),
                 );
@@ -2078,60 +2363,45 @@ fn run_rustfmt(
         }
         RustfmtConfig::CustomCommand { command, args } => {
             let cmd = Utf8PathBuf::from(&command);
-            let workspace = CargoTargetSpec::for_file(snap, file_id)?;
-            let mut cmd = match workspace {
-                Some(spec) => {
-                    // approach: if the command name contains a path separator, join it with the workspace root.
+            let target_spec = TargetSpec::for_file(snap, file_id)?;
+            let extra_env = snap.config.extra_env(source_root_id);
+            let mut cmd = match target_spec {
+                Some(TargetSpec::Cargo(_)) => {
+                    // approach: if the command name contains a path separator, join it with the project root.
                     // however, if the path is absolute, joining will result in the absolute path being preserved.
                     // as a fallback, rely on $PATH-based discovery.
                     let cmd_path = if command.contains(std::path::MAIN_SEPARATOR)
                         || (cfg!(windows) && command.contains('/'))
                     {
-                        spec.workspace_root.join(cmd).into()
+                        snap.config.root_path().join(cmd).into()
                     } else {
                         cmd
                     };
-                    process::Command::new(cmd_path)
+                    toolchain::command(cmd_path, current_dir, extra_env)
                 }
-                None => process::Command::new(cmd),
+                _ => toolchain::command(cmd, current_dir, extra_env),
             };
 
-            cmd.envs(snap.config.extra_env());
             cmd.args(args);
             cmd
         }
     };
 
-    tracing::debug!(?command, "created format command");
+    let output = {
+        let _p = tracing::info_span!("rustfmt", ?command).entered();
 
-    // try to chdir to the file so we can respect `rustfmt.toml`
-    // FIXME: use `rustfmt --config-path` once
-    // https://github.com/rust-lang/rustfmt/issues/4660 gets fixed
-    match text_document.uri.to_file_path() {
-        Ok(mut path) => {
-            // pop off file name
-            if path.pop() && path.is_dir() {
-                command.current_dir(path);
-            }
-        }
-        Err(_) => {
-            tracing::error!(
-                text_document = ?text_document.uri,
-                "Unable to get path, rustfmt.toml might be ignored"
-            );
-        }
-    }
+        let mut rustfmt = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context(format!("Failed to spawn {command:?}"))?;
 
-    let mut rustfmt = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context(format!("Failed to spawn {command:?}"))?;
+        rustfmt.stdin.as_mut().unwrap().write_all(file.as_bytes())?;
 
-    rustfmt.stdin.as_mut().unwrap().write_all(file.as_bytes())?;
+        rustfmt.wait_with_output()?
+    };
 
-    let output = rustfmt.wait_with_output()?;
     let captured_stdout = String::from_utf8(output.stdout)?;
     let captured_stderr = String::from_utf8(output.stderr).unwrap_or_default();
 
@@ -2151,6 +2421,14 @@ fn run_rustfmt(
                     %captured_stderr,
                     "rustfmt exited with status 1"
                 );
+                Ok(None)
+            }
+            // rustfmt panicked at lexing/parsing the file
+            Some(101)
+                if !rustfmt_not_installed
+                    && (captured_stderr.starts_with("error[")
+                        || captured_stderr.starts_with("error:")) =>
+            {
                 Ok(None)
             }
             _ => {
@@ -2207,6 +2485,33 @@ pub(crate) fn fetch_dependency_list(
     Ok(FetchDependencyListResult { crates: crate_infos })
 }
 
+pub(crate) fn internal_testing_fetch_config(
+    state: GlobalStateSnapshot,
+    params: InternalTestingFetchConfigParams,
+) -> anyhow::Result<Option<InternalTestingFetchConfigResponse>> {
+    let source_root = match params.text_document {
+        Some(it) => Some(
+            state
+                .analysis
+                .source_root_id(try_default!(from_proto::file_id(&state, &it.uri)?))
+                .map_err(anyhow::Error::from)?,
+        ),
+        None => None,
+    };
+    Ok(Some(match params.config {
+        InternalTestingFetchConfigOption::AssistEmitMustUse => {
+            InternalTestingFetchConfigResponse::AssistEmitMustUse(
+                state.config.assist(source_root).assist_emit_must_use,
+            )
+        }
+        InternalTestingFetchConfigOption::CheckWorkspace => {
+            InternalTestingFetchConfigResponse::CheckWorkspace(
+                state.config.flycheck_workspace(source_root),
+            )
+        }
+    }))
+}
+
 /// Searches for the directory of a Rust crate given this crate's root file path.
 ///
 /// # Arguments
@@ -2238,19 +2543,8 @@ fn to_url(path: VfsPath) -> Option<Url> {
 }
 
 fn resource_ops_supported(config: &Config, kind: ResourceOperationKind) -> anyhow::Result<()> {
-    #[rustfmt::skip]
-    let resops = (|| {
-        config
-            .caps()
-            .workspace
-            .as_ref()?
-            .workspace_edit
-            .as_ref()?
-            .resource_operations
-            .as_ref()
-    })();
-
-    if !matches!(resops, Some(resops) if resops.contains(&kind)) {
+    if !matches!(config.workspace_edit_resource_operations(), Some(resops) if resops.contains(&kind))
+    {
         return Err(LspError::new(
             ErrorCode::RequestFailed as i32,
             format!(
@@ -2274,4 +2568,48 @@ fn resolve_resource_op(op: &ResourceOp) -> ResourceOperationKind {
         ResourceOp::Rename(_) => ResourceOperationKind::Rename,
         ResourceOp::Delete(_) => ResourceOperationKind::Delete,
     }
+}
+
+pub(crate) fn diff(left: &str, right: &str) -> TextEdit {
+    use dissimilar::Chunk;
+
+    let chunks = dissimilar::diff(left, right);
+
+    let mut builder = TextEdit::builder();
+    let mut pos = TextSize::default();
+
+    let mut chunks = chunks.into_iter().peekable();
+    while let Some(chunk) = chunks.next() {
+        if let (Chunk::Delete(deleted), Some(&Chunk::Insert(inserted))) = (chunk, chunks.peek()) {
+            chunks.next().unwrap();
+            let deleted_len = TextSize::of(deleted);
+            builder.replace(TextRange::at(pos, deleted_len), inserted.into());
+            pos += deleted_len;
+            continue;
+        }
+
+        match chunk {
+            Chunk::Equal(text) => {
+                pos += TextSize::of(text);
+            }
+            Chunk::Delete(deleted) => {
+                let deleted_len = TextSize::of(deleted);
+                builder.delete(TextRange::at(pos, deleted_len));
+                pos += deleted_len;
+            }
+            Chunk::Insert(inserted) => {
+                builder.insert(pos, inserted.into());
+            }
+        }
+    }
+    builder.finish()
+}
+
+#[test]
+fn diff_smoke_test() {
+    let mut original = String::from("fn foo(a:u32){\n}");
+    let result = "fn foo(a: u32) {}";
+    let edit = diff(&original, result);
+    edit.apply(&mut original);
+    assert_eq!(original, result);
 }

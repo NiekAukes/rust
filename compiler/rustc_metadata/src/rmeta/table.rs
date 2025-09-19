@@ -1,7 +1,7 @@
-use crate::rmeta::*;
-
 use rustc_hir::def::CtorOf;
 use rustc_index::Idx;
+
+use crate::rmeta::*;
 
 pub(super) trait IsDefault: Default {
     fn is_default(&self) -> bool;
@@ -155,10 +155,14 @@ fixed_size_enum! {
         ( Impl { of_trait: false }                 )
         ( Impl { of_trait: true }                  )
         ( Closure                                  )
-        ( Static { mutability: ast::Mutability::Not, nested: false } )
-        ( Static { mutability: ast::Mutability::Mut, nested: false } )
-        ( Static { mutability: ast::Mutability::Not, nested: true } )
-        ( Static { mutability: ast::Mutability::Mut, nested: true } )
+        ( Static { safety: hir::Safety::Unsafe, mutability: ast::Mutability::Not, nested: false } )
+        ( Static { safety: hir::Safety::Safe, mutability: ast::Mutability::Not, nested: false } )
+        ( Static { safety: hir::Safety::Unsafe, mutability: ast::Mutability::Mut, nested: false } )
+        ( Static { safety: hir::Safety::Safe, mutability: ast::Mutability::Mut, nested: false } )
+        ( Static { safety: hir::Safety::Unsafe, mutability: ast::Mutability::Not, nested: true } )
+        ( Static { safety: hir::Safety::Safe, mutability: ast::Mutability::Not, nested: true } )
+        ( Static { safety: hir::Safety::Unsafe, mutability: ast::Mutability::Mut, nested: true } )
+        ( Static { safety: hir::Safety::Safe, mutability: ast::Mutability::Mut, nested: true } )
         ( Ctor(CtorOf::Struct, CtorKind::Fn)       )
         ( Ctor(CtorOf::Struct, CtorKind::Const)    )
         ( Ctor(CtorOf::Variant, CtorKind::Fn)      )
@@ -166,6 +170,7 @@ fixed_size_enum! {
         ( Macro(MacroKind::Bang)                   )
         ( Macro(MacroKind::Attr)                   )
         ( Macro(MacroKind::Derive)                 )
+        ( SyntheticCoroutineBody                   )
     }
 }
 
@@ -189,6 +194,13 @@ fixed_size_enum! {
         ( Final                        )
         ( Default { has_value: false } )
         ( Default { has_value: true }  )
+    }
+}
+
+fixed_size_enum! {
+    hir::Safety {
+        ( Unsafe )
+        ( Safe   )
     }
 }
 
@@ -217,8 +229,8 @@ fixed_size_enum! {
 
 fixed_size_enum! {
     ty::AssocItemContainer {
-        ( TraitContainer )
-        ( ImplContainer  )
+        ( Trait )
+        ( Impl  )
     }
 }
 
@@ -517,8 +529,6 @@ where
 {
     /// Given the metadata, extract out the value at a particular index (if any).
     pub(super) fn get<'a, 'tcx, M: Metadata<'a, 'tcx>>(&self, metadata: M, i: I) -> T::Value<'tcx> {
-        trace!("LazyTable::lookup: index={:?} len={:?}", i, self.len);
-
         // Access past the end of the table returns a Default
         if i.index() >= self.len {
             return Default::default();

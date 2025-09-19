@@ -42,12 +42,18 @@
 //!   progress, they can hit a performance cliff.
 //! * complexity
 
+#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "hurd")))]
+use libc::sendfile as sendfile64;
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "hurd"))]
+use libc::sendfile64;
+use libc::{EBADF, EINVAL, ENOSYS, EOPNOTSUPP, EOVERFLOW, EPERM, EXDEV};
+
 use crate::cmp::min;
 use crate::fs::{File, Metadata};
 use crate::io::copy::generic_copy;
 use crate::io::{
-    BufRead, BufReader, BufWriter, Error, Read, Result, StderrLock, StdinLock, StdoutLock, Take,
-    Write,
+    BufRead, BufReader, BufWriter, Error, PipeReader, PipeWriter, Read, Result, StderrLock,
+    StdinLock, StdoutLock, Take, Write,
 };
 use crate::mem::ManuallyDrop;
 use crate::net::TcpStream;
@@ -56,14 +62,10 @@ use crate::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use crate::os::unix::net::UnixStream;
 use crate::process::{ChildStderr, ChildStdin, ChildStdout};
 use crate::ptr;
-use crate::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use crate::sync::atomic::{Atomic, AtomicBool, AtomicU8, Ordering};
 use crate::sys::cvt;
+use crate::sys::fs::CachedFileMetadata;
 use crate::sys::weak::syscall;
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "hurd")))]
-use libc::sendfile as sendfile64;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "hurd"))]
-use libc::sendfile64;
-use libc::{EBADF, EINVAL, ENOSYS, EOPNOTSUPP, EOVERFLOW, EPERM, EXDEV};
 
 #[cfg(test)]
 mod tests;
@@ -190,7 +192,7 @@ impl<R: CopyRead, W: CopyWrite> SpecCopy for Copier<'_, '_, R, W> {
         let w_cfg = writer.properties();
 
         // before direct operations on file descriptors ensure that all source and sink buffers are empty
-        let mut flush = || -> crate::io::Result<u64> {
+        let mut flush = || -> Result<u64> {
             let bytes = reader.drain_to(writer, u64::MAX)?;
             // BufWriter buffered bytes have already been accounted for in earlier write() calls
             writer.flush()?;
@@ -404,6 +406,30 @@ impl CopyWrite for &UnixStream {
     }
 }
 
+impl CopyRead for PipeReader {
+    fn properties(&self) -> CopyParams {
+        CopyParams(FdMeta::Pipe, Some(self.as_raw_fd()))
+    }
+}
+
+impl CopyRead for &PipeReader {
+    fn properties(&self) -> CopyParams {
+        CopyParams(FdMeta::Pipe, Some(self.as_raw_fd()))
+    }
+}
+
+impl CopyWrite for PipeWriter {
+    fn properties(&self) -> CopyParams {
+        CopyParams(FdMeta::Pipe, Some(self.as_raw_fd()))
+    }
+}
+
+impl CopyWrite for &PipeWriter {
+    fn properties(&self) -> CopyParams {
+        CopyParams(FdMeta::Pipe, Some(self.as_raw_fd()))
+    }
+}
+
 impl CopyWrite for ChildStdin {
     fn properties(&self) -> CopyParams {
         CopyParams(FdMeta::Pipe, Some(self.as_raw_fd()))
@@ -511,6 +537,18 @@ impl<T: ?Sized + CopyWrite> CopyWrite for BufWriter<T> {
     }
 }
 
+impl CopyRead for CachedFileMetadata {
+    fn properties(&self) -> CopyParams {
+        CopyParams(FdMeta::Metadata(self.1.clone()), Some(self.0.as_raw_fd()))
+    }
+}
+
+impl CopyWrite for CachedFileMetadata {
+    fn properties(&self) -> CopyParams {
+        CopyParams(FdMeta::Metadata(self.1.clone()), Some(self.0.as_raw_fd()))
+    }
+}
+
 fn fd_to_meta<T: AsRawFd>(fd: &T) -> FdMeta {
     let fd = fd.as_raw_fd();
     let file: ManuallyDrop<File> = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
@@ -558,38 +596,41 @@ pub(super) fn copy_regular_files(reader: RawFd, writer: RawFd, max_len: u64) -> 
 
     // Kernel prior to 4.5 don't have copy_file_range
     // We store the availability in a global to avoid unnecessary syscalls
-    static HAS_COPY_FILE_RANGE: AtomicU8 = AtomicU8::new(NOT_PROBED);
+    static HAS_COPY_FILE_RANGE: Atomic<u8> = AtomicU8::new(NOT_PROBED);
 
-    syscall! {
+    let mut have_probed = match HAS_COPY_FILE_RANGE.load(Ordering::Relaxed) {
+        NOT_PROBED => false,
+        UNAVAILABLE => return CopyResult::Fallback(0),
+        _ => true,
+    };
+
+    syscall!(
         fn copy_file_range(
             fd_in: libc::c_int,
             off_in: *mut libc::loff_t,
             fd_out: libc::c_int,
             off_out: *mut libc::loff_t,
             len: libc::size_t,
-            flags: libc::c_uint
-        ) -> libc::ssize_t
-    }
+            flags: libc::c_uint,
+        ) -> libc::ssize_t;
+    );
 
-    match HAS_COPY_FILE_RANGE.load(Ordering::Relaxed) {
-        NOT_PROBED => {
-            // EPERM can indicate seccomp filters or an immutable file.
-            // To distinguish these cases we probe with invalid file descriptors which should result in EBADF if the syscall is supported
-            // and some other error (ENOSYS or EPERM) if it's not available
-            let result = unsafe {
-                cvt(copy_file_range(INVALID_FD, ptr::null_mut(), INVALID_FD, ptr::null_mut(), 1, 0))
-            };
-
-            if matches!(result.map_err(|e| e.raw_os_error()), Err(Some(EBADF))) {
-                HAS_COPY_FILE_RANGE.store(AVAILABLE, Ordering::Relaxed);
-            } else {
-                HAS_COPY_FILE_RANGE.store(UNAVAILABLE, Ordering::Relaxed);
-                return CopyResult::Fallback(0);
-            }
+    fn probe_copy_file_range_support() -> u8 {
+        // In some cases, we cannot determine availability from the first
+        // `copy_file_range` call. In this case, we probe with an invalid file
+        // descriptor so that the results are easily interpretable.
+        match unsafe {
+            cvt(copy_file_range(INVALID_FD, ptr::null_mut(), INVALID_FD, ptr::null_mut(), 1, 0))
+                .map_err(|e| e.raw_os_error())
+        } {
+            Err(Some(EPERM | ENOSYS)) => UNAVAILABLE,
+            Err(Some(EBADF)) => AVAILABLE,
+            Ok(_) => panic!("unexpected copy_file_range probe success"),
+            // Treat other errors as the syscall
+            // being unavailable.
+            Err(_) => UNAVAILABLE,
         }
-        UNAVAILABLE => return CopyResult::Fallback(0),
-        _ => {}
-    };
+    }
 
     let mut written = 0u64;
     while written < max_len {
@@ -603,6 +644,11 @@ pub(super) fn copy_regular_files(reader: RawFd, writer: RawFd, max_len: u64) -> 
             // because copy_file_range adjusts the file offset automatically
             cvt(copy_file_range(reader, ptr::null_mut(), writer, ptr::null_mut(), bytes_to_copy, 0))
         };
+
+        if !have_probed && copy_result.is_ok() {
+            have_probed = true;
+            HAS_COPY_FILE_RANGE.store(AVAILABLE, Ordering::Relaxed);
+        }
 
         match copy_result {
             Ok(0) if written == 0 => {
@@ -619,7 +665,28 @@ pub(super) fn copy_regular_files(reader: RawFd, writer: RawFd, max_len: u64) -> 
                 return match err.raw_os_error() {
                     // when file offset + max_length > u64::MAX
                     Some(EOVERFLOW) => CopyResult::Fallback(written),
-                    Some(ENOSYS | EXDEV | EINVAL | EPERM | EOPNOTSUPP | EBADF) if written == 0 => {
+                    Some(raw_os_error @ (ENOSYS | EXDEV | EINVAL | EPERM | EOPNOTSUPP | EBADF))
+                        if written == 0 =>
+                    {
+                        if !have_probed {
+                            let available = if matches!(raw_os_error, ENOSYS | EOPNOTSUPP | EPERM) {
+                                // EPERM can indicate seccomp filters or an
+                                // immutable file. To distinguish these
+                                // cases we probe with invalid file
+                                // descriptors which should result in EBADF
+                                // if the syscall is supported and EPERM or
+                                // ENOSYS if it's not available.
+                                //
+                                // For EOPNOTSUPP, see below. In the case of
+                                // ENOSYS, we try to cover for faulty FUSE
+                                // drivers.
+                                probe_copy_file_range_support()
+                            } else {
+                                AVAILABLE
+                            };
+                            HAS_COPY_FILE_RANGE.store(available, Ordering::Relaxed);
+                        }
+
                         // Try fallback io::copy if either:
                         // - Kernel version is < 4.5 (ENOSYS¹)
                         // - Files are mounted on different fs (EXDEV)
@@ -654,22 +721,22 @@ enum SpliceMode {
 /// performs splice or sendfile between file descriptors
 /// Does _not_ fall back to a generic copy loop.
 fn sendfile_splice(mode: SpliceMode, reader: RawFd, writer: RawFd, len: u64) -> CopyResult {
-    static HAS_SENDFILE: AtomicBool = AtomicBool::new(true);
-    static HAS_SPLICE: AtomicBool = AtomicBool::new(true);
+    static HAS_SENDFILE: Atomic<bool> = AtomicBool::new(true);
+    static HAS_SPLICE: Atomic<bool> = AtomicBool::new(true);
 
     // Android builds use feature level 14, but the libc wrapper for splice is
     // gated on feature level 21+, so we have to invoke the syscall directly.
     #[cfg(target_os = "android")]
-    syscall! {
+    syscall!(
         fn splice(
             srcfd: libc::c_int,
             src_offset: *const i64,
             dstfd: libc::c_int,
             dst_offset: *const i64,
             len: libc::size_t,
-            flags: libc::c_int
-        ) -> libc::ssize_t
-    }
+            flags: libc::c_int,
+        ) -> libc::ssize_t;
+    );
 
     #[cfg(target_os = "linux")]
     use libc::splice;

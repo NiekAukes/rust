@@ -1,19 +1,20 @@
 use either::Either;
 use ide_db::imports::{
     insert_use::{ImportGranularity, InsertUseConfig},
-    merge_imports::{try_merge_imports, try_merge_trees, try_normalize_use_tree, MergeBehavior},
+    merge_imports::{MergeBehavior, try_merge_imports, try_merge_trees},
 };
-use itertools::Itertools;
 use syntax::{
+    AstNode, SyntaxElement, SyntaxNode,
     algo::neighbor,
-    ast::{self, edit_in_place::Removable},
-    match_ast, ted, AstNode, SyntaxElement, SyntaxNode,
+    ast::{self, syntax_factory::SyntaxFactory},
+    match_ast,
+    syntax_editor::Removable,
 };
 
 use crate::{
+    AssistId,
     assist_context::{AssistContext, Assists},
     utils::next_prev,
-    AssistId, AssistKind,
 };
 
 use Edit::*;
@@ -68,55 +69,33 @@ pub(crate) fn merge_imports(acc: &mut Assists, ctx: &AssistContext<'_>) -> Optio
         (selection_range, edits?)
     };
 
-    acc.add(
-        AssistId("merge_imports", AssistKind::RefactorRewrite),
-        "Merge imports",
-        target,
-        |builder| {
-            let edits_mut: Vec<Edit> = edits
-                .into_iter()
-                .map(|it| match it {
-                    Remove(Either::Left(it)) => Remove(Either::Left(builder.make_mut(it))),
-                    Remove(Either::Right(it)) => Remove(Either::Right(builder.make_mut(it))),
-                    Replace(old, new) => Replace(builder.make_syntax_mut(old), new),
-                })
-                .collect();
-            for edit in edits_mut {
-                match edit {
-                    Remove(it) => it.as_ref().either(Removable::remove, Removable::remove),
-                    Replace(old, new) => {
-                        ted::replace(old, &new);
+    let parent_node = match ctx.covering_element() {
+        SyntaxElement::Node(n) => n,
+        SyntaxElement::Token(t) => t.parent()?,
+    };
 
-                        // If there's a selection and we're replacing a use tree in a tree list,
-                        // normalize the parent use tree if it only contains the merged subtree.
-                        if !ctx.has_empty_selection() {
-                            let normalized_use_tree = ast::UseTree::cast(new)
-                                .as_ref()
-                                .and_then(ast::UseTree::parent_use_tree_list)
-                                .and_then(|use_tree_list| {
-                                    if use_tree_list.use_trees().collect_tuple::<(_,)>().is_some() {
-                                        Some(use_tree_list.parent_use_tree())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .and_then(|target_tree| {
-                                    try_normalize_use_tree(
-                                        &target_tree,
-                                        ctx.config.insert_use.granularity.into(),
-                                    )
-                                    .map(|top_use_tree_flat| (target_tree, top_use_tree_flat))
-                                });
-                            if let Some((old_tree, new_tree)) = normalized_use_tree {
-                                cov_mark::hit!(replace_parent_with_normalized_use_tree);
-                                ted::replace(old_tree.syntax(), new_tree.syntax());
-                            }
-                        }
+    acc.add(AssistId::refactor_rewrite("merge_imports"), "Merge imports", target, |builder| {
+        let make = SyntaxFactory::with_mappings();
+        let mut editor = builder.make_editor(&parent_node);
+
+        for edit in edits {
+            match edit {
+                Remove(it) => {
+                    let node = it.as_ref();
+                    if let Some(left) = node.left() {
+                        left.remove(&mut editor);
+                    } else if let Some(right) = node.right() {
+                        right.remove(&mut editor);
                     }
                 }
+                Replace(old, new) => {
+                    editor.replace(old, &new);
+                }
             }
-        },
-    )
+        }
+        editor.add_mappings(make.finish_with_mappings());
+        builder.add_file_edits(ctx.vfs_file_id(), editor);
+    })
 }
 
 trait Merge: AstNode + Clone {
@@ -164,6 +143,7 @@ impl Merge for ast::UseTree {
     }
 }
 
+#[derive(Debug)]
 enum Edit {
     Remove(Either<ast::Use, ast::UseTree>),
     Replace(SyntaxNode, SyntaxNode),
@@ -490,6 +470,25 @@ use foo::bar;
     }
 
     #[test]
+    fn test_merge_nested_empty_and_self_with_other() {
+        check_assist(
+            merge_imports,
+            r"
+use foo::$0{bar};
+use foo::{bar::{self, other}};
+",
+            r"
+use foo::bar::{self, other};
+",
+        );
+        check_assist_import_one_variations!(
+            "foo::$0{bar}",
+            "foo::{bar::{self, other}}",
+            "use {foo::bar::{self, other}};"
+        );
+    }
+
+    #[test]
     fn test_merge_nested_list_self_and_glob() {
         check_assist(
             merge_imports,
@@ -707,11 +706,78 @@ use std::{
         );
 
         cov_mark::check!(merge_with_selected_use_tree_neighbors);
-        cov_mark::check!(replace_parent_with_normalized_use_tree);
         check_assist(
             merge_imports,
             r"use std::$0{fmt::Display, fmt::Debug}$0;",
-            r"use std::fmt::{Debug, Display};",
+            r"use std::{fmt::{Debug, Display}};",
+        );
+    }
+
+    #[test]
+    fn test_merge_with_synonymous_imports_1() {
+        check_assist(
+            merge_imports,
+            r"
+mod top {
+    pub(crate) mod a {
+        pub(crate) struct A;
+    }
+    pub(crate) mod b {
+        pub(crate) struct B;
+        pub(crate) struct D;
+    }
+}
+
+use top::a::A;
+use $0top::b::{B, B as C};
+",
+            r"
+mod top {
+    pub(crate) mod a {
+        pub(crate) struct A;
+    }
+    pub(crate) mod b {
+        pub(crate) struct B;
+        pub(crate) struct D;
+    }
+}
+
+use top::{a::A, b::{B, B as C}};
+",
+        );
+    }
+
+    #[test]
+    fn test_merge_with_synonymous_imports_2() {
+        check_assist(
+            merge_imports,
+            r"
+mod top {
+    pub(crate) mod a {
+        pub(crate) struct A;
+    }
+    pub(crate) mod b {
+        pub(crate) struct B;
+        pub(crate) struct D;
+    }
+}
+
+use top::a::A;
+use $0top::b::{B as D, B as C};
+",
+            r"
+mod top {
+    pub(crate) mod a {
+        pub(crate) struct A;
+    }
+    pub(crate) mod b {
+        pub(crate) struct B;
+        pub(crate) struct D;
+    }
+}
+
+use top::{a::A, b::{B as D, B as C}};
+",
         );
     }
 }

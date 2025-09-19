@@ -12,7 +12,7 @@ impl Opcode2 {
 
 pub fn example2(msg_type: Opcode2) -> impl FnMut(&[u8]) {
     move |i| match msg_type {
-        Opcode2::OP2 => unimplemented!(),
+        Opcode2::OP2 => unimplemented!(), // ok, `const` already emitted an error
     }
 }
 

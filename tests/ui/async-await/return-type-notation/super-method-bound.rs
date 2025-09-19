@@ -2,7 +2,6 @@
 //@ check-pass
 
 #![feature(return_type_notation)]
-//~^ WARN the feature `return_type_notation` is incomplete
 
 trait Super<'a> {
     async fn test();
@@ -16,7 +15,7 @@ impl Foo for () {}
 
 fn test<T>()
 where
-    T: Foo<test(): Send>,
+    T: Foo<test(..): Send>,
 {
 }
 

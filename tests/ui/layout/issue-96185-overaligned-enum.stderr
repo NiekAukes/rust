@@ -1,10 +1,9 @@
 error: layout_of(Aligned1) = Layout {
            size: Size(8 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(8 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Aggregate {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -25,6 +24,7 @@ error: layout_of(Aligned1) = Layout {
                    valid_range: 0..=1,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -38,11 +38,10 @@ error: layout_of(Aligned1) = Layout {
                variants: [
                    Layout {
                        size: Size(8 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(8 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -50,6 +49,7 @@ error: layout_of(Aligned1) = Layout {
                            memory_index: [],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
@@ -57,14 +57,14 @@ error: layout_of(Aligned1) = Layout {
                            Align(8 bytes),
                        ),
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(8 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(8 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -72,6 +72,7 @@ error: layout_of(Aligned1) = Layout {
                            memory_index: [],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 1,
                        },
@@ -79,6 +80,7 @@ error: layout_of(Aligned1) = Layout {
                            Align(8 bytes),
                        ),
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
@@ -86,19 +88,19 @@ error: layout_of(Aligned1) = Layout {
                Align(8 bytes),
            ),
            unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/issue-96185-overaligned-enum.rs:8:1
+  --> $DIR/issue-96185-overaligned-enum.rs:9:1
    |
 LL | pub enum Aligned1 {
    | ^^^^^^^^^^^^^^^^^
 
 error: layout_of(Aligned2) = Layout {
            size: Size(1 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(1 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Initialized {
                    value: Int(
                        I8,
@@ -125,6 +127,7 @@ error: layout_of(Aligned2) = Layout {
                    valid_range: 0..=1,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -138,11 +141,10 @@ error: layout_of(Aligned2) = Layout {
                variants: [
                    Layout {
                        size: Size(1 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -150,6 +152,7 @@ error: layout_of(Aligned2) = Layout {
                            memory_index: [],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
@@ -157,14 +160,14 @@ error: layout_of(Aligned2) = Layout {
                            Align(1 bytes),
                        ),
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(1 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -172,6 +175,7 @@ error: layout_of(Aligned2) = Layout {
                            memory_index: [],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 1,
                        },
@@ -179,6 +183,7 @@ error: layout_of(Aligned2) = Layout {
                            Align(1 bytes),
                        ),
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
@@ -186,8 +191,9 @@ error: layout_of(Aligned2) = Layout {
                Align(1 bytes),
            ),
            unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/issue-96185-overaligned-enum.rs:16:1
+  --> $DIR/issue-96185-overaligned-enum.rs:17:1
    |
 LL | pub enum Aligned2 {
    | ^^^^^^^^^^^^^^^^^

@@ -1,15 +1,16 @@
-use crate::leb128;
-use crate::serialize::{Decodable, Decoder, Encodable, Encoder};
 use std::fs::File;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::ops::Range;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // This code is very hot and uses lots of arithmetic, avoid overflow checks for performance.
 // See https://github.com/rust-lang/rust/pull/119440#issuecomment-1874255727
 use crate::int_overflow::DebugStrictAdd;
+use crate::leb128;
+use crate::serialize::{Decodable, Decoder, Encodable, Encoder};
+
+pub mod mem_encoder;
 
 // -----------------------------------------------------------------------------
 // Encoder
@@ -17,8 +18,10 @@ use crate::int_overflow::DebugStrictAdd;
 
 pub type FileEncodeResult = Result<usize, (PathBuf, io::Error)>;
 
+pub const MAGIC_END_BYTES: &[u8] = b"rust-end-file";
+
 /// The size of the buffer in `FileEncoder`.
-const BUF_SIZE: usize = 8192;
+const BUF_SIZE: usize = 64 * 1024;
 
 /// `FileEncoder` encodes data to file via fixed-size buffer.
 ///
@@ -86,10 +89,12 @@ impl FileEncoder {
         self.buffered = 0;
     }
 
+    #[inline]
     pub fn file(&self) -> &File {
         &self.file
     }
 
+    #[inline]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -153,12 +158,12 @@ impl FileEncoder {
         if std::intrinsics::unlikely(self.buffered > flush_threshold) {
             self.flush();
         }
-        // SAFETY: We checked above that that N < self.buffer_empty().len(),
+        // SAFETY: We checked above that N < self.buffer_empty().len(),
         // and if isn't, flush ensures that our empty buffer is now BUF_SIZE.
         // We produce a post-mono error if N > BUF_SIZE.
         let buf = unsafe { self.buffer_empty().first_chunk_mut::<N>().unwrap_unchecked() };
         let written = visitor(buf);
-        // We have to ensure that an errant visitor cannot cause self.buffered to exeed BUF_SIZE.
+        // We have to ensure that an errant visitor cannot cause self.buffered to exceed BUF_SIZE.
         if written > N {
             Self::panic_invalid_write::<N>(written);
         }
@@ -181,6 +186,7 @@ impl FileEncoder {
     }
 
     pub fn finish(&mut self) -> FileEncodeResult {
+        self.write_all(MAGIC_END_BYTES);
         self.flush();
         #[cfg(debug_assertions)]
         {
@@ -261,27 +267,30 @@ pub struct MemDecoder<'a> {
 
 impl<'a> MemDecoder<'a> {
     #[inline]
-    pub fn new(data: &'a [u8], position: usize) -> MemDecoder<'a> {
+    pub fn new(data: &'a [u8], position: usize) -> Result<MemDecoder<'a>, ()> {
+        let data = data.strip_suffix(MAGIC_END_BYTES).ok_or(())?;
         let Range { start, end } = data.as_ptr_range();
-        MemDecoder { start, current: data[position..].as_ptr(), end, _marker: PhantomData }
+        Ok(MemDecoder { start, current: data[position..].as_ptr(), end, _marker: PhantomData })
     }
 
     #[inline]
-    pub fn data(&self) -> &'a [u8] {
-        // SAFETY: This recovers the original slice, only using members we never modify.
-        unsafe { std::slice::from_raw_parts(self.start, self.len()) }
+    pub fn split_at(&self, position: usize) -> MemDecoder<'a> {
+        assert!(position <= self.len());
+        // SAFETY: We checked above that this offset is within the original slice
+        let current = unsafe { self.start.add(position) };
+        MemDecoder { start: self.start, current, end: self.end, _marker: PhantomData }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
         // SAFETY: This recovers the length of the original slice, only using members we never modify.
-        unsafe { self.end.sub_ptr(self.start) }
+        unsafe { self.end.offset_from_unsigned(self.start) }
     }
 
     #[inline]
     pub fn remaining(&self) -> usize {
         // SAFETY: This type guarantees current <= end.
-        unsafe { self.end.sub_ptr(self.current) }
+        unsafe { self.end.offset_from_unsigned(self.current) }
     }
 
     #[cold]
@@ -395,7 +404,7 @@ impl<'a> Decoder for MemDecoder<'a> {
     #[inline]
     fn position(&self) -> usize {
         // SAFETY: This type guarantees start <= current
-        unsafe { self.current.sub_ptr(self.start) }
+        unsafe { self.current.offset_from_unsigned(self.start) }
     }
 }
 
@@ -432,10 +441,10 @@ impl IntEncodedWithFixedSize {
 impl Encodable<FileEncoder> for IntEncodedWithFixedSize {
     #[inline]
     fn encode(&self, e: &mut FileEncoder) {
-        let _start_pos = e.position();
+        let start_pos = e.position();
         e.write_array(self.0.to_le_bytes());
-        let _end_pos = e.position();
-        debug_assert_eq!((_end_pos - _start_pos), IntEncodedWithFixedSize::ENCODED_SIZE);
+        let end_pos = e.position();
+        debug_assert_eq!((end_pos - start_pos), IntEncodedWithFixedSize::ENCODED_SIZE);
     }
 }
 
@@ -446,3 +455,6 @@ impl<'a> Decodable<MemDecoder<'a>> for IntEncodedWithFixedSize {
         IntEncodedWithFixedSize(u64::from_le_bytes(bytes))
     }
 }
+
+#[cfg(test)]
+mod tests;

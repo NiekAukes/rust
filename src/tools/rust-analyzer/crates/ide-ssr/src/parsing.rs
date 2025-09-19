@@ -9,7 +9,7 @@ use std::{fmt::Display, str::FromStr};
 use syntax::{SmolStr, SyntaxKind, SyntaxNode, T};
 
 use crate::errors::bail;
-use crate::{fragments, SsrError, SsrPattern, SsrRule};
+use crate::{SsrError, SsrPattern, SsrRule, fragments};
 
 #[derive(Debug)]
 pub(crate) struct ParsedRule {
@@ -190,7 +190,7 @@ impl RawPattern {
         let mut res = FxHashMap::default();
         for t in &self.tokens {
             if let PatternElement::Placeholder(placeholder) = t {
-                res.insert(SmolStr::new(placeholder.stand_in_name.clone()), placeholder.clone());
+                res.insert(SmolStr::new(&placeholder.stand_in_name), placeholder.clone());
             }
         }
         res
@@ -255,7 +255,7 @@ fn validate_rule(rule: &SsrRule) -> Result<(), SsrError> {
 }
 
 fn tokenize(source: &str) -> Result<Vec<Token>, SsrError> {
-    let lexed = parser::LexedStr::new(source);
+    let lexed = parser::LexedStr::new(parser::Edition::CURRENT, source);
     if let Some((_, first_error)) = lexed.errors().next() {
         bail!("Failed to parse pattern: {}", first_error);
     }

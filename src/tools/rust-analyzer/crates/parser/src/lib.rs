@@ -17,7 +17,6 @@
 //!
 //! [`Parser`]: crate::parser::Parser
 
-#![warn(rust_2018_idioms, unused_lifetimes)]
 #![allow(rustdoc::private_intra_doc_links)]
 #![cfg_attr(feature = "in-rust-tree", feature(rustc_private))]
 
@@ -26,7 +25,6 @@ extern crate ra_ap_rustc_lexer as rustc_lexer;
 #[cfg(feature = "in-rust-tree")]
 extern crate rustc_lexer;
 
-mod edition;
 mod event;
 mod grammar;
 mod input;
@@ -37,13 +35,16 @@ mod shortcuts;
 mod syntax_kind;
 mod token_set;
 
+pub use T_ as T;
+
 #[cfg(test)]
 mod tests;
 
 pub(crate) use token_set::TokenSet;
 
+pub use edition::Edition;
+
 pub use crate::{
-    edition::Edition,
     input::Input,
     lexed_str::LexedStr,
     output::{Output, Step},
@@ -60,7 +61,7 @@ pub use crate::{
 ///
 /// That is, for something like
 ///
-/// ```
+/// ```ignore
 /// quick_check! {
 ///    fn prop() {}
 /// }
@@ -83,13 +84,11 @@ pub enum TopEntryPoint {
     /// Edge case -- macros generally don't expand to attributes, with the
     /// exception of `cfg_attr` which does!
     MetaItem,
-    /// Edge case 2 -- eager macros expand their input to a delimited list of comma separated expressions
-    MacroEagerInput,
 }
 
 impl TopEntryPoint {
     pub fn parse(&self, input: &Input, edition: Edition) -> Output {
-        let _p = tracing::span!(tracing::Level::INFO, "TopEntryPoint::parse", ?self).entered();
+        let _p = tracing::info_span!("TopEntryPoint::parse", ?self).entered();
         let entry_point: fn(&'_ mut parser::Parser<'_>) = match self {
             TopEntryPoint::SourceFile => grammar::entry::top::source_file,
             TopEntryPoint::MacroStmts => grammar::entry::top::macro_stmts,
@@ -98,7 +97,6 @@ impl TopEntryPoint {
             TopEntryPoint::Type => grammar::entry::top::type_,
             TopEntryPoint::Expr => grammar::entry::top::expr,
             TopEntryPoint::MetaItem => grammar::entry::top::meta_item,
-            TopEntryPoint::MacroEagerInput => grammar::entry::top::eager_macro_input,
         };
         let mut p = parser::Parser::new(input, edition);
         entry_point(&mut p);

@@ -1,9 +1,9 @@
-//@ compile-flags: -O -C no-prepopulate-passes
+//@ compile-flags: -Copt-level=3 -C no-prepopulate-passes
 
 // Tests that the compiler can apply `noalias` and other &mut attributes to `drop_in_place`.
 // Note that non-Unpin types should not get `noalias`, matching &mut behavior.
 
-#![crate_type="lib"]
+#![crate_type = "lib"]
 
 use std::marker::PhantomPinned;
 

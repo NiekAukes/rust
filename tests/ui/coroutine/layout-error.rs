@@ -16,13 +16,20 @@ impl<F: Future> Task<F> {
     }
 }
 
-fn main() {
+pub type F = impl Future;
+#[define_opaque(F)]
+fn foo()
+where
+    F:,
+{
     async fn cb() {
         let a = Foo; //~ ERROR cannot find value `Foo` in this scope
     }
 
-    type F = impl Future;
-    // Check that statics are inhabited computes they layout.
-    static POOL: Task<F> = Task::new();
     Task::spawn(&POOL, || cb());
 }
+
+// Check that statics are inhabited computes they layout.
+static POOL: Task<F> = Task::new();
+
+fn main() {}

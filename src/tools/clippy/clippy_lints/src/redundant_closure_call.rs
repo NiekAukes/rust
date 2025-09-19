@@ -1,4 +1,3 @@
-use crate::rustc_lint::LintContext;
 use clippy_utils::diagnostics::{span_lint_and_then, span_lint_hir};
 use clippy_utils::get_parent_expr;
 use clippy_utils::sugg::Sugg;
@@ -7,14 +6,14 @@ use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::intravisit::{Visitor as HirVisitor, Visitor};
 use rustc_hir::{
-    intravisit as hir_visit, ClosureKind, CoroutineDesugaring, CoroutineKind, CoroutineSource, ExprKind, Node,
+    ClosureKind, CoroutineDesugaring, CoroutineKind, CoroutineSource, ExprKind, Node, intravisit as hir_visit,
 };
-use rustc_lint::{LateContext, LateLintPass};
+use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
 use rustc_session::declare_lint_pass;
 use rustc_span::ExpnKind;
+use std::ops::ControlFlow;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -43,24 +42,15 @@ declare_clippy_lint! {
 declare_lint_pass!(RedundantClosureCall => [REDUNDANT_CLOSURE_CALL]);
 
 // Used to find `return` statements or equivalents e.g., `?`
-struct ReturnVisitor {
-    found_return: bool,
-}
-
-impl ReturnVisitor {
-    #[must_use]
-    fn new() -> Self {
-        Self { found_return: false }
-    }
-}
+struct ReturnVisitor;
 
 impl<'tcx> Visitor<'tcx> for ReturnVisitor {
-    fn visit_expr(&mut self, ex: &'tcx hir::Expr<'tcx>) {
+    type Result = ControlFlow<()>;
+    fn visit_expr(&mut self, ex: &'tcx hir::Expr<'tcx>) -> ControlFlow<()> {
         if let ExprKind::Ret(_) | ExprKind::Match(.., hir::MatchSource::TryDesugar(_)) = ex.kind {
-            self.found_return = true;
-        } else {
-            hir_visit::walk_expr(self, ex);
+            return ControlFlow::Break(());
         }
+        hir_visit::walk_expr(self, ex)
     }
 }
 
@@ -100,11 +90,10 @@ fn find_innermost_closure<'tcx>(
     let mut data = None;
 
     while let ExprKind::Closure(closure) = expr.kind
-        && let body = cx.tcx.hir().body(closure.body)
+        && let body = cx.tcx.hir_body(closure.body)
         && {
-            let mut visitor = ReturnVisitor::new();
-            visitor.visit_expr(body.value);
-            !visitor.found_return
+            let mut visitor = ReturnVisitor;
+            !visitor.visit_expr(body.value).is_break()
         }
         && steps > 0
     {
@@ -148,7 +137,7 @@ fn get_parent_call_exprs<'tcx>(
 
 impl<'tcx> LateLintPass<'tcx> for RedundantClosureCall {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'tcx>) {
-        if in_external_macro(cx.sess(), expr.span) {
+        if expr.span.in_external_macro(cx.sess().source_map()) {
             return;
         }
 
@@ -190,7 +179,7 @@ impl<'tcx> LateLintPass<'tcx> for RedundantClosureCall {
                             // Like `async fn`, async closures are wrapped in an additional block
                             // to move all of the closure's arguments into the future.
 
-                            let async_closure_body = cx.tcx.hir().body(closure.body).value;
+                            let async_closure_body = cx.tcx.hir_body(closure.body).value;
                             let ExprKind::Block(block, _) = async_closure_body.kind else {
                                 return;
                             };
@@ -217,8 +206,8 @@ impl<'tcx> LateLintPass<'tcx> for RedundantClosureCall {
 
                         // avoid clippy::double_parens
                         if !is_in_fn_call_arg {
-                            hint = hint.maybe_par();
-                        };
+                            hint = hint.maybe_paren();
+                        }
 
                         diag.span_suggestion(full_expr.span, "try doing something like", hint, applicability);
                     }
@@ -238,7 +227,7 @@ impl<'tcx> LateLintPass<'tcx> for RedundantClosureCall {
                 path: &'tcx hir::Path<'tcx>,
                 count: usize,
             }
-            impl<'a, 'tcx> Visitor<'tcx> for ClosureUsageCount<'a, 'tcx> {
+            impl<'tcx> Visitor<'tcx> for ClosureUsageCount<'_, 'tcx> {
                 type NestedFilter = nested_filter::OnlyBodies;
 
                 fn visit_expr(&mut self, expr: &'tcx hir::Expr<'tcx>) {
@@ -252,8 +241,8 @@ impl<'tcx> LateLintPass<'tcx> for RedundantClosureCall {
                     hir_visit::walk_expr(self, expr);
                 }
 
-                fn nested_visit_map(&mut self) -> Self::Map {
-                    self.cx.tcx.hir()
+                fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+                    self.cx.tcx
                 }
             }
             let mut closure_usage_count = ClosureUsageCount { cx, path, count: 0 };

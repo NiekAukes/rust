@@ -5,15 +5,16 @@ use ide_db::imports::{
     insert_use::ImportScope,
 };
 use itertools::Itertools;
-use syntax::{ast, AstNode, SyntaxNode, T};
+use syntax::{AstNode, SyntaxNode, ast};
 
 use crate::{
+    Completions,
+    config::AutoImportExclusionType,
     context::{
         CompletionContext, DotAccess, PathCompletionCtx, PathKind, PatternContext, Qualified,
         TypeLocation,
     },
-    render::{render_resolution_with_import, render_resolution_with_import_pat, RenderContext},
-    Completions,
+    render::{RenderContext, render_resolution_with_import, render_resolution_with_import_pat},
 };
 
 // Feature: Completion With Autoimport
@@ -82,19 +83,19 @@ use crate::{
 // NOTE: currently, if an assoc item comes from a trait that's not currently imported, and it also has an unresolved and/or partially-qualified path,
 // no imports will be proposed.
 //
-// .Fuzzy search details
+// #### Fuzzy search details
 //
 // To avoid an excessive amount of the results returned, completion input is checked for inclusion in the names only
 // (i.e. in `HashMap` in the `std::collections::HashMap` path).
 // For the same reasons, avoids searching for any path imports for inputs with their length less than 2 symbols
 // (but shows all associated items for any input length).
 //
-// .Import configuration
+// #### Import configuration
 //
 // It is possible to configure how use-trees are merged with the `imports.granularity.group` setting.
 // Mimics the corresponding behavior of the `Auto Import` feature.
 //
-// .LSP and performance implications
+// #### LSP and performance implications
 //
 // The feature is enabled only if the LSP client supports LSP protocol version 3.16+ and reports the `additionalTextEdits`
 // (case-sensitive) resolve client capability in its client capabilities.
@@ -102,7 +103,7 @@ use crate::{
 // For clients with no such support, all edits have to be calculated on the completion request, including the fuzzy search completion ones,
 // which might be slow ergo the feature is automatically disabled.
 //
-// .Feature toggle
+// #### Feature toggle
 //
 // The feature can be forcefully turned off in the settings with the `rust-analyzer.completion.autoimport.enable` flag.
 // Note that having this flag set to `true` does not guarantee that the feature is enabled: your client needs to have the corresponding
@@ -207,8 +208,7 @@ fn import_on_the_fly(
     position: SyntaxNode,
     potential_import_name: String,
 ) -> Option<()> {
-    let _p =
-        tracing::span!(tracing::Level::INFO, "import_on_the_fly", ?potential_import_name).entered();
+    let _p = tracing::info_span!("import_on_the_fly", ?potential_import_name).entered();
 
     ImportScope::find_insert_use_container(&position, &ctx.sema)?;
 
@@ -257,13 +257,10 @@ fn import_on_the_fly(
     };
     let user_input_lowercased = potential_import_name.to_lowercase();
 
+    let import_cfg = ctx.config.import_path_config(ctx.is_nightly);
+
     import_assets
-        .search_for_imports(
-            &ctx.sema,
-            ctx.config.insert_use.prefix_kind,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
-        )
+        .search_for_imports(&ctx.sema, import_cfg, ctx.config.insert_use.prefix_kind)
         .filter(ns_filter)
         .filter(|import| {
             let original_item = &import.original_item;
@@ -271,6 +268,7 @@ fn import_on_the_fly(
                 && !ctx.is_item_hidden(original_item)
                 && ctx.check_stability(original_item.attrs(ctx.db).as_deref())
         })
+        .filter(|import| filter_excluded_flyimport(ctx, import))
         .sorted_by(|a, b| {
             let key = |import_path| {
                 (
@@ -296,8 +294,7 @@ fn import_on_the_fly_pat_(
     position: SyntaxNode,
     potential_import_name: String,
 ) -> Option<()> {
-    let _p = tracing::span!(tracing::Level::INFO, "import_on_the_fly_pat", ?potential_import_name)
-        .entered();
+    let _p = tracing::info_span!("import_on_the_fly_pat_", ?potential_import_name).entered();
 
     ImportScope::find_insert_use_container(&position, &ctx.sema)?;
 
@@ -307,14 +304,10 @@ fn import_on_the_fly_pat_(
         ItemInNs::Values(def) => matches!(def, hir::ModuleDef::Const(_)),
     };
     let user_input_lowercased = potential_import_name.to_lowercase();
+    let cfg = ctx.config.import_path_config(ctx.is_nightly);
 
     import_assets
-        .search_for_imports(
-            &ctx.sema,
-            ctx.config.insert_use.prefix_kind,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
-        )
+        .search_for_imports(&ctx.sema, cfg, ctx.config.insert_use.prefix_kind)
         .filter(ns_filter)
         .filter(|import| {
             let original_item = &import.original_item;
@@ -347,25 +340,21 @@ fn import_on_the_fly_method(
     position: SyntaxNode,
     potential_import_name: String,
 ) -> Option<()> {
-    let _p =
-        tracing::span!(tracing::Level::INFO, "import_on_the_fly_method", ?potential_import_name)
-            .entered();
+    let _p = tracing::info_span!("import_on_the_fly_method", ?potential_import_name).entered();
 
     ImportScope::find_insert_use_container(&position, &ctx.sema)?;
 
     let user_input_lowercased = potential_import_name.to_lowercase();
 
+    let cfg = ctx.config.import_path_config(ctx.is_nightly);
+
     import_assets
-        .search_for_imports(
-            &ctx.sema,
-            ctx.config.insert_use.prefix_kind,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
-        )
+        .search_for_imports(&ctx.sema, cfg, ctx.config.insert_use.prefix_kind)
         .filter(|import| {
             !ctx.is_item_hidden(&import.item_to_import)
                 && !ctx.is_item_hidden(&import.original_item)
         })
+        .filter(|import| filter_excluded_flyimport(ctx, import))
         .sorted_by(|a, b| {
             let key = |import_path| {
                 (
@@ -383,13 +372,32 @@ fn import_on_the_fly_method(
     Some(())
 }
 
+fn filter_excluded_flyimport(ctx: &CompletionContext<'_>, import: &LocatedImport) -> bool {
+    let def = import.item_to_import.into_module_def();
+    let is_exclude_flyimport = ctx.exclude_flyimport.get(&def).copied();
+
+    if matches!(is_exclude_flyimport, Some(AutoImportExclusionType::Always))
+        || !import.complete_in_flyimport.0
+    {
+        return false;
+    }
+    let method_imported = import.item_to_import != import.original_item;
+    if method_imported
+        && (is_exclude_flyimport.is_some()
+            || ctx.exclude_flyimport.contains_key(&import.original_item.into_module_def()))
+    {
+        // If this is a method, exclude it either if it was excluded itself (which may not be caught above,
+        // because `item_to_import` is the trait), or if its trait was excluded. We don't need to check
+        // the attributes here, since they pass from trait to methods on import map construction.
+        return false;
+    }
+    true
+}
+
 fn import_name(ctx: &CompletionContext<'_>) -> String {
     let token_kind = ctx.token.kind();
-    if matches!(token_kind, T![.] | T![::]) {
-        String::new()
-    } else {
-        ctx.token.to_string()
-    }
+
+    if token_kind.is_any_identifier() { ctx.token.to_string() } else { String::new() }
 }
 
 fn import_assets_for_path(
@@ -397,13 +405,8 @@ fn import_assets_for_path(
     potential_import_name: &str,
     qualifier: Option<ast::Path>,
 ) -> Option<ImportAssets> {
-    let _p = tracing::span!(
-        tracing::Level::INFO,
-        "import_assets_for_path",
-        ?potential_import_name,
-        ?qualifier
-    )
-    .entered();
+    let _p =
+        tracing::info_span!("import_assets_for_path", ?potential_import_name, ?qualifier).entered();
 
     let fuzzy_name_length = potential_import_name.len();
     let mut assets_for_path = ImportAssets::for_fuzzy_path(
@@ -430,7 +433,7 @@ fn compute_fuzzy_completion_order_key(
     cov_mark::hit!(certain_fuzzy_order_test);
     let import_name = match proposed_mod_path.segments().last() {
         // FIXME: nasty alloc, this is a hot path!
-        Some(name) => name.to_smol_str().to_ascii_lowercase(),
+        Some(name) => name.as_str().to_ascii_lowercase(),
         None => return usize::MAX,
     };
     match import_name.match_indices(user_input_lowercased).next() {

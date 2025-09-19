@@ -20,10 +20,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: build/cg_clif
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
-
-    - name: Prepare dependencies
-      run: ./y.sh prepare
+        key: ${{ runner.os }}-rustc-test-cargo-build-target-${{ hashFiles('rust-toolchain', 'Cargo.lock') }}
 
     - name: Test
       run: ./scripts/test_bootstrap.sh
@@ -43,15 +40,12 @@ jobs:
       uses: actions/cache@v4
       with:
         path: build/cg_clif
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
+        key: ${{ runner.os }}-rustc-test-cargo-build-target-${{ hashFiles('rust-toolchain', 'Cargo.lock') }}
 
     - name: Install ripgrep
       run: |
         sudo apt update
         sudo apt install -y ripgrep
-
-    - name: Prepare dependencies
-      run: ./y.sh prepare
 
     - name: Test
       run: ./scripts/test_rustc_tests.sh

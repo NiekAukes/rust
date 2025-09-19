@@ -8,10 +8,11 @@
 //@ ignore-stage1
 //@ ignore-cross-compile
 //@ ignore-remote
-//@ ignore-windows-gnu mingw has troubles with linking https://github.com/rust-lang/rust/pull/116837
 
 #![feature(rustc_private)]
+#![feature(assert_matches)]
 
+extern crate rustc_middle;
 extern crate rustc_hir;
 #[macro_use]
 extern crate rustc_smir;
@@ -19,12 +20,11 @@ extern crate rustc_driver;
 extern crate rustc_interface;
 extern crate stable_mir;
 
-use rustc_smir::rustc_internal;
 use stable_mir::mir::mono::{Instance, InstanceKind};
 use stable_mir::mir::visit::{Location, MirVisitor};
 use stable_mir::mir::{LocalDecl, Terminator, TerminatorKind};
-use stable_mir::ty::{RigidTy, TyKind};
-use std::collections::HashSet;
+use stable_mir::ty::{FnDef, GenericArgs, RigidTy, TyKind};
+use std::assert_matches::assert_matches;
 use std::convert::TryFrom;
 use std::io::Write;
 use std::ops::ControlFlow;
@@ -39,9 +39,10 @@ fn test_intrinsics() -> ControlFlow<()> {
     visitor.visit_body(&main_body);
 
     let calls = visitor.calls;
-    assert_eq!(calls.len(), 2, "Expected 2 calls, but found: {calls:?}");
-    for intrinsic in &calls {
-        check_intrinsic(intrinsic)
+    assert_eq!(calls.len(), 3, "Expected 3 calls, but found: {calls:?}");
+    for (fn_def, args) in calls.into_iter() {
+        check_instance(&Instance::resolve(fn_def, &args).unwrap());
+        check_def(fn_def);
     }
 
     ControlFlow::Continue(())
@@ -49,26 +50,46 @@ fn test_intrinsics() -> ControlFlow<()> {
 
 /// This check is unfortunately tight to the implementation of intrinsics.
 ///
-/// We want to ensure that StableMIR can handle intrinsics with and without fallback body.
+/// We want to ensure that StableMIR can handle intrinsics with and without fallback body:
+/// for intrinsics without a body, obviously we cannot expose anything.
 ///
 /// If by any chance this test breaks because you changed how an intrinsic is implemented, please
 /// update the test to invoke a different intrinsic.
-fn check_intrinsic(intrinsic: &Instance) {
-    assert_eq!(intrinsic.kind, InstanceKind::Intrinsic);
-    let name = intrinsic.intrinsic_name().unwrap();
-    if intrinsic.has_body() {
-        let Some(body) = intrinsic.body() else { unreachable!("Expected a body") };
+fn check_instance(instance: &Instance) {
+    assert_eq!(instance.kind, InstanceKind::Intrinsic);
+    let name = instance.intrinsic_name().unwrap();
+    if instance.has_body() {
+        let Some(body) = instance.body() else { unreachable!("Expected a body") };
         assert!(!body.blocks.is_empty());
-        assert_eq!(&name, "likely");
+        assert_eq!(&name, "select_unpredictable");
     } else {
-        assert!(intrinsic.body().is_none());
-        assert_eq!(&name, "size_of_val");
+        assert!(instance.body().is_none());
+        assert_matches!(name.as_str(), "size_of_val" | "vtable_size");
+    }
+}
+
+fn check_def(fn_def: FnDef) {
+    assert!(fn_def.is_intrinsic());
+    let intrinsic = fn_def.as_intrinsic().unwrap();
+    assert_eq!(fn_def, intrinsic.into());
+
+    let name = intrinsic.fn_name();
+    match name.as_str() {
+        "select_unpredictable" => {
+            assert!(!intrinsic.must_be_overridden());
+            assert!(fn_def.has_body());
+        }
+        "vtable_size" | "size_of_val" => {
+            assert!(intrinsic.must_be_overridden());
+            assert!(!fn_def.has_body());
+        }
+        _ => unreachable!("Unexpected intrinsic: {}", name),
     }
 }
 
 struct CallsVisitor<'a> {
     locals: &'a [LocalDecl],
-    calls: HashSet<Instance>,
+    calls: Vec<(FnDef, GenericArgs)>,
 }
 
 impl<'a> MirVisitor for CallsVisitor<'a> {
@@ -80,7 +101,7 @@ impl<'a> MirVisitor for CallsVisitor<'a> {
                     else {
                         return;
                     };
-                self.calls.insert(Instance::resolve(def, &args).unwrap());
+                self.calls.push((def, args.clone()));
             }
             _ => {}
         }
@@ -94,7 +115,7 @@ impl<'a> MirVisitor for CallsVisitor<'a> {
 fn main() {
     let path = "binop_input.rs";
     generate_input(&path).unwrap();
-    let args = vec!["rustc".to_string(), "--crate-type=lib".to_string(), path.to_string()];
+    let args = &["rustc".to_string(), "--crate-type=lib".to_string(), path.to_string()];
     run!(args, test_intrinsics).unwrap();
 }
 
@@ -106,8 +127,9 @@ fn generate_input(path: &str) -> std::io::Result<()> {
         #![feature(core_intrinsics)]
         use std::intrinsics::*;
         pub fn use_intrinsics(init: bool) -> bool {{
+            let vtable_sz = unsafe {{ vtable_size(0 as *const ()) }};
             let sz = unsafe {{ size_of_val("hi") }};
-            likely(init && sz == 2)
+            select_unpredictable(init && sz == 2, false, true)
         }}
         "#
     )?;

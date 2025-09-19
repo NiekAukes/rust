@@ -12,7 +12,7 @@ pub(crate) fn private_assoc_item(
     let name = d
         .item
         .name(ctx.sema.db)
-        .map(|name| format!("`{}` ", name.display(ctx.sema.db)))
+        .map(|name| format!("`{}` ", name.display(ctx.sema.db, ctx.edition)))
         .unwrap_or_default();
     Diagnostic::new_with_syntax_node_ptr(
         ctx,
@@ -28,6 +28,7 @@ pub(crate) fn private_assoc_item(
         ),
         d.expr_or_pat.map(Into::into),
     )
+    .stable()
 }
 
 #[cfg(test)]

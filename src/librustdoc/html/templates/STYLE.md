@@ -1,15 +1,13 @@
 # Style for Templates
 
-This directory has templates in the [Tera templating language][teradoc], which is very
-similar to [Jinja2][jinjadoc] and [Django][djangodoc] templates, and also to [Askama][askamadoc].
+This directory has templates in the [Askama templating language][askamadoc], which is very
+similar to [Jinja2][jinjadoc].
 
-[teradoc]: https://tera.netlify.app/docs/#templates
 [jinjadoc]: https://jinja.palletsprojects.com/en/3.1.x/templates/
-[djangodoc]: https://docs.djangoproject.com/en/4.1/topics/templates/
 [askamadoc]: https://docs.rs/askama/latest/askama/
 
 We want our rendered output to have as little unnecessary whitespace as
-possible, so that pages load quickly. To achieve that we use Tera's
+possible, so that pages load quickly. To achieve that we use Askama's
 [whitespace control] features. By default, whitespace characters are removed
 around jinja tags (`{% %}` for example). At the end of most lines, we put an
 empty comment tag: `{# #}`. This causes all whitespace between the end of the
@@ -20,7 +18,7 @@ remove following whitespace but not preceding. We also use the whitespace
 control characters in most instances of tags with control flow, for example
 `{% if foo %}`.
 
-[whitespace control]: https://tera.netlify.app/docs/#whitespace-control
+[whitespace control]: https://askama.readthedocs.io/en/stable/configuration.html#whitespace-control
 
 We want our templates to be readable, so we use indentation and newlines
 liberally. We indent by four spaces after opening an HTML tag _or_ a Jinja
@@ -34,5 +32,5 @@ we avoid [assignments in the template logic][assignments] and [Askama
 macros][macros]. This also may make things easier if we switch to a different
 Jinja-style template system in the future.
 
-[assignments]: https://djc.github.io/askama/template_syntax.html#assignments
-[macros]: https://djc.github.io/askama/template_syntax.html#macros
+[assignments]: https://askama.readthedocs.io/en/stable/template_syntax.html#assignments
+[macros]: https://askama.readthedocs.io/en/stable/template_syntax.html#macros

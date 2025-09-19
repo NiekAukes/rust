@@ -1,8 +1,8 @@
-use crate::iter::{adapters::SourceIter, FusedIterator, InPlaceIterable, TrustedFused};
+use crate::iter::adapters::SourceIter;
+use crate::iter::{FusedIterator, InPlaceIterable, TrustedFused};
 use crate::mem::{ManuallyDrop, MaybeUninit};
 use crate::num::NonZero;
 use crate::ops::{ControlFlow, Try};
-use crate::ptr::addr_of;
 use crate::{array, fmt};
 
 /// An iterator that uses `f` to both filter and map elements from `iter`.
@@ -68,7 +68,7 @@ where
     fn next_chunk<const N: usize>(
         &mut self,
     ) -> Result<[Self::Item; N], array::IntoIter<Self::Item, N>> {
-        let mut array: [MaybeUninit<Self::Item>; N] = MaybeUninit::uninit_array();
+        let mut array: [MaybeUninit<Self::Item>; N] = [const { MaybeUninit::uninit() }; N];
 
         struct Guard<'a, T> {
             array: &'a mut [MaybeUninit<T>],
@@ -81,9 +81,7 @@ where
                 if const { crate::mem::needs_drop::<T>() } {
                     // SAFETY: self.initialized is always <= N, which also is the length of the array.
                     unsafe {
-                        core::ptr::drop_in_place(MaybeUninit::slice_assume_init_mut(
-                            self.array.get_unchecked_mut(..self.initialized),
-                        ));
+                        self.array.get_unchecked_mut(..self.initialized).assume_init_drop();
                     }
                 }
             }
@@ -100,7 +98,7 @@ where
 
             unsafe {
                 let opt_payload_at: *const MaybeUninit<B> =
-                    addr_of!(val).byte_add(core::mem::offset_of!(Option<B>, Some.0)).cast();
+                    (&raw const val).byte_add(core::mem::offset_of!(Option<B>, Some.0)).cast();
                 let dst = guard.array.as_mut_ptr().add(idx);
                 crate::ptr::copy_nonoverlapping(opt_payload_at, dst, 1);
                 crate::mem::forget(val);

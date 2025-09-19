@@ -1,5 +1,3 @@
-#![feature(lazy_cell)]
-#![cfg_attr(feature = "deny-warnings", deny(warnings))]
 #![warn(rust_2018_idioms, unused_lifetimes)]
 
 use std::ffi::OsStr;
@@ -46,6 +44,7 @@ impl Message {
                 ".*AT&T x86 assembly syntax used",
                 "note: Clippy version: .*",
                 "the compiler unexpectedly panicked. this is a bug.",
+                "internal compiler error:",
             ])
             .unwrap()
         });

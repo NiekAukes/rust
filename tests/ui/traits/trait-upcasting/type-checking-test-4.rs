@@ -1,5 +1,3 @@
-#![feature(trait_upcasting)]
-
 trait Foo<'a>: Bar<'a, 'a> {}
 trait Bar<'a, 'b> {
     fn get_b(&self) -> Option<&'a u32> {
@@ -9,6 +7,10 @@ trait Bar<'a, 'b> {
 
 fn test_correct(x: &dyn Foo<'static>) {
     let _ = x as &dyn Bar<'static, 'static>;
+}
+
+fn test_correct2<'a>(x: &dyn Foo<'a>) {
+    let _ = x as &dyn Bar<'_, '_>;
 }
 
 fn test_wrong1<'a>(x: &dyn Foo<'static>, y: &'a u32) {

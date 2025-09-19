@@ -1,18 +1,24 @@
-error[E0433]: failed to resolve: maybe a missing crate `nonexistent`?
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `nonexistent`
   --> $DIR/field-attributes-vis-unresolved.rs:17:12
    |
 LL |     pub(in nonexistent) field: u8
-   |            ^^^^^^^^^^^ maybe a missing crate `nonexistent`?
+   |            ^^^^^^^^^^^ use of unresolved module or unlinked crate `nonexistent`
    |
-   = help: consider adding `extern crate nonexistent` to use the `nonexistent` crate
+help: you might be missing a crate named `nonexistent`, add it to your project and import it in your code
+   |
+LL + extern crate nonexistent;
+   |
 
-error[E0433]: failed to resolve: maybe a missing crate `nonexistent`?
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `nonexistent`
   --> $DIR/field-attributes-vis-unresolved.rs:22:12
    |
 LL |     pub(in nonexistent) u8
-   |            ^^^^^^^^^^^ maybe a missing crate `nonexistent`?
+   |            ^^^^^^^^^^^ use of unresolved module or unlinked crate `nonexistent`
    |
-   = help: consider adding `extern crate nonexistent` to use the `nonexistent` crate
+help: you might be missing a crate named `nonexistent`, add it to your project and import it in your code
+   |
+LL + extern crate nonexistent;
+   |
 
 error: aborting due to 2 previous errors
 

@@ -1,5 +1,4 @@
 //@ run-pass
-//@ pretty-expanded FIXME #23616
 
 mod a {
     pub fn f() {}
@@ -7,7 +6,7 @@ mod a {
 }
 
 mod b {
-    pub use a::*;
+    pub use crate::a::*;
 }
 
 pub fn main() {

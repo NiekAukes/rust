@@ -1,6 +1,8 @@
 // ignore-tidy-linelength
+//@ add-core-stubs
 //@ revisions:i686-linux x86_64-linux
 
+//@ compile-flags: -Cno-prepopulate-passes -Copt-level=1 -Cpanic=abort
 //@[i686-linux] compile-flags: --target i686-unknown-linux-gnu
 //@[i686-linux] needs-llvm-components: x86
 //@[x86_64-linux] compile-flags: --target x86_64-unknown-linux-gnu
@@ -16,18 +18,14 @@
 // on i686-unknown-linux-gnu, since the alignment needs to be increased, and should codegen
 // to a direct call on x86_64-unknown-linux-gnu, where byval alignment matches Rust alignment.
 
-#![feature(no_core, lang_items)]
+#![feature(no_core)]
 #![crate_type = "lib"]
 #![no_std]
 #![no_core]
 #![allow(non_camel_case_types)]
 
-#[lang = "sized"]
-trait Sized {}
-#[lang = "freeze"]
-trait Freeze {}
-#[lang = "copy"]
-trait Copy {}
+extern crate minicore;
+use minicore::*;
 
 // This type has align 1 in Rust, but as a byval argument on i686-linux, it will have align 4.
 #[repr(C)]
@@ -57,8 +55,10 @@ extern "C" {
 pub unsafe fn rust_to_c_increases_alignment(x: Align1) {
     // i686-linux: start:
     // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca [48 x i8], align 4
+    // i686-linux-NEXT: call void @llvm.lifetime.start.p0(i64 48, ptr {{.*}}[[ALLOCA]])
     // i686-linux-NEXT: call void @llvm.memcpy.{{.+}}(ptr {{.*}}align 4 {{.*}}[[ALLOCA]], ptr {{.*}}align 1 {{.*}}%x
     // i686-linux-NEXT: call void @extern_c_align1({{.+}} [[ALLOCA]])
+    // i686-linux-NEXT: call void @llvm.lifetime.end.p0(i64 48, ptr {{.*}}[[ALLOCA]])
 
     // x86_64-linux: start:
     // x86_64-linux-NEXT: call void @extern_c_align1

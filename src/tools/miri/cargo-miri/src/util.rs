@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
@@ -11,14 +12,15 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::arg::*;
 
-pub fn show_error(msg: &impl std::fmt::Display) -> ! {
+pub fn show_error_(msg: &impl std::fmt::Display) -> ! {
     eprintln!("fatal error: {msg}");
     std::process::exit(1)
 }
 
 macro_rules! show_error {
-    ($($tt:tt)*) => { crate::util::show_error(&format_args!($($tt)*)) };
+    ($($tt:tt)*) => { crate::util::show_error_(&format_args!($($tt)*)) };
 }
+pub(crate) use show_error;
 
 /// The information to run a crate with the given environment.
 #[derive(Clone, Serialize, Deserialize)]
@@ -91,12 +93,9 @@ pub fn find_miri() -> PathBuf {
     if let Some(path) = env::var_os("MIRI") {
         return path.into();
     }
+    // Assume it is in the same directory as ourselves.
     let mut path = std::env::current_exe().expect("current executable path invalid");
-    if cfg!(windows) {
-        path.set_file_name("miri.exe");
-    } else {
-        path.set_file_name("miri");
-    }
+    path.set_file_name(format!("miri{}", env::consts::EXE_SUFFIX));
     path
 }
 
@@ -144,38 +143,23 @@ pub fn exec(mut cmd: Command) -> ! {
     }
 }
 
-/// Execute the `Command`, where possible by replacing the current process with a new process
-/// described by the `Command`. Then exit this process with the exit code of the new process.
-/// `input` is also piped to the new process's stdin, on cfg(unix) platforms by writing its
-/// contents to `path` first, then setting stdin to that file.
-pub fn exec_with_pipe<P>(mut cmd: Command, input: &[u8], path: P) -> !
-where
-    P: AsRef<Path>,
-{
-    #[cfg(unix)]
-    {
-        // Write the bytes we want to send to stdin out to a file
-        std::fs::write(&path, input).unwrap();
-        // Open the file for reading, and set our new stdin to it
-        let stdin = File::open(&path).unwrap();
-        cmd.stdin(stdin);
-        // Unlink the file so that it is fully cleaned up as soon as the new process exits
-        std::fs::remove_file(&path).unwrap();
-        // Finally, we can hand off control.
-        exec(cmd)
-    }
-    #[cfg(not(unix))]
-    {
-        drop(path); // We don't need the path, we can pipe the bytes directly
-        cmd.stdin(std::process::Stdio::piped());
-        let mut child = cmd.spawn().expect("failed to spawn process");
-        {
-            let stdin = child.stdin.as_mut().expect("failed to open stdin");
-            stdin.write_all(input).expect("failed to write out test source");
-        }
-        let exit_status = child.wait().expect("failed to run command");
-        std::process::exit(exit_status.code().unwrap_or(-1))
-    }
+/// Execute the `Command`, then exit this process with the exit code of the new process.
+/// `input` is also piped to the new process's stdin.
+pub fn exec_with_pipe(mut cmd: Command, input: &[u8]) -> ! {
+    // We can't use `exec` since then the background thread will stop running.
+    cmd.stdin(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("failed to spawn process");
+    let child_stdin = child.stdin.take().unwrap();
+    // Write stdin in a background thread, as it may block.
+    let exit_status = std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut child_stdin = child_stdin;
+            // Ignore failure, it is most likely due to the process having terminated.
+            let _ = child_stdin.write_all(input);
+        });
+        child.wait().expect("failed to run command")
+    });
+    std::process::exit(exit_status.code().unwrap_or(-1))
 }
 
 pub fn ask_to_run(mut cmd: Command, ask: bool, text: &str) {
@@ -232,21 +216,18 @@ pub fn get_cargo_metadata() -> Metadata {
 }
 
 /// Pulls all the crates in this workspace from the cargo metadata.
-/// Workspace members are emitted like "miri 0.1.0 (path+file:///path/to/miri)"
 /// Additionally, somewhere between cargo metadata and TyCtxt, '-' gets replaced with '_' so we
 /// make that same transformation here.
 pub fn local_crates(metadata: &Metadata) -> String {
     assert!(!metadata.workspace_members.is_empty());
-    let mut local_crates = String::new();
-    for member in &metadata.workspace_members {
-        let name = member.repr.split(' ').next().unwrap();
-        let name = name.replace('-', "_");
-        local_crates.push_str(&name);
-        local_crates.push(',');
-    }
-    local_crates.pop(); // Remove the trailing ','
-
-    local_crates
+    let package_name_by_id: HashMap<_, _> =
+        metadata.packages.iter().map(|package| (&package.id, package.name.as_str())).collect();
+    metadata
+        .workspace_members
+        .iter()
+        .map(|id| package_name_by_id[id].replace('-', "_"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Debug-print a command that is going to be run.
@@ -269,7 +250,7 @@ pub fn get_target_dir(meta: &Metadata) -> PathBuf {
     output
 }
 
-/// Determines where the sysroot of this exeuction is
+/// Determines where the sysroot of this execution is
 ///
 /// Either in a user-specified spot by an envar, or in a default cache location.
 pub fn get_sysroot_dir() -> PathBuf {

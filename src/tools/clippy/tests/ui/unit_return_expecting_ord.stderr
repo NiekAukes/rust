@@ -1,5 +1,5 @@
 error: this closure returns the unit type which also implements Ord
-  --> tests/ui/unit_return_expecting_ord.rs:19:25
+  --> tests/ui/unit_return_expecting_ord.rs:18:25
    |
 LL |     structs.sort_by_key(|s| {
    |                         ^^^
@@ -19,19 +19,19 @@ LL |     structs.is_sorted_by_key(|s| {
    |                              ^^^
    |
 help: probably caused by this trailing semicolon
-  --> tests/ui/unit_return_expecting_ord.rs:26:24
+  --> tests/ui/unit_return_expecting_ord.rs:27:24
    |
 LL |         double(s.field);
    |                        ^
 
 error: this closure returns the unit type which also implements PartialOrd
-  --> tests/ui/unit_return_expecting_ord.rs:28:30
+  --> tests/ui/unit_return_expecting_ord.rs:29:30
    |
 LL |     structs.is_sorted_by_key(|s| {
    |                              ^^^
 
 error: this closure returns the unit type which also implements Ord
-  --> tests/ui/unit_return_expecting_ord.rs:39:25
+  --> tests/ui/unit_return_expecting_ord.rs:41:25
    |
 LL |     structs.sort_by_key(|s| unit(s.field));
    |                         ^^^

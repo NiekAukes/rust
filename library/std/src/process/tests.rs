@@ -1,6 +1,5 @@
-use crate::io::prelude::*;
-
 use super::{Command, Output, Stdio};
+use crate::io::prelude::*;
 use crate::io::{BorrowedBuf, ErrorKind};
 use crate::mem::MaybeUninit;
 use crate::str;
@@ -97,9 +96,23 @@ fn stdout_works() {
 #[test]
 #[cfg_attr(any(windows, target_os = "vxworks"), ignore)]
 fn set_current_dir_works() {
+    // On many Unix platforms this will use the posix_spawn path.
     let mut cmd = shell_cmd();
     cmd.arg("-c").arg("pwd").current_dir("/").stdout(Stdio::piped());
     assert_eq!(run_output(cmd), "/\n");
+
+    // Also test the fork/exec path by setting a pre_exec function.
+    #[cfg(unix)]
+    {
+        use crate::os::unix::process::CommandExt;
+
+        let mut cmd = shell_cmd();
+        cmd.arg("-c").arg("pwd").current_dir("/").stdout(Stdio::piped());
+        unsafe {
+            cmd.pre_exec(|| Ok(()));
+        }
+        assert_eq!(run_output(cmd), "/\n");
+    }
 }
 
 #[test]
@@ -137,7 +150,7 @@ fn child_stdout_read_buf() {
     let child = cmd.spawn().unwrap();
 
     let mut stdout = child.stdout.unwrap();
-    let mut buf: [MaybeUninit<u8>; 128] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; 128] = [MaybeUninit::uninit(); 128];
     let mut buf = BorrowedBuf::from(buf.as_mut_slice());
     stdout.read_buf(buf.unfilled()).unwrap();
 
@@ -310,9 +323,13 @@ fn test_capture_env_at_spawn() {
 
     // This variable will not be present if the environment has already
     // been captured above.
-    env::set_var("RUN_TEST_NEW_ENV2", "456");
+    unsafe {
+        env::set_var("RUN_TEST_NEW_ENV2", "456");
+    }
     let result = cmd.output().unwrap();
-    env::remove_var("RUN_TEST_NEW_ENV2");
+    unsafe {
+        env::remove_var("RUN_TEST_NEW_ENV2");
+    }
 
     let output = String::from_utf8_lossy(&result.stdout).to_string();
 
@@ -376,147 +393,6 @@ fn test_interior_nul_in_env_value_is_error() {
         Err(e) => assert_eq!(e.kind(), ErrorKind::InvalidInput),
         Ok(_) => panic!(),
     }
-}
-
-/// Tests that process creation flags work by debugging a process.
-/// Other creation flags make it hard or impossible to detect
-/// behavioral changes in the process.
-#[test]
-#[cfg(windows)]
-fn test_creation_flags() {
-    use crate::os::windows::process::CommandExt;
-    use crate::sys::c::{BOOL, DWORD, INFINITE};
-    #[repr(C, packed)]
-    struct DEBUG_EVENT {
-        pub event_code: DWORD,
-        pub process_id: DWORD,
-        pub thread_id: DWORD,
-        // This is a union in the real struct, but we don't
-        // need this data for the purposes of this test.
-        pub _junk: [u8; 164],
-    }
-
-    extern "system" {
-        fn WaitForDebugEvent(lpDebugEvent: *mut DEBUG_EVENT, dwMilliseconds: DWORD) -> BOOL;
-        fn ContinueDebugEvent(
-            dwProcessId: DWORD,
-            dwThreadId: DWORD,
-            dwContinueStatus: DWORD,
-        ) -> BOOL;
-    }
-
-    const DEBUG_PROCESS: DWORD = 1;
-    const EXIT_PROCESS_DEBUG_EVENT: DWORD = 5;
-    const DBG_EXCEPTION_NOT_HANDLED: DWORD = 0x80010001;
-
-    let mut child =
-        Command::new("cmd").creation_flags(DEBUG_PROCESS).stdin(Stdio::piped()).spawn().unwrap();
-    child.stdin.take().unwrap().write_all(b"exit\r\n").unwrap();
-    let mut events = 0;
-    let mut event = DEBUG_EVENT { event_code: 0, process_id: 0, thread_id: 0, _junk: [0; 164] };
-    loop {
-        if unsafe { WaitForDebugEvent(&mut event as *mut DEBUG_EVENT, INFINITE) } == 0 {
-            panic!("WaitForDebugEvent failed!");
-        }
-        events += 1;
-
-        if event.event_code == EXIT_PROCESS_DEBUG_EVENT {
-            break;
-        }
-
-        if unsafe {
-            ContinueDebugEvent(event.process_id, event.thread_id, DBG_EXCEPTION_NOT_HANDLED)
-        } == 0
-        {
-            panic!("ContinueDebugEvent failed!");
-        }
-    }
-    assert!(events > 0);
-}
-
-/// Tests proc thread attributes by spawning a process with a custom parent process,
-/// then comparing the parent process ID with the expected parent process ID.
-#[test]
-#[cfg(windows)]
-fn test_proc_thread_attributes() {
-    use crate::mem;
-    use crate::os::windows::io::AsRawHandle;
-    use crate::os::windows::process::CommandExt;
-    use crate::sys::c::{CloseHandle, BOOL, HANDLE};
-    use crate::sys::cvt;
-
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct PROCESSENTRY32W {
-        dwSize: u32,
-        cntUsage: u32,
-        th32ProcessID: u32,
-        th32DefaultHeapID: usize,
-        th32ModuleID: u32,
-        cntThreads: u32,
-        th32ParentProcessID: u32,
-        pcPriClassBase: i32,
-        dwFlags: u32,
-        szExeFile: [u16; 260],
-    }
-
-    extern "system" {
-        fn CreateToolhelp32Snapshot(dwflags: u32, th32processid: u32) -> HANDLE;
-        fn Process32First(hsnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;
-        fn Process32Next(hsnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;
-    }
-
-    const PROC_THREAD_ATTRIBUTE_PARENT_PROCESS: usize = 0x00020000;
-    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
-
-    struct ProcessDropGuard(crate::process::Child);
-
-    impl Drop for ProcessDropGuard {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-        }
-    }
-
-    let parent = ProcessDropGuard(Command::new("cmd").spawn().unwrap());
-
-    let mut child_cmd = Command::new("cmd");
-
-    unsafe {
-        child_cmd
-            .raw_attribute(PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, parent.0.as_raw_handle() as isize);
-    }
-
-    let child = ProcessDropGuard(child_cmd.spawn().unwrap());
-
-    let h_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-
-    let mut process_entry = PROCESSENTRY32W {
-        dwSize: mem::size_of::<PROCESSENTRY32W>() as u32,
-        cntUsage: 0,
-        th32ProcessID: 0,
-        th32DefaultHeapID: 0,
-        th32ModuleID: 0,
-        cntThreads: 0,
-        th32ParentProcessID: 0,
-        pcPriClassBase: 0,
-        dwFlags: 0,
-        szExeFile: [0; 260],
-    };
-
-    unsafe { cvt(Process32First(h_snapshot, &mut process_entry as *mut _)) }.unwrap();
-
-    loop {
-        if child.0.id() == process_entry.th32ProcessID {
-            break;
-        }
-        unsafe { cvt(Process32Next(h_snapshot, &mut process_entry as *mut _)) }.unwrap();
-    }
-
-    unsafe { cvt(CloseHandle(h_snapshot)) }.unwrap();
-
-    assert_eq!(parent.0.id(), process_entry.th32ParentProcessID);
-
-    drop(child)
 }
 
 #[test]
@@ -677,7 +553,7 @@ fn debug_print() {
 #[test]
 #[cfg(windows)]
 fn run_bat_script() {
-    let tempdir = crate::sys_common::io::test::tmpdir();
+    let tempdir = crate::test_helpers::tmpdir();
     let script_path = tempdir.join("hello.cmd");
 
     crate::fs::write(&script_path, "@echo Hello, %~1!").unwrap();
@@ -696,7 +572,7 @@ fn run_bat_script() {
 #[test]
 #[cfg(windows)]
 fn run_canonical_bat_script() {
-    let tempdir = crate::sys_common::io::test::tmpdir();
+    let tempdir = crate::test_helpers::tmpdir();
     let script_path = tempdir.join("hello.cmd");
 
     crate::fs::write(&script_path, "@echo Hello, %~1!").unwrap();

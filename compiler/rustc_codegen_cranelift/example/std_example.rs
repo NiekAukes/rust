@@ -3,7 +3,6 @@
     coroutines,
     stmt_expr_attributes,
     coroutine_trait,
-    is_sorted,
     repr_simd,
     tuple_trait,
     unboxed_closures
@@ -167,9 +166,10 @@ fn main() {
         enum Never {}
     }
 
-    foo(I64X2(0, 0));
+    #[cfg(not(target_arch = "s390x"))] // s390x doesn't have vector instructions enabled by default
+    foo(I64X2([0, 0]));
 
-    transmute_fat_pointer();
+    transmute_wide_pointer();
 
     rust_call_abi();
 
@@ -193,7 +193,7 @@ type TwoPtrs = i64;
 #[cfg(target_pointer_width = "64")]
 type TwoPtrs = i128;
 
-fn transmute_fat_pointer() -> TwoPtrs {
+fn transmute_wide_pointer() -> TwoPtrs {
     unsafe { transmute::<_, TwoPtrs>("true !") }
 }
 
@@ -204,11 +204,28 @@ fn rust_call_abi() {
     rust_call_abi_callee((1, 2));
 }
 
+#[cfg_attr(target_arch = "s390x", allow(dead_code))]
 #[repr(simd)]
-struct I64X2(i64, i64);
+struct I64X2([i64; 2]);
 
+#[cfg_attr(target_arch = "s390x", allow(dead_code))]
 #[allow(improper_ctypes_definitions)]
 extern "C" fn foo(_a: I64X2) {}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+#[cfg(not(jit))]
+unsafe fn test_crc32() {
+    assert!(is_x86_feature_detected!("sse4.2"));
+
+    let a = 42u32;
+    let b = 0xdeadbeefu64;
+
+    assert_eq!(_mm_crc32_u8(a, b as u8), 4135334616);
+    assert_eq!(_mm_crc32_u16(a, b as u16), 1200687288);
+    assert_eq!(_mm_crc32_u32(a, b as u32), 2543798776);
+    assert_eq!(_mm_crc32_u64(a as u64, b as u64), 241952147);
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
@@ -236,18 +253,28 @@ unsafe fn test_simd() {
     test_mm_add_epi8();
     test_mm_add_pd();
     test_mm_cvtepi8_epi16();
+    #[cfg(not(jit))]
+    test_mm_cvtps_epi32();
+    test_mm_cvttps_epi32();
     test_mm_cvtsi128_si64();
 
     test_mm_extract_epi8();
     test_mm_insert_epi16();
     test_mm_shuffle_epi8();
 
+    #[cfg(not(jit))]
+    test_mm_cmpestri();
+
     test_mm256_shuffle_epi8();
     test_mm256_permute2x128_si256();
+    test_mm256_permutevar8x32_epi32();
 
     #[rustfmt::skip]
     let mask1 = _mm_movemask_epi8(dbg!(_mm_setr_epi8(255u8 as i8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)));
     assert_eq!(mask1, 1);
+
+    #[cfg(not(jit))]
+    test_crc32();
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -409,6 +436,31 @@ unsafe fn test_mm_shuffle_epi8() {
     assert_eq_m128i(r, expected);
 }
 
+// Currently one cannot `load` a &[u8] that is less than 16
+// in length. This makes loading strings less than 16 in length
+// a bit difficult. Rather than `load` and mutate the __m128i,
+// it is easier to memcpy the given string to a local slice with
+// length 16 and `load` the local slice.
+#[cfg(not(jit))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn str_to_m128i(s: &[u8]) -> __m128i {
+    assert!(s.len() <= 16);
+    let slice = &mut [0u8; 16];
+    std::ptr::copy_nonoverlapping(s.as_ptr(), slice.as_mut_ptr(), s.len());
+    _mm_loadu_si128(slice.as_ptr() as *const _)
+}
+
+#[cfg(not(jit))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn test_mm_cmpestri() {
+    let a = str_to_m128i(b"bar - garbage");
+    let b = str_to_m128i(b"foobar");
+    let i = _mm_cmpestri::<_SIDD_CMP_EQUAL_ORDERED>(a, 3, b, 6);
+    assert_eq!(3, i);
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn test_mm256_shuffle_epi8() {
@@ -445,6 +497,51 @@ unsafe fn test_mm256_permute2x128_si256() {
     let r = _mm256_permute2x128_si256::<0b00_01_00_11>(a, b);
     let e = _mm256_setr_epi64x(700, 800, 500, 600);
     assert_eq_m256i(r, e);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn test_mm256_permutevar8x32_epi32() {
+    let a = _mm256_setr_epi32(100, 200, 300, 400, 500, 600, 700, 800);
+    let idx = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+    let r = _mm256_setr_epi32(800, 700, 600, 500, 400, 300, 200, 100);
+    let e = _mm256_permutevar8x32_epi32(a, idx);
+    assert_eq_m256i(r, e);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[cfg(not(jit))]
+unsafe fn test_mm_cvtps_epi32() {
+    let floats: [f32; 4] = [1.5, -2.5, i32::MAX as f32 + 1.0, f32::NAN];
+
+    let float_vec = _mm_loadu_ps(floats.as_ptr());
+    let int_vec = _mm_cvtps_epi32(float_vec);
+
+    let mut ints: [i32; 4] = [0; 4];
+    _mm_storeu_si128(ints.as_mut_ptr() as *mut __m128i, int_vec);
+
+    // this is very different from `floats.map(|f| f as i32)`!
+    let expected_ints: [i32; 4] = [2, -2, i32::MIN, i32::MIN];
+
+    assert_eq!(ints, expected_ints);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn test_mm_cvttps_epi32() {
+    let floats: [f32; 4] = [1.5, -2.5, i32::MAX as f32 + 1.0, f32::NAN];
+
+    let float_vec = _mm_loadu_ps(floats.as_ptr());
+    let int_vec = _mm_cvttps_epi32(float_vec);
+
+    let mut ints: [i32; 4] = [0; 4];
+    _mm_storeu_si128(ints.as_mut_ptr() as *mut __m128i, int_vec);
+
+    // this is very different from `floats.map(|f| f as i32)`!
+    let expected_ints: [i32; 4] = [1, -2, i32::MIN, i32::MIN];
+
+    assert_eq!(ints, expected_ints);
 }
 
 fn test_checked_mul() {

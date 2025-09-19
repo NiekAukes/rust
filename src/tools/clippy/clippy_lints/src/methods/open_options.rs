@@ -1,19 +1,19 @@
 use rustc_data_structures::fx::FxHashMap;
 
 use clippy_utils::diagnostics::{span_lint, span_lint_and_then};
-use clippy_utils::ty::{is_type_diagnostic_item, match_type};
-use clippy_utils::{match_any_def_paths, paths};
+use clippy_utils::ty::is_type_diagnostic_item;
+use clippy_utils::{paths, sym};
 use rustc_ast::ast::LitKind;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::LateContext;
 use rustc_middle::ty::Ty;
+use rustc_span::Span;
 use rustc_span::source_map::Spanned;
-use rustc_span::{sym, Span};
 
 use super::{NONSENSICAL_OPEN_OPTIONS, SUSPICIOUS_OPEN_OPTIONS};
 
 fn is_open_options(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
-    is_type_diagnostic_item(cx, ty, sym::FsOpenOptions) || match_type(cx, ty, &paths::TOKIO_IO_OPEN_OPTIONS)
+    is_type_diagnostic_item(cx, ty, sym::FsOpenOptions) || paths::TOKIO_IO_OPEN_OPTIONS.matches_ty(cx, ty)
 }
 
 pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>, recv: &'tcx Expr<'_>) {
@@ -87,23 +87,23 @@ fn get_open_options(
                 _ => Argument::Unknown,
             };
 
-            match path.ident.as_str() {
-                "create" => {
+            match path.ident.name {
+                sym::create => {
                     options.push((OpenOption::Create, argument_option, span));
                 },
-                "create_new" => {
+                sym::create_new => {
                     options.push((OpenOption::CreateNew, argument_option, span));
                 },
-                "append" => {
+                sym::append => {
                     options.push((OpenOption::Append, argument_option, span));
                 },
-                "truncate" => {
+                sym::truncate => {
                     options.push((OpenOption::Truncate, argument_option, span));
                 },
-                "read" => {
+                sym::read => {
                     options.push((OpenOption::Read, argument_option, span));
                 },
-                "write" => {
+                sym::write => {
                     options.push((OpenOption::Write, argument_option, span));
                 },
                 _ => {
@@ -126,17 +126,14 @@ fn get_open_options(
         && let ExprKind::Path(path) = callee.kind
         && let Some(did) = cx.qpath_res(&path, callee.hir_id).opt_def_id()
     {
-        match_any_def_paths(
-            cx,
-            did,
-            &[
-                &paths::TOKIO_IO_OPEN_OPTIONS_NEW,
-                &paths::OPEN_OPTIONS_NEW,
-                &paths::FILE_OPTIONS,
-                &paths::TOKIO_FILE_OPTIONS,
-            ],
-        )
-        .is_some()
+        let is_std_options = matches!(
+            cx.tcx.get_diagnostic_name(did),
+            Some(sym::file_options | sym::open_options_new)
+        );
+
+        is_std_options
+            || paths::TOKIO_IO_OPEN_OPTIONS_NEW.matches(cx, did)
+            || paths::TOKIO_FILE_OPTIONS.matches(cx, did)
     } else {
         false
     }
@@ -151,7 +148,7 @@ fn check_open_options(cx: &LateContext<'_>, settings: &[(OpenOption, Argument, S
                 cx,
                 NONSENSICAL_OPEN_OPTIONS,
                 prev_span,
-                format!("the method `{}` is called more than once", &option),
+                format!("the method `{option}` is called more than once"),
             );
         }
     }

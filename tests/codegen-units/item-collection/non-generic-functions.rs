@@ -1,7 +1,7 @@
-//@ compile-flags:-Zprint-mono-items=eager
+//@ compile-flags:-Clink-dead-code
 
 #![deny(dead_code)]
-#![feature(start)]
+#![crate_type = "lib"]
 
 //~ MONO_ITEM fn foo
 fn foo() {
@@ -25,7 +25,9 @@ fn bar() {
     baz();
 }
 
-struct Struct { _x: i32 }
+struct Struct {
+    _x: i32,
+}
 
 impl Struct {
     //~ MONO_ITEM fn Struct::foo
@@ -60,8 +62,8 @@ impl Struct {
 }
 
 //~ MONO_ITEM fn start
-#[start]
-fn start(_: isize, _: *const *const u8) -> isize {
+#[no_mangle]
+pub fn start(_: isize, _: *const *const u8) -> isize {
     foo();
     bar();
     Struct::foo();

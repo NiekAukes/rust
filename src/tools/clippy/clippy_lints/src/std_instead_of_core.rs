@@ -1,22 +1,22 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::is_from_proc_macro;
+use clippy_utils::msrvs::Msrv;
+use rustc_attr_data_structures::{StabilityLevel, StableSince};
 use rustc_errors::Applicability;
 use rustc_hir::def::Res;
 use rustc_hir::def_id::DefId;
-use rustc_hir::{HirId, Path, PathSegment};
-use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
+use rustc_hir::{Block, Body, HirId, Path, PathSegment};
+use rustc_lint::{LateContext, LateLintPass, Lint, LintContext};
 use rustc_session::impl_lint_pass;
 use rustc_span::symbol::kw;
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 
 declare_clippy_lint! {
     /// ### What it does
-    ///
     /// Finds items imported through `std` when available through `core`.
     ///
-    /// ### Why is this bad?
-    ///
+    /// ### Why restrict this?
     /// Crates which have `no_std` compatibility may wish to ensure types are imported from core to ensure
     /// disabling `std` does not cause the crate to fail to compile. This lint is also useful for crates
     /// migrating to become `no_std` compatible.
@@ -37,11 +37,9 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    ///
     /// Finds items imported through `std` when available through `alloc`.
     ///
-    /// ### Why is this bad?
-    ///
+    /// ### Why restrict this?
     /// Crates which have `no_std` compatibility and require alloc may wish to ensure types are imported from
     /// alloc to ensure disabling `std` does not cause the crate to fail to compile. This lint is also useful
     /// for crates migrating to become `no_std` compatible.
@@ -63,14 +61,16 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    ///
     /// Finds items imported through `alloc` when available through `core`.
     ///
-    /// ### Why is this bad?
-    ///
+    /// ### Why restrict this?
     /// Crates which have `no_std` compatibility and may optionally require alloc may wish to ensure types are
     /// imported from core to ensure disabling `alloc` does not cause the crate to fail to compile. This lint
     /// is also useful for crates migrating to become `no_std` compatible.
+    ///
+    /// ### Known problems
+    /// The lint is only partially aware of the required MSRV for items that were originally in `std` but moved
+    /// to `core`.
     ///
     /// ### Example
     /// ```no_run
@@ -87,21 +87,42 @@ declare_clippy_lint! {
     "type is imported from alloc when available in core"
 }
 
-#[derive(Default)]
 pub struct StdReexports {
-    // Paths which can be either a module or a macro (e.g. `std::env`) will cause this check to happen
-    // twice. First for the mod, second for the macro. This is used to avoid the lint reporting for the macro
-    // when the path could be also be used to access the module.
-    prev_span: Span,
+    lint_point: (Span, Option<LintPoint>),
+    msrv: Msrv,
 }
+
+impl StdReexports {
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            lint_point: Default::default(),
+            msrv: conf.msrv,
+        }
+    }
+
+    fn lint_if_finish(&mut self, cx: &LateContext<'_>, (span, item): (Span, Option<LintPoint>)) {
+        if span.source_equal(self.lint_point.0) {
+            return;
+        }
+
+        if !self.lint_point.0.is_dummy() {
+            emit_lints(cx, &self.lint_point);
+        }
+
+        self.lint_point = (span, item);
+    }
+}
+
 impl_lint_pass!(StdReexports => [STD_INSTEAD_OF_CORE, STD_INSTEAD_OF_ALLOC, ALLOC_INSTEAD_OF_CORE]);
+
+type LintPoint = (&'static Lint, &'static str, &'static str);
 
 impl<'tcx> LateLintPass<'tcx> for StdReexports {
     fn check_path(&mut self, cx: &LateContext<'tcx>, path: &Path<'tcx>, _: HirId) {
         if let Res::Def(_, def_id) = path.res
             && let Some(first_segment) = get_first_segment(path)
-            && is_stable(cx, def_id)
-            && !in_external_macro(cx.sess(), path.span)
+            && is_stable(cx, def_id, self.msrv)
+            && !path.span.in_external_macro(cx.sess().source_map())
             && !is_from_proc_macro(cx, &first_segment.ident)
         {
             let (lint, used_mod, replace_with) = match first_segment.ident.name {
@@ -109,7 +130,7 @@ impl<'tcx> LateLintPass<'tcx> for StdReexports {
                     sym::core => (STD_INSTEAD_OF_CORE, "std", "core"),
                     sym::alloc => (STD_INSTEAD_OF_ALLOC, "std", "alloc"),
                     _ => {
-                        self.prev_span = first_segment.ident.span;
+                        self.lint_if_finish(cx, (first_segment.ident.span, None));
                         return;
                     },
                 },
@@ -117,26 +138,44 @@ impl<'tcx> LateLintPass<'tcx> for StdReexports {
                     if cx.tcx.crate_name(def_id.krate) == sym::core {
                         (ALLOC_INSTEAD_OF_CORE, "alloc", "core")
                     } else {
-                        self.prev_span = first_segment.ident.span;
+                        self.lint_if_finish(cx, (first_segment.ident.span, None));
                         return;
                     }
                 },
                 _ => return,
             };
-            if first_segment.ident.span != self.prev_span {
-                span_lint_and_sugg(
-                    cx,
-                    lint,
-                    first_segment.ident.span,
-                    format!("used import from `{used_mod}` instead of `{replace_with}`"),
-                    format!("consider importing the item from `{replace_with}`"),
-                    replace_with.to_string(),
-                    Applicability::MachineApplicable,
-                );
-                self.prev_span = first_segment.ident.span;
-            }
+
+            self.lint_if_finish(cx, (first_segment.ident.span, Some((lint, used_mod, replace_with))));
         }
     }
+
+    fn check_block_post(&mut self, cx: &LateContext<'tcx>, _: &Block<'tcx>) {
+        self.lint_if_finish(cx, Default::default());
+    }
+
+    fn check_body_post(&mut self, cx: &LateContext<'tcx>, _: &Body<'tcx>) {
+        self.lint_if_finish(cx, Default::default());
+    }
+
+    fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
+        self.lint_if_finish(cx, Default::default());
+    }
+}
+
+fn emit_lints(cx: &LateContext<'_>, (span, item): &(Span, Option<LintPoint>)) {
+    let Some((lint, used_mod, replace_with)) = item else {
+        return;
+    };
+
+    span_lint_and_sugg(
+        cx,
+        lint,
+        *span,
+        format!("used import from `{used_mod}` instead of `{replace_with}`"),
+        format!("consider importing the item from `{replace_with}`"),
+        (*replace_with).to_string(),
+        Applicability::MachineApplicable,
+    );
 }
 
 /// Returns the first named segment of a [`Path`].
@@ -152,16 +191,27 @@ fn get_first_segment<'tcx>(path: &Path<'tcx>) -> Option<&'tcx PathSegment<'tcx>>
     }
 }
 
-/// Checks if all ancestors of `def_id` are stable, to avoid linting
-/// [unstable moves](https://github.com/rust-lang/rust/pull/95956)
-fn is_stable(cx: &LateContext<'_>, mut def_id: DefId) -> bool {
+/// Checks if all ancestors of `def_id` meet `msrv` to avoid linting [unstable moves](https://github.com/rust-lang/rust/pull/95956)
+/// or now stable moves that were once unstable.
+///
+/// Does not catch individually moved items
+fn is_stable(cx: &LateContext<'_>, mut def_id: DefId, msrv: Msrv) -> bool {
     loop {
-        if cx
-            .tcx
-            .lookup_stability(def_id)
-            .map_or(false, |stability| stability.is_unstable())
+        if let Some(stability) = cx.tcx.lookup_stability(def_id)
+            && let StabilityLevel::Stable {
+                since,
+                allowed_through_unstable_modules: None,
+            } = stability.level
         {
-            return false;
+            let stable = match since {
+                StableSince::Version(v) => msrv.meets(cx, v),
+                StableSince::Current => msrv.current(cx).is_none(),
+                StableSince::Err => false,
+            };
+
+            if !stable {
+                return false;
+            }
         }
 
         match cx.tcx.opt_parent(def_id) {

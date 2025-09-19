@@ -3,7 +3,6 @@
 // Test that we normalize associated types that appear in bounds; if
 // we didn't, the call to `self.split2()` fails to type check.
 
-//@ pretty-expanded FIXME #23616
 
 use std::marker::PhantomData;
 
@@ -22,11 +21,11 @@ trait SliceExt2 {
 impl<T> SliceExt2 for [T] {
     type Item = T;
 
-    fn split2<P>(&self, pred: P) -> Splits<T, P> where P: FnMut(&T) -> bool {
+    fn split2<P>(&self, pred: P) -> Splits<'_, T, P> where P: FnMut(&T) -> bool {
         loop {}
     }
 
-    fn splitn2<P>(&self, n: u32, pred: P) -> SplitsN<Splits<T, P>> where P: FnMut(&T) -> bool {
+    fn splitn2<P>(&self, n: u32, pred: P) -> SplitsN<Splits<'_, T, P>> where P: FnMut(&T) -> bool {
         SliceExt2::split2(self, pred);
         loop {}
     }

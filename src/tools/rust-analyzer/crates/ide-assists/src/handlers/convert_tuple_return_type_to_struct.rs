@@ -1,18 +1,19 @@
 use either::Either;
 use hir::ModuleDef;
 use ide_db::{
-    assists::{AssistId, AssistKind},
+    FxHashSet,
+    assists::AssistId,
     defs::Definition,
     helpers::mod_path_to_ast,
-    imports::insert_use::{insert_use, ImportScope},
+    imports::insert_use::{ImportScope, insert_use},
     search::{FileReference, UsageSearchResult},
     source_change::SourceChangeBuilder,
     syntax_helpers::node_ext::{for_each_tail_expr, walk_expr},
-    FxHashSet,
 };
 use syntax::{
-    ast::{self, edit::IndentLevel, edit_in_place::Indent, make, HasName},
-    match_ast, ted, AstNode, SyntaxNode,
+    AstNode, SyntaxNode,
+    ast::{self, HasName, edit::IndentLevel, edit_in_place::Indent, make},
+    match_ast, ted,
 };
 
 use crate::assist_context::{AssistContext, Assists};
@@ -62,7 +63,7 @@ pub(crate) fn convert_tuple_return_type_to_struct(
 
     let target = type_ref.syntax().text_range();
     acc.add(
-        AssistId("convert_tuple_return_type_to_struct", AssistKind::RefactorRewrite),
+        AssistId::refactor_rewrite("convert_tuple_return_type_to_struct"),
         "Convert tuple return type to tuple struct",
         target,
         move |edit| {
@@ -105,7 +106,7 @@ fn replace_usages(
     target_module: &hir::Module,
 ) {
     for (file_id, references) in usages.iter() {
-        edit.edit_file(*file_id);
+        edit.edit_file(file_id.file_id(ctx.db()));
 
         let refs_with_imports =
             augment_references_with_imports(edit, ctx, references, struct_name, target_module);
@@ -183,6 +184,8 @@ fn augment_references_with_imports(
 ) -> Vec<(ast::NameLike, Option<(ImportScope, ast::Path)>)> {
     let mut visited_modules = FxHashSet::default();
 
+    let cfg = ctx.config.import_path_config();
+
     references
         .iter()
         .filter_map(|FileReference { name, .. }| {
@@ -201,16 +204,15 @@ fn augment_references_with_imports(
                 let import_scope =
                     ImportScope::find_insert_use_container(new_name.syntax(), &ctx.sema);
                 let path = ref_module
-                    .find_use_path_prefixed(
+                    .find_use_path(
                         ctx.sema.db,
                         ModuleDef::Module(*target_module),
                         ctx.config.insert_use.prefix_kind,
-                        ctx.config.prefer_no_std,
-                        ctx.config.prefer_prelude,
+                        cfg,
                     )
                     .map(|mod_path| {
                         make::path_concat(
-                            mod_path_to_ast(&mod_path),
+                            mod_path_to_ast(&mod_path, target_module.krate().edition(ctx.db())),
                             make::path_from_text(struct_name),
                         )
                     });
@@ -811,7 +813,7 @@ pub mod bar {
 "#,
             r#"
 //- /main.rs
-use crate::foo::bar::BarResult;
+use foo::bar::BarResult;
 
 mod foo;
 

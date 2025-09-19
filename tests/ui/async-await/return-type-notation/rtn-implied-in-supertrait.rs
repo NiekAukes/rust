@@ -2,7 +2,6 @@
 //@ check-pass
 
 #![feature(return_type_notation)]
-//~^ WARN the feature `return_type_notation` is incomplete
 
 use std::future::Future;
 
@@ -16,7 +15,7 @@ trait Foo {
     async fn bar(&self) -> i32;
 }
 
-trait SendFoo: Foo<bar(): Send> + Send {}
+trait SendFoo: Foo<bar(..): Send> + Send {}
 
 fn foobar(foo: impl SendFoo) -> JoinHandle<i32> {
     spawn(async move {

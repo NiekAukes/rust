@@ -1,16 +1,11 @@
-use crate::spec::crt_objects;
-use crate::spec::{base, LinkSelfContainedDefault, TargetOptions};
+use crate::spec::{LinkSelfContainedDefault, TargetOptions, base, crt_objects};
 
-pub fn opts() -> TargetOptions {
-    let mut base = base::linux::opts();
-
-    base.env = "musl".into();
-    base.pre_link_objects_self_contained = crt_objects::pre_musl_self_contained();
-    base.post_link_objects_self_contained = crt_objects::post_musl_self_contained();
-    base.link_self_contained = LinkSelfContainedDefault::InferredForMusl;
-
-    // These targets statically link libc by default
-    base.crt_static_default = true;
-
-    base
+pub(crate) fn opts() -> TargetOptions {
+    TargetOptions {
+        env: "musl".into(),
+        pre_link_objects_self_contained: crt_objects::pre_musl_self_contained(),
+        post_link_objects_self_contained: crt_objects::post_musl_self_contained(),
+        link_self_contained: LinkSelfContainedDefault::InferredForMusl,
+        ..base::linux::opts()
+    }
 }

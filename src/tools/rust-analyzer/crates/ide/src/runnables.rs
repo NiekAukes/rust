@@ -1,27 +1,32 @@
-use std::fmt;
+use std::{fmt, sync::OnceLock};
 
+use arrayvec::ArrayVec;
 use ast::HasName;
 use cfg::{CfgAtom, CfgExpr};
 use hir::{
-    db::HirDatabase, AsAssocItem, AttrsWithOwner, HasAttrs, HasSource, HirFileIdExt, Semantics,
+    AsAssocItem, AttrsWithOwner, HasAttrs, HasCrate, HasSource, ModPath, Name, PathKind, Semantics,
+    Symbol, db::HirDatabase, sym,
 };
 use ide_assists::utils::{has_test_related_attribute, test_related_attribute_syn};
 use ide_db::{
-    base_db::{FilePosition, FileRange},
+    FilePosition, FxHashMap, FxIndexMap, FxIndexSet, RootDatabase, SymbolKind,
+    base_db::RootQueryDb,
     defs::Definition,
     documentation::docs_from_attrs,
     helpers::visit_file_defs,
     search::{FileReferenceNode, SearchScope},
-    FxHashMap, FxHashSet, RootDatabase, SymbolKind,
 };
 use itertools::Itertools;
-use stdx::{always, format_to};
+use smallvec::SmallVec;
+use span::{Edition, TextSize};
+use stdx::format_to;
 use syntax::{
+    SmolStr, SyntaxNode, ToSmolStr,
     ast::{self, AstNode},
-    SmolStr, SyntaxNode,
+    format_smolstr,
 };
 
-use crate::{references, FileId, NavigationTarget, ToNav, TryToNav};
+use crate::{FileId, NavigationTarget, ToNav, TryToNav, references};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Runnable {
@@ -29,6 +34,7 @@ pub struct Runnable {
     pub nav: NavigationTarget,
     pub kind: RunnableKind,
     pub cfg: Option<CfgExpr>,
+    pub update_test: UpdateTest,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -48,33 +54,43 @@ impl fmt::Display for TestId {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum RunnableKind {
-    Test { test_id: TestId, attr: TestAttr },
     TestMod { path: String },
+    Test { test_id: TestId, attr: TestAttr },
     Bench { test_id: TestId },
     DocTest { test_id: TestId },
     Bin,
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-enum RunnableTestKind {
-    Test,
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+enum RunnableDiscKind {
     TestMod,
+    Test,
     DocTest,
     Bench,
     Bin,
 }
 
+impl RunnableKind {
+    fn disc(&self) -> RunnableDiscKind {
+        match self {
+            RunnableKind::TestMod { .. } => RunnableDiscKind::TestMod,
+            RunnableKind::Test { .. } => RunnableDiscKind::Test,
+            RunnableKind::DocTest { .. } => RunnableDiscKind::DocTest,
+            RunnableKind::Bench { .. } => RunnableDiscKind::Bench,
+            RunnableKind::Bin => RunnableDiscKind::Bin,
+        }
+    }
+}
+
 impl Runnable {
-    // test package::module::testname
-    pub fn label(&self, target: Option<String>) -> String {
+    pub fn label(&self, target: Option<&str>) -> String {
         match &self.kind {
             RunnableKind::Test { test_id, .. } => format!("test {test_id}"),
             RunnableKind::TestMod { path } => format!("test-mod {path}"),
             RunnableKind::Bench { test_id } => format!("bench {test_id}"),
             RunnableKind::DocTest { test_id, .. } => format!("doctest {test_id}"),
             RunnableKind::Bin => {
-                target.map_or_else(|| "run binary".to_owned(), |t| format!("run {t}"))
+                format!("run {}", target.unwrap_or("binary"))
             }
         }
     }
@@ -97,17 +113,6 @@ impl Runnable {
         s.push_str(suffix);
         s
     }
-
-    #[cfg(test)]
-    fn test_kind(&self) -> RunnableTestKind {
-        match &self.kind {
-            RunnableKind::TestMod { .. } => RunnableTestKind::TestMod,
-            RunnableKind::Test { .. } => RunnableTestKind::Test,
-            RunnableKind::DocTest { .. } => RunnableTestKind::DocTest,
-            RunnableKind::Bench { .. } => RunnableTestKind::Bench,
-            RunnableKind::Bin => RunnableTestKind::Bin,
-        }
-    }
 }
 
 // Feature: Run
@@ -116,28 +121,20 @@ impl Runnable {
 // location**. Super useful for repeatedly running just a single test. Do bind this
 // to a shortcut!
 //
-// |===
-// | Editor  | Action Name
+// | Editor  | Action Name |
+// |---------|-------------|
+// | VS Code | **rust-analyzer: Run** |
 //
-// | VS Code | **rust-analyzer: Run**
-// |===
-// image::https://user-images.githubusercontent.com/48062697/113065583-055aae80-91b1-11eb-958f-d67efcaf6a2f.gif[]
+// ![Run](https://user-images.githubusercontent.com/48062697/113065583-055aae80-91b1-11eb-958f-d67efcaf6a2f.gif)
 pub(crate) fn runnables(db: &RootDatabase, file_id: FileId) -> Vec<Runnable> {
     let sema = Semantics::new(db);
 
     let mut res = Vec::new();
     // Record all runnables that come from macro expansions here instead.
     // In case an expansion creates multiple runnables we want to name them to avoid emitting a bunch of equally named runnables.
-    let mut in_macro_expansion = FxHashMap::<hir::HirFileId, Vec<Runnable>>::default();
+    let mut in_macro_expansion = FxIndexMap::<hir::HirFileId, Vec<Runnable>>::default();
     let mut add_opt = |runnable: Option<Runnable>, def| {
-        if let Some(runnable) = runnable.filter(|runnable| {
-            always!(
-                runnable.nav.file_id == file_id,
-                "tried adding a runnable pointing to a different file: {:?} for {:?}",
-                runnable.kind,
-                file_id
-            )
-        }) {
+        if let Some(runnable) = runnable.filter(|runnable| runnable.nav.file_id == file_id) {
             if let Some(def) = def {
                 let file_id = match def {
                     Definition::Module(it) => {
@@ -161,13 +158,7 @@ pub(crate) fn runnables(db: &RootDatabase, file_id: FileId) -> Vec<Runnable> {
             Definition::SelfType(impl_) => runnable_impl(&sema, &impl_),
             _ => None,
         };
-        add_opt(
-            runnable
-                .or_else(|| module_def_doctest(sema.db, def))
-                // #[macro_export] mbe macros are declared in the root, while their definition may reside in a different module
-                .filter(|it| it.nav.file_id == file_id),
-            Some(def),
-        );
+        add_opt(runnable.or_else(|| module_def_doctest(sema.db, def)), Some(def));
         if let Definition::SelfType(impl_) = def {
             impl_.items(db).into_iter().for_each(|assoc| {
                 let runnable = match assoc {
@@ -193,6 +184,7 @@ pub(crate) fn runnables(db: &RootDatabase, file_id: FileId) -> Vec<Runnable> {
             r
         })
     }));
+    res.sort_by(cmp_runnables);
     res
 }
 
@@ -203,23 +195,39 @@ pub(crate) fn runnables(db: &RootDatabase, file_id: FileId) -> Vec<Runnable> {
 // The simplest way to use this feature is via the context menu. Right-click on
 // the selected item. The context menu opens. Select **Peek Related Tests**.
 //
-// |===
-// | Editor  | Action Name
-//
-// | VS Code | **rust-analyzer: Peek Related Tests**
-// |===
+// | Editor  | Action Name |
+// |---------|-------------|
+// | VS Code | **rust-analyzer: Peek Related Tests** |
 pub(crate) fn related_tests(
     db: &RootDatabase,
     position: FilePosition,
     search_scope: Option<SearchScope>,
 ) -> Vec<Runnable> {
     let sema = Semantics::new(db);
-    let mut res: FxHashSet<Runnable> = FxHashSet::default();
-    let syntax = sema.parse(position.file_id).syntax().clone();
+    let mut res: FxIndexSet<Runnable> = FxIndexSet::default();
+    let syntax = sema.parse_guess_edition(position.file_id).syntax().clone();
 
     find_related_tests(&sema, &syntax, position, search_scope, &mut res);
 
-    res.into_iter().collect()
+    res.into_iter().sorted_by(cmp_runnables).collect()
+}
+
+fn cmp_runnables(
+    Runnable { nav, kind, .. }: &Runnable,
+    Runnable { nav: nav_b, kind: kind_b, .. }: &Runnable,
+) -> std::cmp::Ordering {
+    // full_range.start < focus_range.start < name, should give us a decent unique ordering
+    nav.full_range
+        .start()
+        .cmp(&nav_b.full_range.start())
+        .then_with(|| {
+            let t_0 = || TextSize::from(0);
+            nav.focus_range
+                .map_or_else(t_0, |it| it.start())
+                .cmp(&nav_b.focus_range.map_or_else(t_0, |it| it.start()))
+        })
+        .then_with(|| kind.disc().cmp(&kind_b.disc()))
+        .then_with(|| nav.name.cmp(&nav_b.name))
 }
 
 fn find_related_tests(
@@ -227,7 +235,7 @@ fn find_related_tests(
     syntax: &SyntaxNode,
     position: FilePosition,
     search_scope: Option<SearchScope>,
-    tests: &mut FxHashSet<Runnable>,
+    tests: &mut FxIndexSet<Runnable>,
 ) {
     // FIXME: why is this using references::find_defs, this should use ide_db::search
     let defs = match references::find_defs(sema, syntax, position.offset) {
@@ -267,7 +275,7 @@ fn find_related_tests_in_module(
     syntax: &SyntaxNode,
     fn_def: &ast::Fn,
     parent_module: &hir::Module,
-    tests: &mut FxHashSet<Runnable>,
+    tests: &mut FxIndexSet<Runnable>,
 ) {
     let fn_name = match fn_def.name() {
         Some(it) => it,
@@ -276,8 +284,11 @@ fn find_related_tests_in_module(
     let mod_source = parent_module.definition_source_range(sema.db);
 
     let file_id = mod_source.file_id.original_file(sema.db);
-    let mod_scope = SearchScope::file_range(FileRange { file_id, range: mod_source.value });
-    let fn_pos = FilePosition { file_id, offset: fn_name.syntax().text_range().start() };
+    let mod_scope = SearchScope::file_range(hir::FileRange { file_id, range: mod_source.value });
+    let fn_pos = FilePosition {
+        file_id: file_id.file_id(sema.db),
+        offset: fn_name.syntax().text_range().start(),
+    };
     find_related_tests(sema, syntax, fn_pos, Some(mod_scope), tests)
 }
 
@@ -307,6 +318,7 @@ pub(crate) fn runnable_fn(
     sema: &Semantics<'_, RootDatabase>,
     def: hir::Function,
 ) -> Option<Runnable> {
+    let edition = def.krate(sema.db).edition(sema.db);
     let under_cfg_test = has_cfg_test(def.module(sema.db).attrs(sema.db));
     let kind = if !under_cfg_test && def.is_main(sema.db) {
         RunnableKind::Bin
@@ -314,11 +326,11 @@ pub(crate) fn runnable_fn(
         let test_id = || {
             let canonical_path = {
                 let def: hir::ModuleDef = def.into();
-                def.canonical_path(sema.db)
+                def.canonical_path(sema.db, edition)
             };
             canonical_path
                 .map(TestId::Path)
-                .unwrap_or(TestId::Name(def.name(sema.db).to_smol_str()))
+                .unwrap_or(TestId::Name(def.name(sema.db).display_no_db(edition).to_smolstr()))
         };
 
         if def.is_test(sema.db) {
@@ -331,14 +343,20 @@ pub(crate) fn runnable_fn(
         }
     };
 
+    let fn_source = sema.source(def)?;
     let nav = NavigationTarget::from_named(
         sema.db,
-        def.source(sema.db)?.as_ref().map(|it| it as &dyn ast::HasName),
+        fn_source.as_ref().map(|it| it as &dyn ast::HasName),
         SymbolKind::Function,
     )
     .call_site();
+
+    let file_range = fn_source.syntax().original_file_range_with_macro_call_body(sema.db);
+    let update_test =
+        UpdateTest::find_snapshot_macro(sema, &fn_source.file_syntax(sema.db), file_range);
+
     let cfg = def.attrs(sema.db).cfg();
-    Some(Runnable { use_name_in_title: false, nav, kind, cfg })
+    Some(Runnable { use_name_in_title: false, nav, kind, cfg, update_test })
 }
 
 pub(crate) fn runnable_mod(
@@ -353,20 +371,40 @@ pub(crate) fn runnable_mod(
         .path_to_root(sema.db)
         .into_iter()
         .rev()
-        .filter_map(|it| it.name(sema.db))
-        .map(|it| it.display(sema.db).to_string())
+        .filter_map(|module| {
+            module.name(sema.db).map(|mod_name| {
+                mod_name.display(sema.db, module.krate().edition(sema.db)).to_string()
+            })
+        })
         .join("::");
 
     let attrs = def.attrs(sema.db);
     let cfg = attrs.cfg();
     let nav = NavigationTarget::from_module_to_decl(sema.db, def).call_site();
-    Some(Runnable { use_name_in_title: false, nav, kind: RunnableKind::TestMod { path }, cfg })
+
+    let module_source = sema.module_definition_node(def);
+    let module_syntax = module_source.file_syntax(sema.db);
+    let file_range = hir::FileRange {
+        file_id: module_source.file_id.original_file(sema.db),
+        range: module_syntax.text_range(),
+    };
+    let update_test = UpdateTest::find_snapshot_macro(sema, &module_syntax, file_range);
+
+    Some(Runnable {
+        use_name_in_title: false,
+        nav,
+        kind: RunnableKind::TestMod { path },
+        cfg,
+        update_test,
+    })
 }
 
 pub(crate) fn runnable_impl(
     sema: &Semantics<'_, RootDatabase>,
     def: &hir::Impl,
 ) -> Option<Runnable> {
+    let display_target = def.module(sema.db).krate().to_display_target(sema.db);
+    let edition = display_target.edition;
     let attrs = def.attrs(sema.db);
     if !has_runnable_doc_test(&attrs) {
         return None;
@@ -375,21 +413,33 @@ pub(crate) fn runnable_impl(
     let nav = def.try_to_nav(sema.db)?.call_site();
     let ty = def.self_ty(sema.db);
     let adt_name = ty.as_adt()?.name(sema.db);
-    let mut ty_args = ty.generic_parameters(sema.db).peekable();
+    let mut ty_args = ty.generic_parameters(sema.db, display_target).peekable();
     let params = if ty_args.peek().is_some() {
         format!("<{}>", ty_args.format_with(",", |ty, cb| cb(&ty)))
     } else {
         String::new()
     };
-    let mut test_id = format!("{}{params}", adt_name.display(sema.db));
+    let mut test_id = format!("{}{params}", adt_name.display(sema.db, edition));
     test_id.retain(|c| c != ' ');
     let test_id = TestId::Path(test_id);
 
-    Some(Runnable { use_name_in_title: false, nav, kind: RunnableKind::DocTest { test_id }, cfg })
+    let impl_source = sema.source(*def)?;
+    let impl_syntax = impl_source.syntax();
+    let file_range = impl_syntax.original_file_range_with_macro_call_body(sema.db);
+    let update_test =
+        UpdateTest::find_snapshot_macro(sema, &impl_syntax.file_syntax(sema.db), file_range);
+
+    Some(Runnable {
+        use_name_in_title: false,
+        nav,
+        kind: RunnableKind::DocTest { test_id },
+        cfg,
+        update_test,
+    })
 }
 
 fn has_cfg_test(attrs: AttrsWithOwner) -> bool {
-    attrs.cfgs().any(|cfg| matches!(cfg, CfgExpr::Atom(CfgAtom::Flag(s)) if s == "test"))
+    attrs.cfgs().any(|cfg| matches!(&cfg, CfgExpr::Atom(CfgAtom::Flag(s)) if *s == sym::test))
 }
 
 /// Creates a test mod runnable for outline modules at the top of their definition.
@@ -397,6 +447,8 @@ fn runnable_mod_outline_definition(
     sema: &Semantics<'_, RootDatabase>,
     def: hir::Module,
 ) -> Option<Runnable> {
+    def.as_source_file_id(sema.db)?;
+
     if !has_test_function_or_multiple_test_submodules(sema, &def, has_cfg_test(def.attrs(sema.db)))
     {
         return None;
@@ -405,22 +457,31 @@ fn runnable_mod_outline_definition(
         .path_to_root(sema.db)
         .into_iter()
         .rev()
-        .filter_map(|it| it.name(sema.db))
-        .map(|it| it.display(sema.db).to_string())
+        .filter_map(|module| {
+            module.name(sema.db).map(|mod_name| {
+                mod_name.display(sema.db, module.krate().edition(sema.db)).to_string()
+            })
+        })
         .join("::");
 
     let attrs = def.attrs(sema.db);
     let cfg = attrs.cfg();
-    if def.as_source_file_id(sema.db).is_some() {
-        Some(Runnable {
-            use_name_in_title: false,
-            nav: def.to_nav(sema.db).call_site(),
-            kind: RunnableKind::TestMod { path },
-            cfg,
-        })
-    } else {
-        None
-    }
+
+    let mod_source = sema.module_definition_node(def);
+    let mod_syntax = mod_source.file_syntax(sema.db);
+    let file_range = hir::FileRange {
+        file_id: mod_source.file_id.original_file(sema.db),
+        range: mod_syntax.text_range(),
+    };
+    let update_test = UpdateTest::find_snapshot_macro(sema, &mod_syntax, file_range);
+
+    Some(Runnable {
+        use_name_in_title: false,
+        nav: def.to_nav(sema.db).call_site(),
+        kind: RunnableKind::TestMod { path },
+        cfg,
+        update_test,
+    })
 }
 
 fn module_def_doctest(db: &RootDatabase, def: Definition) -> Option<Runnable> {
@@ -438,6 +499,11 @@ fn module_def_doctest(db: &RootDatabase, def: Definition) -> Option<Runnable> {
         Definition::SelfType(it) => it.attrs(db),
         _ => return None,
     };
+    let krate = def.krate(db);
+    let edition = krate.map(|it| it.edition(db)).unwrap_or(Edition::CURRENT);
+    let display_target = krate
+        .unwrap_or_else(|| (*db.all_crates().last().expect("no crate graph present")).into())
+        .to_display_target(db);
     if !has_runnable_doc_test(&attrs) {
         return None;
     }
@@ -446,28 +512,29 @@ fn module_def_doctest(db: &RootDatabase, def: Definition) -> Option<Runnable> {
         let mut path = String::new();
         def.canonical_module_path(db)?
             .flat_map(|it| it.name(db))
-            .for_each(|name| format_to!(path, "{}::", name.display(db)));
+            .for_each(|name| format_to!(path, "{}::", name.display(db, edition)));
         // This probably belongs to canonical_path?
         if let Some(assoc_item) = def.as_assoc_item(db) {
             if let Some(ty) = assoc_item.implementing_ty(db) {
                 if let Some(adt) = ty.as_adt() {
                     let name = adt.name(db);
-                    let mut ty_args = ty.generic_parameters(db).peekable();
-                    format_to!(path, "{}", name.display(db));
+                    let mut ty_args = ty.generic_parameters(db, display_target).peekable();
+                    format_to!(path, "{}", name.display(db, edition));
                     if ty_args.peek().is_some() {
                         format_to!(path, "<{}>", ty_args.format_with(",", |ty, cb| cb(&ty)));
                     }
-                    format_to!(path, "::{}", def_name.display(db));
+                    format_to!(path, "::{}", def_name.display(db, edition));
                     path.retain(|c| c != ' ');
                     return Some(path);
                 }
             }
         }
-        format_to!(path, "{}", def_name.display(db));
+        format_to!(path, "{}", def_name.display(db, edition));
         Some(path)
     })();
 
-    let test_id = path.map_or_else(|| TestId::Name(def_name.to_smol_str()), TestId::Path);
+    let test_id = path
+        .map_or_else(|| TestId::Name(def_name.display_no_db(edition).to_smolstr()), TestId::Path);
 
     let mut nav = match def {
         Definition::Module(def) => NavigationTarget::from_module_to_decl(db, def),
@@ -483,6 +550,7 @@ fn module_def_doctest(db: &RootDatabase, def: Definition) -> Option<Runnable> {
         nav,
         kind: RunnableKind::DocTest { test_id },
         cfg: attrs.cfg(),
+        update_test: UpdateTest::default(),
     };
     Some(res)
 }
@@ -498,12 +566,12 @@ impl TestAttr {
     }
 }
 
-const RUSTDOC_FENCES: [&str; 2] = ["```", "~~~"];
-const RUSTDOC_CODE_BLOCK_ATTRIBUTES_RUNNABLE: &[&str] =
-    &["", "rust", "should_panic", "edition2015", "edition2018", "edition2021"];
-
 fn has_runnable_doc_test(attrs: &hir::Attrs) -> bool {
-    docs_from_attrs(attrs).map_or(false, |doc| {
+    const RUSTDOC_FENCES: [&str; 2] = ["```", "~~~"];
+    const RUSTDOC_CODE_BLOCK_ATTRIBUTES_RUNNABLE: &[&str] =
+        &["", "rust", "should_panic", "edition2015", "edition2018", "edition2021"];
+
+    docs_from_attrs(attrs).is_some_and(|doc| {
         let mut in_code_block = false;
 
         for line in doc.lines() {
@@ -563,21 +631,142 @@ fn has_test_function_or_multiple_test_submodules(
     number_of_test_submodules > 1
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UpdateTest {
+    pub expect_test: bool,
+    pub insta: bool,
+    pub snapbox: bool,
+}
+
+static SNAPSHOT_TEST_MACROS: OnceLock<FxHashMap<&str, Vec<ModPath>>> = OnceLock::new();
+
+impl UpdateTest {
+    const EXPECT_CRATE: &str = "expect_test";
+    const EXPECT_MACROS: &[&str] = &["expect", "expect_file"];
+
+    const INSTA_CRATE: &str = "insta";
+    const INSTA_MACROS: &[&str] = &[
+        "assert_snapshot",
+        "assert_debug_snapshot",
+        "assert_display_snapshot",
+        "assert_json_snapshot",
+        "assert_yaml_snapshot",
+        "assert_ron_snapshot",
+        "assert_toml_snapshot",
+        "assert_csv_snapshot",
+        "assert_compact_json_snapshot",
+        "assert_compact_debug_snapshot",
+        "assert_binary_snapshot",
+    ];
+
+    const SNAPBOX_CRATE: &str = "snapbox";
+    const SNAPBOX_MACROS: &[&str] = &["assert_data_eq", "file", "str"];
+
+    fn find_snapshot_macro(
+        sema: &Semantics<'_, RootDatabase>,
+        scope: &SyntaxNode,
+        file_range: hir::FileRange,
+    ) -> Self {
+        fn init<'a>(
+            krate_name: &'a str,
+            paths: &[&str],
+            map: &mut FxHashMap<&'a str, Vec<ModPath>>,
+        ) {
+            let mut res = Vec::with_capacity(paths.len());
+            let krate = Name::new_symbol_root(Symbol::intern(krate_name));
+            for path in paths {
+                let segments = [krate.clone(), Name::new_symbol_root(Symbol::intern(path))];
+                let mod_path = ModPath::from_segments(PathKind::Abs, segments);
+                res.push(mod_path);
+            }
+            map.insert(krate_name, res);
+        }
+
+        let mod_paths = SNAPSHOT_TEST_MACROS.get_or_init(|| {
+            let mut map = FxHashMap::default();
+            init(Self::EXPECT_CRATE, Self::EXPECT_MACROS, &mut map);
+            init(Self::INSTA_CRATE, Self::INSTA_MACROS, &mut map);
+            init(Self::SNAPBOX_CRATE, Self::SNAPBOX_MACROS, &mut map);
+            map
+        });
+
+        let search_scope = SearchScope::file_range(file_range);
+        let find_macro = |paths: &[ModPath]| {
+            for path in paths {
+                let Some(items) = sema.resolve_mod_path(scope, path) else {
+                    continue;
+                };
+                for item in items {
+                    if let hir::ItemInNs::Macros(makro) = item {
+                        if Definition::Macro(makro)
+                            .usages(sema)
+                            .in_scope(&search_scope)
+                            .at_least_one()
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        UpdateTest {
+            expect_test: find_macro(mod_paths.get(Self::EXPECT_CRATE).unwrap()),
+            insta: find_macro(mod_paths.get(Self::INSTA_CRATE).unwrap()),
+            snapbox: find_macro(mod_paths.get(Self::SNAPBOX_CRATE).unwrap()),
+        }
+    }
+
+    pub fn label(&self) -> Option<SmolStr> {
+        let mut builder: SmallVec<[_; 3]> = SmallVec::new();
+        if self.expect_test {
+            builder.push("Expect");
+        }
+        if self.insta {
+            builder.push("Insta");
+        }
+        if self.snapbox {
+            builder.push("Snapbox");
+        }
+
+        let res: SmolStr = builder.join(" + ").into();
+        if res.is_empty() {
+            None
+        } else {
+            Some(format_smolstr!("↺\u{fe0e} Update Tests ({res})"))
+        }
+    }
+
+    pub fn env(&self) -> ArrayVec<(&str, &str), 3> {
+        let mut env = ArrayVec::new();
+        if self.expect_test {
+            env.push(("UPDATE_EXPECT", "1"));
+        }
+        if self.insta {
+            env.push(("INSTA_UPDATE", "always"));
+        }
+        if self.snapbox {
+            env.push(("SNAPSHOTS", "overwrite"));
+        }
+        env
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use expect_test::{expect, Expect};
+    use expect_test::{Expect, expect};
 
     use crate::fixture;
 
-    fn check(ra_fixture: &str, expect: Expect) {
+    fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
         let (analysis, position) = fixture::position(ra_fixture);
-        let mut runnables = analysis.runnables(position.file_id).unwrap();
-        runnables.sort_by_key(|it| (it.nav.full_range.start(), it.nav.name.clone()));
-
-        let result = runnables
+        let result = analysis
+            .runnables(position.file_id)
+            .unwrap()
             .into_iter()
             .map(|runnable| {
-                let mut a = format!("({:?}, {:?}", runnable.test_kind(), runnable.nav);
+                let mut a = format!("({:?}, {:?}", runnable.kind.disc(), runnable.nav);
                 if runnable.use_name_in_title {
                     a.push_str(", true");
                 }
@@ -591,7 +780,7 @@ mod tests {
         expect.assert_debug_eq(&result);
     }
 
-    fn check_tests(ra_fixture: &str, expect: Expect) {
+    fn check_tests(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
         let (analysis, position) = fixture::position(ra_fixture);
         let tests = analysis.related_tests(position, None).unwrap();
         let navigation_targets = tests.into_iter().map(|runnable| runnable.nav).collect::<Vec<_>>();
@@ -608,6 +797,9 @@ fn main() {}
 
 #[export_name = "main"]
 fn __cortex_m_rt_main_trampoline() {}
+
+#[unsafe(export_name = "main")]
+fn __cortex_m_rt_main_trampoline_unsafe() {}
 
 #[test]
 fn test_foo() {}
@@ -628,13 +820,14 @@ mod not_a_root {
 "#,
             expect![[r#"
                 [
-                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 0..253, name: \"\", kind: Module })",
+                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 0..331, name: \"\", kind: Module })",
                     "(Bin, NavigationTarget { file_id: FileId(0), full_range: 1..13, focus_range: 4..8, name: \"main\", kind: Function })",
                     "(Bin, NavigationTarget { file_id: FileId(0), full_range: 15..76, focus_range: 42..71, name: \"__cortex_m_rt_main_trampoline\", kind: Function })",
-                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 78..102, focus_range: 89..97, name: \"test_foo\", kind: Function })",
-                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 104..155, focus_range: 136..150, name: \"test_full_path\", kind: Function })",
-                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 157..191, focus_range: 178..186, name: \"test_foo\", kind: Function })",
-                    "(Bench, NavigationTarget { file_id: FileId(0), full_range: 193..215, focus_range: 205..210, name: \"bench\", kind: Function })",
+                    "(Bin, NavigationTarget { file_id: FileId(0), full_range: 78..154, focus_range: 113..149, name: \"__cortex_m_rt_main_trampoline_unsafe\", kind: Function })",
+                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 156..180, focus_range: 167..175, name: \"test_foo\", kind: Function })",
+                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 182..233, focus_range: 214..228, name: \"test_full_path\", kind: Function })",
+                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 235..269, focus_range: 256..264, name: \"test_foo\", kind: Function })",
+                    "(Bench, NavigationTarget { file_id: FileId(0), full_range: 271..293, focus_range: 283..288, name: \"bench\", kind: Function })",
                 ]
             "#]],
         );
@@ -1019,13 +1212,13 @@ impl Foo {
             r#"
 //- /lib.rs
 $0
-macro_rules! gen {
+macro_rules! generate {
     () => {
         #[test]
         fn foo_test() {}
     }
 }
-macro_rules! gen2 {
+macro_rules! generate2 {
     () => {
         mod tests2 {
             #[test]
@@ -1033,25 +1226,25 @@ macro_rules! gen2 {
         }
     }
 }
-macro_rules! gen_main {
+macro_rules! generate_main {
     () => {
         fn main() {}
     }
 }
 mod tests {
-    gen!();
+    generate!();
 }
-gen2!();
-gen_main!();
+generate2!();
+generate_main!();
 "#,
             expect![[r#"
                 [
-                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 0..315, name: \"\", kind: Module })",
-                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 267..292, focus_range: 271..276, name: \"tests\", kind: Module, description: \"mod tests\" })",
-                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 283..290, name: \"foo_test\", kind: Function })",
-                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 293..301, name: \"foo_test2\", kind: Function }, true)",
-                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 293..301, name: \"tests2\", kind: Module, description: \"mod tests2\" }, true)",
-                    "(Bin, NavigationTarget { file_id: FileId(0), full_range: 302..314, name: \"main\", kind: Function })",
+                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 0..345, name: \"\", kind: Module })",
+                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 282..312, focus_range: 286..291, name: \"tests\", kind: Module, description: \"mod tests\" })",
+                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 298..310, name: \"foo_test\", kind: Function })",
+                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 313..326, name: \"tests2\", kind: Module, description: \"mod tests2\" }, true)",
+                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 313..326, name: \"foo_test2\", kind: Function }, true)",
+                    "(Bin, NavigationTarget { file_id: FileId(0), full_range: 327..344, name: \"main\", kind: Function })",
                 ]
             "#]],
         );
@@ -1079,10 +1272,10 @@ foo!();
 "#,
             expect![[r#"
                 [
+                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo_tests\", kind: Module, description: \"mod foo_tests\" }, true)",
                     "(Test, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo0\", kind: Function }, true)",
                     "(Test, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo1\", kind: Function }, true)",
                     "(Test, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo2\", kind: Function }, true)",
-                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo_tests\", kind: Module, description: \"mod foo_tests\" }, true)",
                 ]
             "#]],
         );
@@ -1322,18 +1515,18 @@ mod tests {
                         file_id: FileId(
                             0,
                         ),
-                        full_range: 121..185,
-                        focus_range: 136..145,
-                        name: "foo2_test",
+                        full_range: 52..115,
+                        focus_range: 67..75,
+                        name: "foo_test",
                         kind: Function,
                     },
                     NavigationTarget {
                         file_id: FileId(
                             0,
                         ),
-                        full_range: 52..115,
-                        focus_range: 67..75,
-                        name: "foo_test",
+                        full_range: 121..185,
+                        focus_range: 136..145,
+                        name: "foo2_test",
                         kind: Function,
                     },
                 ]

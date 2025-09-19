@@ -1,9 +1,8 @@
-use crate::{fmt_list, UnicodeData};
-use std::{
-    char,
-    collections::BTreeMap,
-    fmt::{self, Write},
-};
+use std::char;
+use std::collections::BTreeMap;
+use std::fmt::{self, Write};
+
+use crate::{UnicodeData, fmt_list};
 
 const INDEX_MASK: u32 = 1 << 22;
 

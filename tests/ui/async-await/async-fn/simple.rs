@@ -2,8 +2,6 @@
 //@ edition: 2021
 //@ build-pass
 
-#![feature(async_fn_traits)]
-
 extern crate block_on;
 
 use std::ops::AsyncFn;

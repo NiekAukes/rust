@@ -1,12 +1,11 @@
+use std::fmt::Write;
+
 use rustc_data_structures::intern::Interned;
 use rustc_hir::def_id::CrateNum;
 use rustc_hir::definitions::DisambiguatedDefPathData;
-use rustc_middle::ty::{
-    self,
-    print::{PrettyPrinter, Print, PrintError, Printer},
-    GenericArg, GenericArgKind, Ty, TyCtxt,
-};
-use std::fmt::Write;
+use rustc_middle::bug;
+use rustc_middle::ty::print::{PrettyPrinter, Print, PrintError, Printer};
+use rustc_middle::ty::{self, GenericArg, GenericArgKind, Ty, TyCtxt};
 
 struct AbsolutePathPrinter<'tcx> {
     tcx: TyCtxt<'tcx>,
@@ -36,10 +35,11 @@ impl<'tcx> Printer<'tcx> for AbsolutePathPrinter<'tcx> {
             | ty::Slice(_)
             | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
-            | ty::FnPtr(_)
+            | ty::FnPtr(..)
             | ty::Never
             | ty::Tuple(_)
-            | ty::Dynamic(_, _, _) => self.pretty_print_type(ty),
+            | ty::Dynamic(_, _, _)
+            | ty::UnsafeBinder(_) => self.pretty_print_type(ty),
 
             // Placeholders (all printed as `_` to uniformize them).
             ty::Param(_) | ty::Bound(..) | ty::Placeholder(_) | ty::Infer(_) | ty::Error(_) => {
@@ -56,7 +56,7 @@ impl<'tcx> Printer<'tcx> for AbsolutePathPrinter<'tcx> {
             | ty::Coroutine(def_id, args) => self.print_def_path(def_id, args),
             ty::Foreign(def_id) => self.print_def_path(def_id, &[]),
 
-            ty::Alias(ty::Weak, _) => bug!("type_name: unexpected weak projection"),
+            ty::Alias(ty::Free, _) => bug!("type_name: unexpected free alias"),
             ty::Alias(ty::Inherent, _) => bug!("type_name: unexpected inherent projection"),
             ty::CoroutineWitness(..) => bug!("type_name: unexpected `CoroutineWitness`"),
         }
@@ -125,7 +125,7 @@ impl<'tcx> Printer<'tcx> for AbsolutePathPrinter<'tcx> {
     ) -> Result<(), PrintError> {
         print_prefix(self)?;
         let args =
-            args.iter().cloned().filter(|arg| !matches!(arg.unpack(), GenericArgKind::Lifetime(_)));
+            args.iter().cloned().filter(|arg| !matches!(arg.kind(), GenericArgKind::Lifetime(_)));
         if args.clone().next().is_some() {
             self.generic_delimiters(|cx| cx.comma_sep(args))
         } else {

@@ -5,7 +5,6 @@
 // `Ty::is_inhabited_from` function.
 #![feature(never_type)]
 #![feature(never_type_fallback)]
-#![feature(min_exhaustive_patterns)]
 #![deny(unreachable_patterns)]
 
 macro_rules! assert_empty {
@@ -121,7 +120,7 @@ mod visibility {
     mod c {
         use super::*;
         pub struct AlsoSecretlyUninhabited {
-            _priv: ::Struct1,
+            _priv: crate::Struct1,
         }
         assert_empty!(SometimesEmptyStruct);
         assert_non_empty!(SometimesEmptyEnum);

@@ -5,14 +5,14 @@
 //! abstract token parsing, and string tokenization as completely separate
 //! layers.
 //!
-//! However, often you do pares text into syntax trees and the glue code for
+//! However, often you do parse text into syntax trees and the glue code for
 //! that needs to live somewhere. Rather than putting it to lexer or parser, we
 //! use a separate shortcuts module for that.
 
 use std::mem;
 
 use crate::{
-    LexedStr, Step,
+    Edition, LexedStr, Step,
     SyntaxKind::{self, *},
 };
 
@@ -25,9 +25,9 @@ pub enum StrStep<'a> {
 }
 
 impl LexedStr<'_> {
-    pub fn to_input(&self) -> crate::Input {
-        let _p = tracing::span!(tracing::Level::INFO, "LexedStr::to_input").entered();
-        let mut res = crate::Input::default();
+    pub fn to_input(&self, edition: Edition) -> crate::Input {
+        let _p = tracing::info_span!("LexedStr::to_input").entered();
+        let mut res = crate::Input::with_capacity(self.len());
         let mut was_joint = false;
         for i in 0..self.len() {
             let kind = self.kind(i);
@@ -35,9 +35,10 @@ impl LexedStr<'_> {
                 was_joint = false
             } else if kind == SyntaxKind::IDENT {
                 let token_text = self.text(i);
-                let contextual_kw =
-                    SyntaxKind::from_contextual_keyword(token_text).unwrap_or(SyntaxKind::IDENT);
-                res.push_ident(contextual_kw);
+                res.push_ident(
+                    SyntaxKind::from_contextual_keyword(token_text, edition)
+                        .unwrap_or(SyntaxKind::IDENT),
+                )
             } else {
                 if was_joint {
                     res.was_joint();

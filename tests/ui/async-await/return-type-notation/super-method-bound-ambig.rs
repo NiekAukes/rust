@@ -1,7 +1,6 @@
 //@ edition:2021
 
 #![feature(return_type_notation)]
-//~^ WARN the feature `return_type_notation` is incomplete
 
 trait Super1<'a> {
     async fn test();
@@ -22,7 +21,7 @@ impl Foo for () {}
 
 fn test<T>()
 where
-    T: Foo<test(): Send>,
+    T: Foo<test(..): Send>,
     //~^ ERROR ambiguous associated function `test` in bounds of `Foo`
 {
 }

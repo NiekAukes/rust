@@ -17,19 +17,23 @@ use hir::def::DefKind;
 use rustc_ast::Mutability;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_hir as hir;
+use rustc_hir::definitions::{DefPathData, DisambiguatorState};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::mir::interpret::{ConstAllocation, CtfeProvenance, InterpResult};
 use rustc_middle::query::TyCtxtAt;
+use rustc_middle::span_bug;
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_span::def_id::LocalDefId;
-use rustc_span::sym;
+use tracing::{instrument, trace};
 
-use super::{AllocId, Allocation, InterpCx, MPlaceTy, Machine, MemoryKind, PlaceTy};
+use super::{
+    AllocId, Allocation, InterpCx, MPlaceTy, Machine, MemoryKind, PlaceTy, err_ub, interp_ok,
+};
 use crate::const_eval;
+use crate::const_eval::DummyMachine;
 use crate::errors::NestedStaticInThreadLocal;
 
-pub trait CompileTimeMachine<'mir, 'tcx: 'mir, T> = Machine<
-        'mir,
+pub trait CompileTimeMachine<'tcx, T> = Machine<
         'tcx,
         MemoryKind = T,
         Provenance = CtfeProvenance,
@@ -45,7 +49,7 @@ pub trait HasStaticRootDefId {
     fn static_def_id(&self) -> Option<LocalDefId>;
 }
 
-impl HasStaticRootDefId for const_eval::CompileTimeInterpreter<'_, '_> {
+impl HasStaticRootDefId for const_eval::CompileTimeMachine<'_> {
     fn static_def_id(&self) -> Option<LocalDefId> {
         Some(self.static_root_ids?.1)
     }
@@ -58,10 +62,11 @@ impl HasStaticRootDefId for const_eval::CompileTimeInterpreter<'_, '_> {
 /// already mutable (as a sanity check).
 ///
 /// Returns an iterator over all relocations referred to by this allocation.
-fn intern_shallow<'rt, 'mir, 'tcx, T, M: CompileTimeMachine<'mir, 'tcx, T>>(
-    ecx: &'rt mut InterpCx<'mir, 'tcx, M>,
+fn intern_shallow<'tcx, T, M: CompileTimeMachine<'tcx, T>>(
+    ecx: &mut InterpCx<'tcx, M>,
     alloc_id: AllocId,
     mutability: Mutability,
+    disambiguator: Option<&mut DisambiguatorState>,
 ) -> Result<impl Iterator<Item = CtfeProvenance> + 'tcx, ()> {
     trace!("intern_shallow {:?}", alloc_id);
     // remove allocation
@@ -84,7 +89,13 @@ fn intern_shallow<'rt, 'mir, 'tcx, T, M: CompileTimeMachine<'mir, 'tcx, T>>(
     // link the alloc id to the actual allocation
     let alloc = ecx.tcx.mk_const_alloc(alloc);
     if let Some(static_id) = ecx.machine.static_def_id() {
-        intern_as_new_static(ecx.tcx, static_id, alloc_id, alloc);
+        intern_as_new_static(
+            ecx.tcx,
+            static_id,
+            alloc_id,
+            alloc,
+            disambiguator.expect("disambiguator needed"),
+        );
     } else {
         ecx.tcx.set_alloc_id_memory(alloc_id, alloc);
     }
@@ -98,11 +109,18 @@ fn intern_as_new_static<'tcx>(
     static_id: LocalDefId,
     alloc_id: AllocId,
     alloc: ConstAllocation<'tcx>,
+    disambiguator: &mut DisambiguatorState,
 ) {
+    // `intern_const_alloc_recursive` is called once per static and it contains the `DisambiguatorState`.
+    //  The `<static_id>::{{nested}}` path is thus unique to `intern_const_alloc_recursive` and the
+    // `DisambiguatorState` ensures the generated path is unique for this call as we generate
+    // `<static_id>::{{nested#n}}` where `n` is the `n`th `intern_as_new_static` call.
     let feed = tcx.create_def(
         static_id,
-        sym::nested,
-        DefKind::Static { mutability: alloc.0.mutability, nested: true },
+        None,
+        DefKind::Static { safety: hir::Safety::Safe, mutability: alloc.0.mutability, nested: true },
+        Some(DefPathData::NestedStatic),
+        disambiguator,
     );
     tcx.set_nested_alloc_id_static(alloc_id, feed.def_id());
 
@@ -145,15 +163,13 @@ pub enum InternResult {
 ///
 /// For `InternKind::Static` the root allocation will not be interned, but must be handled by the caller.
 #[instrument(level = "debug", skip(ecx))]
-pub fn intern_const_alloc_recursive<
-    'mir,
-    'tcx: 'mir,
-    M: CompileTimeMachine<'mir, 'tcx, const_eval::MemoryKind>,
->(
-    ecx: &mut InterpCx<'mir, 'tcx, M>,
+pub fn intern_const_alloc_recursive<'tcx, M: CompileTimeMachine<'tcx, const_eval::MemoryKind>>(
+    ecx: &mut InterpCx<'tcx, M>,
     intern_kind: InternKind,
     ret: &MPlaceTy<'tcx>,
 ) -> Result<(), InternResult> {
+    let mut disambiguator = DisambiguatorState::new();
+
     // We are interning recursively, and for mutability we are distinguishing the "root" allocation
     // that we are starting in, and all other allocations that we are encountering recursively.
     let (base_mutability, inner_mutability, is_static) = match intern_kind {
@@ -166,7 +182,7 @@ pub fn intern_const_alloc_recursive<
         InternKind::Static(Mutability::Not) => {
             (
                 // Outermost allocation is mutable if `!Freeze`.
-                if ret.layout.ty.is_freeze(*ecx.tcx, ecx.param_env) {
+                if ret.layout.ty.is_freeze(*ecx.tcx, ecx.typing_env) {
                     Mutability::Not
                 } else {
                     Mutability::Mut
@@ -197,7 +213,9 @@ pub fn intern_const_alloc_recursive<
         alloc.1.mutability = base_mutability;
         alloc.1.provenance().ptrs().iter().map(|&(_, prov)| prov).collect()
     } else {
-        intern_shallow(ecx, base_alloc_id, base_mutability).unwrap().collect()
+        intern_shallow(ecx, base_alloc_id, base_mutability, Some(&mut disambiguator))
+            .unwrap()
+            .collect()
     };
     // We need to distinguish "has just been interned" from "was already in `tcx`",
     // so we track this in a separate set.
@@ -209,12 +227,11 @@ pub fn intern_const_alloc_recursive<
 
     // Keep interning as long as there are things to intern.
     // We show errors if there are dangling pointers, or mutable pointers in immutable contexts
-    // (i.e., everything except for `static mut`). When these errors affect references, it is
-    // unfortunate that we show these errors here and not during validation, since validation can
-    // show much nicer errors. However, we do need these checks to be run on all pointers, including
-    // raw pointers, so we cannot rely on validation to catch them -- and since interning runs
-    // before validation, and interning doesn't know the type of anything, this means we can't show
-    // better errors. Maybe we should consider doing validation before interning in the future.
+    // (i.e., everything except for `static mut`). We only return these errors as a `Result`
+    // so that the caller can run validation, and subsequently only report interning errors
+    // if validation fails. Validation has the better error messages so we prefer those, but
+    // interning has better coverage since it "sees" *all* pointers, including raw pointers and
+    // references stored in unions.
     while let Some(prov) = todo.pop() {
         trace!(?prov);
         let alloc_id = prov.alloc_id();
@@ -227,37 +244,52 @@ pub fn intern_const_alloc_recursive<
             continue;
         }
 
-        // Crucially, we check this *before* checking whether the `alloc_id`
-        // has already been interned. The point of this check is to ensure that when
-        // there are multiple pointers to the same allocation, they are *all* immutable.
-        // Therefore it would be bad if we only checked the first pointer to any given
-        // allocation.
+        // Ensure that this is derived from a shared reference. Crucially, we check this *before*
+        // checking whether the `alloc_id` has already been interned. The point of this check is to
+        // ensure that when there are multiple pointers to the same allocation, they are *all*
+        // derived from a shared reference. Therefore it would be bad if we only checked the first
+        // pointer to any given allocation.
         // (It is likely not possible to actually have multiple pointers to the same allocation,
         // so alternatively we could also check that and ICE if there are multiple such pointers.)
+        // See <https://github.com/rust-lang/rust/pull/128543> for why we are checking for "shared
+        // reference" and not "immutable", i.e., for why we are allowing interior-mutable shared
+        // references: they can actually be created in safe code while pointing to apparently
+        // "immutable" values, via promotion or tail expression lifetime extension of
+        // `&None::<Cell<T>>`.
+        // We also exclude promoteds from this as `&mut []` can be promoted, which is a mutable
+        // reference pointing to an immutable (zero-sized) allocation. We rely on the promotion
+        // analysis not screwing up to ensure that it is sound to intern promoteds as immutable.
         if intern_kind != InternKind::Promoted
             && inner_mutability == Mutability::Not
-            && !prov.immutable()
+            && !prov.shared_ref()
         {
-            if ecx.tcx.try_get_global_alloc(alloc_id).is_some()
-                && !just_interned.contains(&alloc_id)
-            {
+            let is_already_global = ecx.tcx.try_get_global_alloc(alloc_id).is_some();
+            if is_already_global && !just_interned.contains(&alloc_id) {
                 // This is a pointer to some memory from another constant. We encounter mutable
                 // pointers to such memory since we do not always track immutability through
                 // these "global" pointers. Allowing them is harmless; the point of these checks
                 // during interning is to justify why we intern the *new* allocations immutably,
-                // so we can completely ignore existing allocations. We also don't need to add
-                // this to the todo list, since after all it is already interned.
+                // so we can completely ignore existing allocations.
+                // We can also skip the rest of this loop iteration, since after all it is already
+                // interned.
                 continue;
             }
-            // Found a mutable pointer inside a const where inner allocations should be
-            // immutable. We exclude promoteds from this, since things like `&mut []` and
-            // `&None::<Cell<i32>>` lead to promotion that can produce mutable pointers. We rely
-            // on the promotion analysis not screwing up to ensure that it is sound to intern
-            // promoteds as immutable.
-            trace!("found bad mutable pointer");
-            // Prefer dangling pointer errors over mutable pointer errors
-            if result.is_ok() {
-                result = Err(InternResult::FoundBadMutablePointer);
+            // If this is a dangling pointer, that's actually fine -- the problematic case is
+            // when there is memory there that someone might expect to be mutable, but we make it immutable.
+            let dangling = !is_already_global && !ecx.memory.alloc_map.contains_key(&alloc_id);
+            if !dangling {
+                // Found a mutable pointer inside a const where inner allocations should be
+                // immutable.
+                if !ecx.tcx.sess.opts.unstable_opts.unleash_the_miri_inside_of_you {
+                    span_bug!(
+                        ecx.tcx.span,
+                        "the static const safety checks accepted a mutable pointer they should not have accepted"
+                    );
+                }
+                // Prefer dangling pointer errors over mutable pointer errors
+                if result.is_ok() {
+                    result = Err(InternResult::FoundBadMutablePointer);
+                }
             }
         }
         if ecx.tcx.try_get_global_alloc(alloc_id).is_some() {
@@ -265,7 +297,6 @@ pub fn intern_const_alloc_recursive<
             debug_assert!(!ecx.memory.alloc_map.contains_key(&alloc_id));
             continue;
         }
-        just_interned.insert(alloc_id);
         // We always intern with `inner_mutability`, and furthermore we ensured above that if
         // that is "immutable", then there are *no* mutable pointers anywhere in the newly
         // interned memory -- justifying that we can indeed intern immutably. However this also
@@ -276,7 +307,8 @@ pub fn intern_const_alloc_recursive<
         // pointers before deciding which allocations can be made immutable; but for now we are
         // okay with losing some potential for immutability here. This can anyway only affect
         // `static mut`.
-        match intern_shallow(ecx, alloc_id, inner_mutability) {
+        just_interned.insert(alloc_id);
+        match intern_shallow(ecx, alloc_id, inner_mutability, Some(&mut disambiguator)) {
             Ok(nested) => todo.extend(nested),
             Err(()) => {
                 ecx.tcx.dcx().delayed_bug("found dangling pointer during const interning");
@@ -289,34 +321,28 @@ pub fn intern_const_alloc_recursive<
 
 /// Intern `ret`. This function assumes that `ret` references no other allocation.
 #[instrument(level = "debug", skip(ecx))]
-pub fn intern_const_alloc_for_constprop<
-    'mir,
-    'tcx: 'mir,
-    T,
-    M: CompileTimeMachine<'mir, 'tcx, T>,
->(
-    ecx: &mut InterpCx<'mir, 'tcx, M>,
+pub fn intern_const_alloc_for_constprop<'tcx, T, M: CompileTimeMachine<'tcx, T>>(
+    ecx: &mut InterpCx<'tcx, M>,
     alloc_id: AllocId,
 ) -> InterpResult<'tcx, ()> {
     if ecx.tcx.try_get_global_alloc(alloc_id).is_some() {
         // The constant is already in global memory. Do nothing.
-        return Ok(());
+        return interp_ok(());
     }
     // Move allocation to `tcx`.
-    if let Some(_) =
-        (intern_shallow(ecx, alloc_id, Mutability::Not).map_err(|()| err_ub!(DeadLocal))?).next()
+    if let Some(_) = intern_shallow(ecx, alloc_id, Mutability::Not, None)
+        .map_err(|()| err_ub!(DeadLocal))?
+        .next()
     {
         // We are not doing recursive interning, so we don't currently support provenance.
         // (If this assertion ever triggers, we should just implement a
         // proper recursive interning loop -- or just call `intern_const_alloc_recursive`.
         panic!("`intern_const_alloc_for_constprop` called on allocation with nested provenance")
     }
-    Ok(())
+    interp_ok(())
 }
 
-impl<'mir, 'tcx: 'mir, M: super::intern::CompileTimeMachine<'mir, 'tcx, !>>
-    InterpCx<'mir, 'tcx, M>
-{
+impl<'tcx> InterpCx<'tcx, DummyMachine> {
     /// A helper function that allocates memory for the layout given and gives you access to mutate
     /// it. Once your own mutation code is done, the backing `Allocation` is removed from the
     /// current `Memory` and interned as read-only into the global memory.
@@ -324,15 +350,15 @@ impl<'mir, 'tcx: 'mir, M: super::intern::CompileTimeMachine<'mir, 'tcx, !>>
         &mut self,
         layout: TyAndLayout<'tcx>,
         f: impl FnOnce(
-            &mut InterpCx<'mir, 'tcx, M>,
-            &PlaceTy<'tcx, M::Provenance>,
+            &mut InterpCx<'tcx, DummyMachine>,
+            &PlaceTy<'tcx, CtfeProvenance>,
         ) -> InterpResult<'tcx, ()>,
     ) -> InterpResult<'tcx, AllocId> {
         // `allocate` picks a fresh AllocId that we will associate with its data below.
         let dest = self.allocate(layout, MemoryKind::Stack)?;
         f(self, &dest.clone().into())?;
         let alloc_id = dest.ptr().provenance.unwrap().alloc_id(); // this was just allocated, it must have provenance
-        for prov in intern_shallow(self, alloc_id, Mutability::Not).unwrap() {
+        for prov in intern_shallow(self, alloc_id, Mutability::Not, None).unwrap() {
             // We are not doing recursive interning, so we don't currently support provenance.
             // (If this assertion ever triggers, we should just implement a
             // proper recursive interning loop -- or just call `intern_const_alloc_recursive`.
@@ -340,6 +366,6 @@ impl<'mir, 'tcx: 'mir, M: super::intern::CompileTimeMachine<'mir, 'tcx, !>>
                 panic!("`intern_with_temp_alloc` with nested allocations");
             }
         }
-        Ok(alloc_id)
+        interp_ok(alloc_id)
     }
 }

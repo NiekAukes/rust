@@ -1,10 +1,10 @@
 use crate::reference::DEREF_ADDROF;
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::source::SpanRangeExt;
 use clippy_utils::ty::implements_trait;
-use clippy_utils::{get_parent_expr, is_from_proc_macro, is_lint_allowed};
+use clippy_utils::{get_parent_expr, is_from_proc_macro, is_lint_allowed, is_mutable};
 use rustc_errors::Applicability;
-use rustc_hir::{ExprKind, UnOp};
+use rustc_hir::{BorrowKind, ExprKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::mir::Mutability;
 use rustc_middle::ty;
@@ -49,35 +49,35 @@ declare_lint_pass!(BorrowDerefRef => [BORROW_DEREF_REF]);
 
 impl<'tcx> LateLintPass<'tcx> for BorrowDerefRef {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &rustc_hir::Expr<'tcx>) {
-        if !e.span.from_expansion()
-            && let ExprKind::AddrOf(_, Mutability::Not, addrof_target) = e.kind
-            && !addrof_target.span.from_expansion()
+        if let ExprKind::AddrOf(BorrowKind::Ref, Mutability::Not, addrof_target) = e.kind
             && let ExprKind::Unary(UnOp::Deref, deref_target) = addrof_target.kind
-            && !deref_target.span.from_expansion()
             && !matches!(deref_target.kind, ExprKind::Unary(UnOp::Deref, ..))
+            && !e.span.from_expansion()
+            && !deref_target.span.from_expansion()
+            && !addrof_target.span.from_expansion()
             && let ref_ty = cx.typeck_results().expr_ty(deref_target)
             && let ty::Ref(_, inner_ty, Mutability::Not) = ref_ty.kind()
+            && get_parent_expr(cx, e).is_none_or(|parent| {
+                match parent.kind {
+                    // `*&*foo` should lint `deref_addrof` instead.
+                    ExprKind::Unary(UnOp::Deref, _) => is_lint_allowed(cx, DEREF_ADDROF, parent.hir_id),
+                    // `&*foo` creates a distinct temporary from `foo`
+                    ExprKind::AddrOf(_, Mutability::Mut, _) => !matches!(
+                        deref_target.kind,
+                        ExprKind::Path(..)
+                            | ExprKind::Field(..)
+                            | ExprKind::Index(..)
+                            | ExprKind::Unary(UnOp::Deref, ..)
+                    ),
+                    _ => true,
+                }
+            })
+            && !is_from_proc_macro(cx, e)
+            && let e_ty = cx.typeck_results().expr_ty_adjusted(e)
+            // check if the reference is coercing to a mutable reference
+            && (!matches!(e_ty.kind(), ty::Ref(_, _, Mutability::Mut)) || is_mutable(cx, deref_target))
+            && let Some(deref_text) = deref_target.span.get_source_text(cx)
         {
-            if let Some(parent_expr) = get_parent_expr(cx, e) {
-                if matches!(parent_expr.kind, ExprKind::Unary(UnOp::Deref, ..))
-                    && !is_lint_allowed(cx, DEREF_ADDROF, parent_expr.hir_id)
-                {
-                    return;
-                }
-
-                // modification to `&mut &*x` is different from `&mut x`
-                if matches!(
-                    deref_target.kind,
-                    ExprKind::Path(..) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, ..)
-                ) && matches!(parent_expr.kind, ExprKind::AddrOf(_, Mutability::Mut, _))
-                {
-                    return;
-                }
-            }
-            if is_from_proc_macro(cx, e) {
-                return;
-            }
-
             span_lint_and_then(
                 cx,
                 BORROW_DEREF_REF,
@@ -87,22 +87,22 @@ impl<'tcx> LateLintPass<'tcx> for BorrowDerefRef {
                     diag.span_suggestion(
                         e.span,
                         "if you would like to reborrow, try removing `&*`",
-                        snippet_opt(cx, deref_target.span).unwrap(),
+                        deref_text.as_str(),
                         Applicability::MachineApplicable,
                     );
 
                     // has deref trait -> give 2 help
                     // doesn't have deref trait -> give 1 help
-                    if let Some(deref_trait_id) = cx.tcx.lang_items().deref_trait() {
-                        if !implements_trait(cx, *inner_ty, deref_trait_id, &[]) {
-                            return;
-                        }
+                    if let Some(deref_trait_id) = cx.tcx.lang_items().deref_trait()
+                        && !implements_trait(cx, *inner_ty, deref_trait_id, &[])
+                    {
+                        return;
                     }
 
                     diag.span_suggestion(
                         e.span,
                         "if you would like to deref, try using `&**`",
-                        format!("&**{}", &snippet_opt(cx, deref_target.span).unwrap()),
+                        format!("&**{deref_text}"),
                         Applicability::MaybeIncorrect,
                     );
                 },

@@ -1,7 +1,6 @@
-use crate::env;
 use crate::ffi::OsStr;
-use crate::io;
 use crate::path::{Path, PathBuf, Prefix};
+use crate::{env, io};
 
 #[inline]
 pub fn is_sep_byte(b: u8) -> bool {
@@ -60,4 +59,12 @@ pub(crate) fn absolute(path: &Path) -> io::Result<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+pub(crate) fn is_absolute(path: &Path) -> bool {
+    if cfg!(any(unix, target_os = "hermit", target_os = "wasi")) {
+        path.has_root()
+    } else {
+        path.has_root() && path.prefix().is_some()
+    }
 }

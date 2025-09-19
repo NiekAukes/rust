@@ -2,31 +2,19 @@
 
 use std::{borrow::Cow, iter};
 
-use itertools::{multipeek, MultiPeek};
-use lazy_static::lazy_static;
-use regex::Regex;
+use itertools::{Itertools as _, MultiPeek, multipeek};
 use rustc_span::Span;
+use tracing::{debug, trace};
 
 use crate::config::Config;
-use crate::rewrite::RewriteContext;
+use crate::rewrite::{RewriteContext, RewriteErrorExt, RewriteResult};
 use crate::shape::{Indent, Shape};
-use crate::string::{rewrite_string, StringFormat};
+use crate::string::{StringFormat, rewrite_string};
 use crate::utils::{
     count_newlines, first_line_width, last_line_width, trim_left_preserve_layout,
     trimmed_last_line_width, unicode_str_width,
 };
 use crate::{ErrorKind, FormattingError};
-
-lazy_static! {
-    /// A regex matching reference doc links.
-    ///
-    /// ```markdown
-    /// /// An [example].
-    /// ///
-    /// /// [example]: this::is::a::link
-    /// ```
-    static ref REFERENCE_LINK_URL: Regex = Regex::new(r"^\[.+\]\s?:").unwrap();
-}
 
 fn is_custom_comment(comment: &str) -> bool {
     if !comment.starts_with("//") {
@@ -170,13 +158,10 @@ pub(crate) fn combine_strs_with_missing_comments(
     span: Span,
     shape: Shape,
     allow_extend: bool,
-) -> Option<String> {
+) -> RewriteResult {
     trace!(
         "combine_strs_with_missing_comments `{}` `{}` {:?} {:?}",
-        prev_str,
-        next_str,
-        span,
-        shape
+        prev_str, next_str, span, shape
     );
 
     let mut result =
@@ -203,12 +188,12 @@ pub(crate) fn combine_strs_with_missing_comments(
             result.push_str(&indent.to_string_with_newline(config))
         }
         result.push_str(next_str);
-        return Some(result);
+        return Ok(result);
     }
 
     // We have a missing comment between the first expression and the second expression.
 
-    // Peek the the original source code and find out whether there is a newline between the first
+    // Peek the original source code and find out whether there is a newline between the first
     // expression and the second expression or the missing comment. We will preserve the original
     // layout whenever possible.
     let original_snippet = context.snippet(span);
@@ -248,10 +233,10 @@ pub(crate) fn combine_strs_with_missing_comments(
     result.push_str(&second_sep);
     result.push_str(next_str);
 
-    Some(result)
+    Ok(result)
 }
 
-pub(crate) fn rewrite_doc_comment(orig: &str, shape: Shape, config: &Config) -> Option<String> {
+pub(crate) fn rewrite_doc_comment(orig: &str, shape: Shape, config: &Config) -> RewriteResult {
     identify_comment(orig, false, shape, config, true)
 }
 
@@ -260,7 +245,7 @@ pub(crate) fn rewrite_comment(
     block_style: bool,
     shape: Shape,
     config: &Config,
-) -> Option<String> {
+) -> RewriteResult {
     identify_comment(orig, block_style, shape, config, false)
 }
 
@@ -270,7 +255,7 @@ fn identify_comment(
     shape: Shape,
     config: &Config,
     is_doc_comment: bool,
-) -> Option<String> {
+) -> RewriteResult {
     let style = comment_style(orig, false);
 
     // Computes the byte length of line taking into account a newline if the line is part of a
@@ -362,7 +347,7 @@ fn identify_comment(
     let (first_group, rest) = orig.split_at(first_group_ending);
     let rewritten_first_group =
         if !config.normalize_comments() && has_bare_lines && style.is_block_comment() {
-            trim_left_preserve_layout(first_group, shape.indent, config)?
+            trim_left_preserve_layout(first_group, shape.indent, config).unknown_error()?
         } else if !config.normalize_comments()
             && !config.wrap_comments()
             && !(
@@ -383,7 +368,7 @@ fn identify_comment(
             )?
         };
     if rest.is_empty() {
-        Some(rewritten_first_group)
+        Ok(rewritten_first_group)
     } else {
         identify_comment(
             rest.trim_start(),
@@ -506,7 +491,7 @@ impl ItemizedBlock {
         let mut line_start = " ".repeat(indent);
 
         // Markdown blockquote start with a "> "
-        if line.trim_start().starts_with(">") {
+        if line.trim_start().starts_with('>') {
             // remove the original +2 indent because there might be multiple nested block quotes
             // and it's easier to reason about the final indent by just taking the length
             // of the new line_start. We update the indent because it effects the max width
@@ -549,10 +534,11 @@ impl ItemizedBlock {
 
     /// Returns the block as a string, with each line trimmed at the start.
     fn trimmed_block_as_string(&self) -> String {
-        self.lines
-            .iter()
-            .map(|line| format!("{} ", line.trim_start()))
-            .collect::<String>()
+        self.lines.iter().fold(String::new(), |mut acc, line| {
+            acc.push_str(line.trim_start());
+            acc.push(' ');
+            acc
+        })
     }
 
     /// Returns the block as a string under its original form.
@@ -657,7 +643,7 @@ impl<'a> CommentRewrite<'a> {
         while let Some(line) = iter.next() {
             result.push_str(line);
             result.push_str(match iter.peek() {
-                Some(next_line) if next_line.is_empty() => sep.trim_end(),
+                Some(&"") => sep.trim_end(),
                 Some(..) => sep,
                 None => "",
             });
@@ -666,7 +652,7 @@ impl<'a> CommentRewrite<'a> {
     }
 
     /// Check if any characters were written to the result buffer after the start of the comment.
-    /// when calling [`CommentRewrite::new()`] the result buffer is initiazlied with the opening
+    /// when calling [`CommentRewrite::new()`] the result buffer is initialized with the opening
     /// characters for the comment.
     fn buffer_contains_comment(&self) -> bool {
         // if self.result.len() < self.opener.len() then an empty comment is in the buffer
@@ -839,7 +825,7 @@ impl<'a> CommentRewrite<'a> {
             }
         }
 
-        let is_markdown_header_doc_comment = is_doc_comment && line.starts_with("#");
+        let is_markdown_header_doc_comment = is_doc_comment && line.starts_with('#');
 
         // We only want to wrap the comment if:
         // 1) wrap_comments = true is configured
@@ -915,7 +901,7 @@ fn rewrite_comment_inner(
     shape: Shape,
     config: &Config,
     is_doc_comment: bool,
-) -> Option<String> {
+) -> RewriteResult {
     let mut rewriter = CommentRewrite::new(orig, block_style, shape, config);
 
     let line_breaks = count_newlines(orig.trim_end());
@@ -949,7 +935,7 @@ fn rewrite_comment_inner(
         }
     }
 
-    Some(rewriter.finish())
+    Ok(rewriter.finish())
 }
 
 const RUSTFMT_CUSTOM_COMMENT_PREFIX: &str = "//#### ";
@@ -979,12 +965,21 @@ fn trim_custom_comment_prefix(s: &str) -> String {
 
 /// Returns `true` if the given string MAY include URLs or alike.
 fn has_url(s: &str) -> bool {
+    // A regex matching reference doc links.
+    //
+    // ```markdown
+    // /// An [example].
+    // ///
+    // /// [example]: this::is::a::link
+    // ```
+    let reference_link_url = static_regex!(r"^\[.+\]\s?:");
+
     // This function may return false positive, but should get its job done in most cases.
     s.contains("https://")
         || s.contains("http://")
         || s.contains("ftp://")
         || s.contains("file://")
-        || REFERENCE_LINK_URL.is_match(s)
+        || reference_link_url.is_match(s)
 }
 
 /// Returns true if the given string may be part of a Markdown table.
@@ -1005,7 +1000,7 @@ pub(crate) fn rewrite_missing_comment(
     span: Span,
     shape: Shape,
     context: &RewriteContext<'_>,
-) -> Option<String> {
+) -> RewriteResult {
     let missing_snippet = context.snippet(span);
     let trimmed_snippet = missing_snippet.trim();
     // check the span starts with a comment
@@ -1013,7 +1008,7 @@ pub(crate) fn rewrite_missing_comment(
     if !trimmed_snippet.is_empty() && pos.is_some() {
         rewrite_comment(trimmed_snippet, false, shape, context.config)
     } else {
-        Some(String::new())
+        Ok(String::new())
     }
 }
 
@@ -1025,13 +1020,13 @@ pub(crate) fn recover_missing_comment_in_span(
     shape: Shape,
     context: &RewriteContext<'_>,
     used_width: usize,
-) -> Option<String> {
+) -> RewriteResult {
     let missing_comment = rewrite_missing_comment(span, shape, context)?;
     if missing_comment.is_empty() {
-        Some(String::new())
+        Ok(String::new())
     } else {
         let missing_snippet = context.snippet(span);
-        let pos = missing_snippet.find('/')?;
+        let pos = missing_snippet.find('/').unknown_error()?;
         // 1 = ` `
         let total_width = missing_comment.len() + used_width + 1;
         let force_new_line_before_comment =
@@ -1041,7 +1036,7 @@ pub(crate) fn recover_missing_comment_in_span(
         } else {
             Cow::from(" ")
         };
-        Some(format!("{sep}{missing_comment}"))
+        Ok(format!("{sep}{missing_comment}"))
     }
 }
 
@@ -1061,8 +1056,7 @@ fn light_rewrite_comment(
     config: &Config,
     is_doc_comment: bool,
 ) -> String {
-    let lines: Vec<&str> = orig
-        .lines()
+    orig.lines()
         .map(|l| {
             // This is basically just l.trim(), but in the case that a line starts
             // with `*` we want to leave one space before it, so it aligns with the
@@ -1080,8 +1074,7 @@ fn light_rewrite_comment(
             // Preserve markdown's double-space line break syntax in doc comment.
             trim_end_unless_two_whitespaces(left_trimmed, is_doc_comment)
         })
-        .collect();
-    lines.join(&format!("\n{}", offset.to_string(config)))
+        .join(&format!("\n{}", offset.to_string(config)))
 }
 
 /// Trims comment characters and possibly a single space from the left of a string.
@@ -1263,15 +1256,15 @@ pub(crate) enum FullCodeCharKind {
     InComment,
     /// Last character of a comment, '\n' for a line comment, '/' for a block comment.
     EndComment,
-    /// Start of a mutlitine string inside a comment
+    /// Start of a multiline string inside a comment
     StartStringCommented,
-    /// End of a mutlitine string inside a comment
+    /// End of a multiline string inside a comment
     EndStringCommented,
     /// Inside a commented string
     InStringCommented,
-    /// Start of a mutlitine string
+    /// Start of a multiline string
     StartString,
-    /// End of a mutlitine string
+    /// End of a multiline string
     EndString,
     /// Inside a string.
     InString,
@@ -1710,12 +1703,11 @@ impl<'a> Iterator for CommentCodeSlices<'a> {
 }
 
 /// Checks is `new` didn't miss any comment from `span`, if it removed any, return previous text
-/// (if it fits in the width/offset, else return `None`), else return `new`
 pub(crate) fn recover_comment_removed(
     new: String,
     span: Span,
     context: &RewriteContext<'_>,
-) -> Option<String> {
+) -> String {
     let snippet = context.snippet(span);
     if snippet != new && changed_comment_content(snippet, &new) {
         // We missed some comments. Warn and keep the original text.
@@ -1729,9 +1721,9 @@ pub(crate) fn recover_comment_removed(
                 )],
             );
         }
-        Some(snippet.to_owned())
+        snippet.to_owned()
     } else {
-        Some(new)
+        new
     }
 }
 
@@ -1764,7 +1756,7 @@ fn changed_comment_content(orig: &str, new: &str) -> bool {
     let code_comment_content = |code| {
         let slices = UngroupedCommentCodeSlices::new(code);
         slices
-            .filter(|&(ref kind, _, _)| *kind == CodeCharKind::Comment)
+            .filter(|(kind, _, _)| *kind == CodeCharKind::Comment)
             .flat_map(|(_, _, s)| CommentReducer::new(s))
     };
     let res = code_comment_content(orig).ne(code_comment_content(new));

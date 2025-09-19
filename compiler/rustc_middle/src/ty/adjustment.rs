@@ -1,9 +1,11 @@
-use crate::ty::{self, Ty, TyCtxt};
+use rustc_abi::FieldIdx;
 use rustc_hir as hir;
+use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
 use rustc_span::Span;
-use rustc_target::abi::FieldIdx;
+
+use crate::ty::{Ty, TyCtxt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
 pub enum PointerCoercion {
@@ -15,7 +17,7 @@ pub enum PointerCoercion {
 
     /// Go from a non-capturing closure to an fn pointer or an unsafe fn pointer.
     /// It cannot convert a closure that requires unsafe.
-    ClosureFnPointer(hir::Unsafety),
+    ClosureFnPointer(hir::Safety),
 
     /// Go from a mut raw pointer to a const raw pointer.
     MutToConstPointer,
@@ -24,16 +26,19 @@ pub enum PointerCoercion {
     ArrayToPointer,
 
     /// Unsize a pointer/reference value, e.g., `&[T; n]` to
-    /// `&[T]`. Note that the source could be a thin or fat pointer.
-    /// This will do things like convert thin pointers to fat
+    /// `&[T]`. Note that the source could be a thin or wide pointer.
+    /// This will do things like convert thin pointers to wide
     /// pointers, or convert structs containing thin pointers to
-    /// structs containing fat pointers, or convert between fat
+    /// structs containing wide pointers, or convert between wide
     /// pointers. We don't store the details of how the transform is
     /// done (in fact, we don't know that, because it might depend on
     /// the precise type parameters). We just store the target
     /// type. Codegen backends and miri figure out what has to be done
     /// based on the precise source/target type at hand.
     Unsize,
+
+    /// Go from a pointer-like type to a `dyn*` object.
+    DynStar,
 }
 
 /// Represents coercing a value to a different type of value.
@@ -78,7 +83,7 @@ pub enum PointerCoercion {
 ///    `Box<[i32]>` is an `Adjust::Unsize` with the target `Box<[i32]>`.
 #[derive(Clone, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub struct Adjustment<'tcx> {
-    pub kind: Adjust<'tcx>,
+    pub kind: Adjust,
     pub target: Ty<'tcx>,
 }
 
@@ -89,20 +94,20 @@ impl<'tcx> Adjustment<'tcx> {
 }
 
 #[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
-pub enum Adjust<'tcx> {
+pub enum Adjust {
     /// Go from ! to any type.
     NeverToAny,
 
     /// Dereference once, producing a place.
-    Deref(Option<OverloadedDeref<'tcx>>),
+    Deref(Option<OverloadedDeref>),
 
     /// Take the address and produce either a `&` or `*` pointer.
-    Borrow(AutoBorrow<'tcx>),
+    Borrow(AutoBorrow),
 
     Pointer(PointerCoercion),
 
-    /// Cast into a dyn* object.
-    DynStar,
+    /// Take a pinned reference and reborrow as a `Pin<&mut T>` or `Pin<&T>`.
+    ReborrowPin(hir::Mutability),
 }
 
 /// An overloaded autoderef step, representing a `Deref(Mut)::deref(_mut)`
@@ -111,28 +116,26 @@ pub enum Adjust<'tcx> {
 /// being those shared by both the receiver and the returned reference.
 #[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable)]
 #[derive(TypeFoldable, TypeVisitable)]
-pub struct OverloadedDeref<'tcx> {
-    pub region: ty::Region<'tcx>,
+pub struct OverloadedDeref {
     pub mutbl: hir::Mutability,
     /// The `Span` associated with the field access or method call
     /// that triggered this overloaded deref.
     pub span: Span,
 }
 
-impl<'tcx> OverloadedDeref<'tcx> {
-    /// Get the zst function item type for this method call.
-    pub fn method_call(&self, tcx: TyCtxt<'tcx>, source: Ty<'tcx>) -> Ty<'tcx> {
+impl OverloadedDeref {
+    /// Get the [`DefId`] of the method call for the given `Deref`/`DerefMut` trait
+    /// for this overloaded deref's mutability.
+    pub fn method_call<'tcx>(&self, tcx: TyCtxt<'tcx>) -> DefId {
         let trait_def_id = match self.mutbl {
-            hir::Mutability::Not => tcx.require_lang_item(LangItem::Deref, None),
-            hir::Mutability::Mut => tcx.require_lang_item(LangItem::DerefMut, None),
+            hir::Mutability::Not => tcx.require_lang_item(LangItem::Deref, self.span),
+            hir::Mutability::Mut => tcx.require_lang_item(LangItem::DerefMut, self.span),
         };
-        let method_def_id = tcx
-            .associated_items(trait_def_id)
+        tcx.associated_items(trait_def_id)
             .in_definition_order()
-            .find(|m| m.kind == ty::AssocKind::Fn)
+            .find(|item| item.is_fn())
             .unwrap()
-            .def_id;
-        Ty::new_fn_def(tcx, method_def_id, [source])
+            .def_id
     }
 }
 
@@ -183,9 +186,9 @@ impl From<AutoBorrowMutability> for hir::Mutability {
 
 #[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable)]
 #[derive(TypeFoldable, TypeVisitable)]
-pub enum AutoBorrow<'tcx> {
+pub enum AutoBorrow {
     /// Converts from T to &T.
-    Ref(ty::Region<'tcx>, AutoBorrowMutability),
+    Ref(AutoBorrowMutability),
 
     /// Converts from T to *T.
     RawPtr(hir::Mutability),
@@ -210,4 +213,26 @@ pub struct CoerceUnsizedInfo {
 pub enum CustomCoerceUnsized {
     /// Records the index of the field being coerced.
     Struct(FieldIdx),
+}
+
+/// Represents an implicit coercion applied to the scrutinee of a match before testing a pattern
+/// against it. Currently, this is used only for implicit dereferences.
+#[derive(Clone, Copy, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
+pub struct PatAdjustment<'tcx> {
+    pub kind: PatAdjust,
+    /// The type of the scrutinee before the adjustment is applied, or the "adjusted type" of the
+    /// pattern.
+    pub source: Ty<'tcx>,
+}
+
+/// Represents implicit coercions of patterns' types, rather than values' types.
+#[derive(Clone, Copy, PartialEq, Debug, TyEncodable, TyDecodable, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub enum PatAdjust {
+    /// An implicit dereference before matching, such as when matching the pattern `0` against a
+    /// scrutinee of type `&u8` or `&mut u8`.
+    BuiltinDeref,
+    /// An implicit call to `Deref(Mut)::deref(_mut)` before matching, such as when matching the
+    /// pattern `[..]` against a scrutinee of type `Vec<T>`.
+    OverloadedDeref,
 }

@@ -2,11 +2,14 @@
 
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, TyCtxt};
-use rustc_span::symbol::sym;
+use rustc_middle::{bug, span_bug};
+use rustc_span::sym;
 
-pub struct LowerIntrinsics;
+use crate::take_array;
 
-impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
+pub(super) struct LowerIntrinsics;
+
+impl<'tcx> crate::MirPass<'tcx> for LowerIntrinsics {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let local_decls = &body.local_decls;
         for block in body.basic_blocks.as_mut() {
@@ -31,60 +34,62 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                         });
                         terminator.kind = TerminatorKind::Goto { target };
                     }
+                    sym::contract_checks => {
+                        let target = target.unwrap();
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                *destination,
+                                Rvalue::NullaryOp(NullOp::ContractChecks, tcx.types.bool),
+                            ))),
+                        });
+                        terminator.kind = TerminatorKind::Goto { target };
+                    }
                     sym::forget => {
-                        if let Some(target) = *target {
-                            block.statements.push(Statement {
-                                source_info: terminator.source_info,
-                                kind: StatementKind::Assign(Box::new((
-                                    *destination,
-                                    Rvalue::Use(Operand::Constant(Box::new(ConstOperand {
-                                        span: terminator.source_info.span,
-                                        user_ty: None,
-                                        const_: Const::zero_sized(tcx.types.unit),
-                                    }))),
-                                ))),
-                            });
-                            terminator.kind = TerminatorKind::Goto { target };
-                        }
+                        let target = target.unwrap();
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                *destination,
+                                Rvalue::Use(Operand::Constant(Box::new(ConstOperand {
+                                    span: terminator.source_info.span,
+                                    user_ty: None,
+                                    const_: Const::zero_sized(tcx.types.unit),
+                                }))),
+                            ))),
+                        });
+                        terminator.kind = TerminatorKind::Goto { target };
                     }
                     sym::copy_nonoverlapping => {
                         let target = target.unwrap();
-                        let mut args = args.drain(..);
+                        let Ok([src, dst, count]) = take_array(args) else {
+                            bug!("Wrong arguments for copy_non_overlapping intrinsic");
+                        };
                         block.statements.push(Statement {
                             source_info: terminator.source_info,
                             kind: StatementKind::Intrinsic(Box::new(
                                 NonDivergingIntrinsic::CopyNonOverlapping(
                                     rustc_middle::mir::CopyNonOverlapping {
-                                        src: args.next().unwrap().node,
-                                        dst: args.next().unwrap().node,
-                                        count: args.next().unwrap().node,
+                                        src: src.node,
+                                        dst: dst.node,
+                                        count: count.node,
                                     },
                                 ),
                             )),
                         });
-                        assert_eq!(
-                            args.next(),
-                            None,
-                            "Extra argument for copy_non_overlapping intrinsic"
-                        );
-                        drop(args);
                         terminator.kind = TerminatorKind::Goto { target };
                     }
                     sym::assume => {
                         let target = target.unwrap();
-                        let mut args = args.drain(..);
+                        let Ok([arg]) = take_array(args) else {
+                            bug!("Wrong arguments for assume intrinsic");
+                        };
                         block.statements.push(Statement {
                             source_info: terminator.source_info,
                             kind: StatementKind::Intrinsic(Box::new(
-                                NonDivergingIntrinsic::Assume(args.next().unwrap().node),
+                                NonDivergingIntrinsic::Assume(arg.node),
                             )),
                         });
-                        assert_eq!(
-                            args.next(),
-                            None,
-                            "Extra argument for copy_non_overlapping intrinsic"
-                        );
-                        drop(args);
                         terminator.kind = TerminatorKind::Goto { target };
                     }
                     sym::wrapping_add
@@ -99,13 +104,9 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                     | sym::unchecked_shl
                     | sym::unchecked_shr => {
                         let target = target.unwrap();
-                        let lhs;
-                        let rhs;
-                        {
-                            let mut args = args.drain(..);
-                            lhs = args.next().unwrap();
-                            rhs = args.next().unwrap();
-                        }
+                        let Ok([lhs, rhs]) = take_array(args) else {
+                            bug!("Wrong arguments for {} intrinsic", intrinsic.name);
+                        };
                         let bin_op = match intrinsic.name {
                             sym::wrapping_add => BinOp::Add,
                             sym::wrapping_sub => BinOp::Sub,
@@ -130,50 +131,44 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                         terminator.kind = TerminatorKind::Goto { target };
                     }
                     sym::add_with_overflow | sym::sub_with_overflow | sym::mul_with_overflow => {
-                        if let Some(target) = *target {
-                            let lhs;
-                            let rhs;
-                            {
-                                let mut args = args.drain(..);
-                                lhs = args.next().unwrap();
-                                rhs = args.next().unwrap();
-                            }
-                            let bin_op = match intrinsic.name {
-                                sym::add_with_overflow => BinOp::Add,
-                                sym::sub_with_overflow => BinOp::Sub,
-                                sym::mul_with_overflow => BinOp::Mul,
-                                _ => bug!("unexpected intrinsic"),
-                            };
-                            block.statements.push(Statement {
-                                source_info: terminator.source_info,
-                                kind: StatementKind::Assign(Box::new((
-                                    *destination,
-                                    Rvalue::CheckedBinaryOp(bin_op, Box::new((lhs.node, rhs.node))),
-                                ))),
-                            });
-                            terminator.kind = TerminatorKind::Goto { target };
-                        }
+                        let target = target.unwrap();
+                        let Ok([lhs, rhs]) = take_array(args) else {
+                            bug!("Wrong arguments for {} intrinsic", intrinsic.name);
+                        };
+                        let bin_op = match intrinsic.name {
+                            sym::add_with_overflow => BinOp::AddWithOverflow,
+                            sym::sub_with_overflow => BinOp::SubWithOverflow,
+                            sym::mul_with_overflow => BinOp::MulWithOverflow,
+                            _ => bug!("unexpected intrinsic"),
+                        };
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                *destination,
+                                Rvalue::BinaryOp(bin_op, Box::new((lhs.node, rhs.node))),
+                            ))),
+                        });
+                        terminator.kind = TerminatorKind::Goto { target };
                     }
-                    sym::size_of | sym::min_align_of => {
-                        if let Some(target) = *target {
-                            let tp_ty = generic_args.type_at(0);
-                            let null_op = match intrinsic.name {
-                                sym::size_of => NullOp::SizeOf,
-                                sym::min_align_of => NullOp::AlignOf,
-                                _ => bug!("unexpected intrinsic"),
-                            };
-                            block.statements.push(Statement {
-                                source_info: terminator.source_info,
-                                kind: StatementKind::Assign(Box::new((
-                                    *destination,
-                                    Rvalue::NullaryOp(null_op, tp_ty),
-                                ))),
-                            });
-                            terminator.kind = TerminatorKind::Goto { target };
-                        }
+                    sym::size_of | sym::align_of => {
+                        let target = target.unwrap();
+                        let tp_ty = generic_args.type_at(0);
+                        let null_op = match intrinsic.name {
+                            sym::size_of => NullOp::SizeOf,
+                            sym::align_of => NullOp::AlignOf,
+                            _ => bug!("unexpected intrinsic"),
+                        };
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                *destination,
+                                Rvalue::NullaryOp(null_op, tp_ty),
+                            ))),
+                        });
+                        terminator.kind = TerminatorKind::Goto { target };
                     }
                     sym::read_via_copy => {
-                        let [arg] = args.as_slice() else {
+                        let Ok([arg]) = take_array(args) else {
                             span_bug!(terminator.source_info.span, "Wrong number of arguments");
                         };
                         let derefed_place = if let Some(place) = arg.node.place()
@@ -206,7 +201,7 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                     }
                     sym::write_via_move => {
                         let target = target.unwrap();
-                        let Ok([ptr, val]) = <[_; 2]>::try_from(std::mem::take(args)) else {
+                        let Ok([ptr, val]) = take_array(args) else {
                             span_bug!(
                                 terminator.source_info.span,
                                 "Wrong number of arguments for write_via_move intrinsic",
@@ -232,21 +227,27 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                         terminator.kind = TerminatorKind::Goto { target };
                     }
                     sym::discriminant_value => {
-                        if let (Some(target), Some(arg)) = (*target, args[0].node.place()) {
-                            let arg = tcx.mk_place_deref(arg);
-                            block.statements.push(Statement {
-                                source_info: terminator.source_info,
-                                kind: StatementKind::Assign(Box::new((
-                                    *destination,
-                                    Rvalue::Discriminant(arg),
-                                ))),
-                            });
-                            terminator.kind = TerminatorKind::Goto { target };
-                        }
+                        let target = target.unwrap();
+                        let Ok([arg]) = take_array(args) else {
+                            span_bug!(
+                                terminator.source_info.span,
+                                "Wrong arguments for discriminant_value intrinsic"
+                            );
+                        };
+                        let arg = arg.node.place().unwrap();
+                        let arg = tcx.mk_place_deref(arg);
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                *destination,
+                                Rvalue::Discriminant(arg),
+                            ))),
+                        });
+                        terminator.kind = TerminatorKind::Goto { target };
                     }
                     sym::offset => {
                         let target = target.unwrap();
-                        let Ok([ptr, delta]) = <[_; 2]>::try_from(std::mem::take(args)) else {
+                        let Ok([ptr, delta]) = take_array(args) else {
                             span_bug!(
                                 terminator.source_info.span,
                                 "Wrong number of arguments for offset intrinsic",
@@ -261,9 +262,55 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                         });
                         terminator.kind = TerminatorKind::Goto { target };
                     }
+                    sym::slice_get_unchecked => {
+                        let target = target.unwrap();
+                        let Ok([ptrish, index]) = take_array(args) else {
+                            span_bug!(
+                                terminator.source_info.span,
+                                "Wrong number of arguments for {intrinsic:?}",
+                            );
+                        };
+
+                        let place = ptrish.node.place().unwrap();
+                        assert!(!place.is_indirect());
+                        let updated_place = place.project_deeper(
+                            &[
+                                ProjectionElem::Deref,
+                                ProjectionElem::Index(
+                                    index.node.place().unwrap().as_local().unwrap(),
+                                ),
+                            ],
+                            tcx,
+                        );
+
+                        let ret_ty = generic_args.type_at(0);
+                        let rvalue = match *ret_ty.kind() {
+                            ty::RawPtr(_, Mutability::Not) => {
+                                Rvalue::RawPtr(RawPtrKind::Const, updated_place)
+                            }
+                            ty::RawPtr(_, Mutability::Mut) => {
+                                Rvalue::RawPtr(RawPtrKind::Mut, updated_place)
+                            }
+                            ty::Ref(region, _, Mutability::Not) => {
+                                Rvalue::Ref(region, BorrowKind::Shared, updated_place)
+                            }
+                            ty::Ref(region, _, Mutability::Mut) => Rvalue::Ref(
+                                region,
+                                BorrowKind::Mut { kind: MutBorrowKind::Default },
+                                updated_place,
+                            ),
+                            _ => bug!("Unknown return type {ret_ty:?}"),
+                        };
+
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((*destination, rvalue))),
+                        });
+                        terminator.kind = TerminatorKind::Goto { target };
+                    }
                     sym::transmute | sym::transmute_unchecked => {
                         let dst_ty = destination.ty(local_decls, tcx).ty;
-                        let Ok([arg]) = <[_; 1]>::try_from(std::mem::take(args)) else {
+                        let Ok([arg]) = take_array(args) else {
                             span_bug!(
                                 terminator.source_info.span,
                                 "Wrong number of arguments for transmute intrinsic",
@@ -280,7 +327,6 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                                 Rvalue::Cast(CastKind::Transmute, arg.node, dst_ty),
                             ))),
                         });
-
                         if let Some(target) = *target {
                             terminator.kind = TerminatorKind::Goto { target };
                         } else {
@@ -288,7 +334,7 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                         }
                     }
                     sym::aggregate_raw_ptr => {
-                        let Ok([data, meta]) = <[_; 2]>::try_from(std::mem::take(args)) else {
+                        let Ok([data, meta]) = take_array(args) else {
                             span_bug!(
                                 terminator.source_info.span,
                                 "Wrong number of arguments for aggregate_raw_ptr intrinsic",
@@ -312,12 +358,32 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                                 Rvalue::Aggregate(Box::new(kind), fields.into()),
                             ))),
                         });
-
+                        terminator.kind = TerminatorKind::Goto { target };
+                    }
+                    sym::ptr_metadata => {
+                        let Ok([ptr]) = take_array(args) else {
+                            span_bug!(
+                                terminator.source_info.span,
+                                "Wrong number of arguments for ptr_metadata intrinsic",
+                            );
+                        };
+                        let target = target.unwrap();
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                *destination,
+                                Rvalue::UnaryOp(UnOp::PtrMetadata, ptr.node),
+                            ))),
+                        });
                         terminator.kind = TerminatorKind::Goto { target };
                     }
                     _ => {}
                 }
             }
         }
+    }
+
+    fn is_required(&self) -> bool {
+        true
     }
 }

@@ -1,29 +1,26 @@
-use crate::snippet::Style;
-use crate::{
-    CodeSuggestion, DiagCtxt, DiagMessage, ErrCode, ErrorGuaranteed, ExplicitBug, Level, MultiSpan,
-    StashKey, SubdiagMessage, Substitution, SubstitutionPart, SuggestionStyle,
-};
-use rustc_data_structures::fx::FxIndexMap;
-use rustc_error_messages::fluent_value_from_str_list_sep_by_and;
-use rustc_error_messages::FluentValue;
-use rustc_lint_defs::{Applicability, LintExpectationId};
-use rustc_macros::{Decodable, Encodable};
-use rustc_span::source_map::Spanned;
-use rustc_span::symbol::Symbol;
-use rustc_span::{Span, DUMMY_SP};
 use std::borrow::Cow;
 use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::panic;
+use std::path::PathBuf;
 use std::thread::panicking;
+
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_error_messages::{FluentValue, fluent_value_from_str_list_sep_by_and};
+use rustc_lint_defs::{Applicability, LintExpectationId};
+use rustc_macros::{Decodable, Encodable};
+use rustc_span::source_map::Spanned;
+use rustc_span::{DUMMY_SP, Span, Symbol};
 use tracing::debug;
 
-/// Error type for `DiagInner`'s `suggestions` field, indicating that
-/// `.disable_suggestions()` was called on the `DiagInner`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Encodable, Decodable)]
-pub struct SuggestionsDisabled;
+use crate::snippet::Style;
+use crate::{
+    CodeSuggestion, DiagCtxtHandle, DiagMessage, ErrCode, ErrorGuaranteed, ExplicitBug, Level,
+    MultiSpan, StashKey, SubdiagMessage, Substitution, SubstitutionPart, SuggestionStyle,
+    Suggestions,
+};
 
 /// Simplified version of `FluentArg` that can implement `Encodable` and `Decodable`. Collection of
 /// `DiagArg` are converted to `FluentArgs` (consuming the collection) at the start of diagnostic
@@ -133,7 +130,7 @@ impl EmissionGuarantee for rustc_span::fatal_error::FatalError {
 pub trait Diagnostic<'a, G: EmissionGuarantee = ErrorGuaranteed> {
     /// Write out as a diagnostic out of `DiagCtxt`.
     #[must_use]
-    fn into_diag(self, dcx: &'a DiagCtxt, level: Level) -> Diag<'a, G>;
+    fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'a, G>;
 }
 
 impl<'a, T, G> Diagnostic<'a, G> for Spanned<T>
@@ -141,7 +138,7 @@ where
     T: Diagnostic<'a, G>,
     G: EmissionGuarantee,
 {
-    fn into_diag(self, dcx: &'a DiagCtxt, level: Level) -> Diag<'a, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'a, G> {
         self.node.into_diag(dcx, level).with_span(self.span)
     }
 }
@@ -151,18 +148,24 @@ where
 /// converted rather than on `DiagArgValue`, which enables types from other `rustc_*` crates to
 /// implement this.
 pub trait IntoDiagArg {
-    fn into_diag_arg(self) -> DiagArgValue;
+    /// Convert `Self` into a `DiagArgValue` suitable for rendering in a diagnostic.
+    ///
+    /// It takes a `path` where "long values" could be written to, if the `DiagArgValue` is too big
+    /// for displaying on the terminal. This path comes from the `Diag` itself. When rendering
+    /// values that come from `TyCtxt`, like `Ty<'_>`, they can use `TyCtxt::short_string`. If a
+    /// value has no shortening logic that could be used, the argument can be safely ignored.
+    fn into_diag_arg(self, path: &mut Option<std::path::PathBuf>) -> DiagArgValue;
 }
 
 impl IntoDiagArg for DiagArgValue {
-    fn into_diag_arg(self) -> DiagArgValue {
+    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> DiagArgValue {
         self
     }
 }
 
-impl Into<FluentValue<'static>> for DiagArgValue {
-    fn into(self) -> FluentValue<'static> {
-        match self {
+impl From<DiagArgValue> for FluentValue<'static> {
+    fn from(val: DiagArgValue) -> Self {
+        match val {
             DiagArgValue::Str(s) => From::from(s),
             DiagArgValue::Number(n) => From::from(n),
             DiagArgValue::StrListSepByAnd(l) => fluent_value_from_str_list_sep_by_and(l),
@@ -178,21 +181,8 @@ where
     Self: Sized,
 {
     /// Add a subdiagnostic to an existing diagnostic.
-    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
-        self.add_to_diag_with(diag, &|_, m| m);
-    }
-
-    /// Add a subdiagnostic to an existing diagnostic where `f` is invoked on every message used
-    /// (to optionally perform eager translation).
-    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
-        self,
-        diag: &mut Diag<'_, G>,
-        f: &F,
-    );
+    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>);
 }
-
-pub trait SubdiagMessageOp<G: EmissionGuarantee> =
-    Fn(&mut Diag<'_, G>, SubdiagMessage) -> SubdiagMessage;
 
 /// Trait implemented by lint types. This should not be implemented manually. Instead, use
 /// `#[derive(LintDiagnostic)]` -- see [rustc_macros::LintDiagnostic].
@@ -200,12 +190,10 @@ pub trait SubdiagMessageOp<G: EmissionGuarantee> =
 pub trait LintDiagnostic<'a, G: EmissionGuarantee> {
     /// Decorate and emit a lint.
     fn decorate_lint<'b>(self, diag: &'b mut Diag<'a, G>);
-
-    fn msg(&self) -> DiagMessage;
 }
 
 #[derive(Clone, Debug, Encodable, Decodable)]
-pub struct DiagLocation {
+pub(crate) struct DiagLocation {
     file: Cow<'static, str>,
     line: u32,
     col: u32,
@@ -295,9 +283,10 @@ pub struct DiagInner {
 
     pub messages: Vec<(DiagMessage, Style)>,
     pub code: Option<ErrCode>,
+    pub lint_id: Option<LintExpectationId>,
     pub span: MultiSpan,
     pub children: Vec<Subdiag>,
-    pub suggestions: Result<Vec<CodeSuggestion>, SuggestionsDisabled>,
+    pub suggestions: Suggestions,
     pub args: DiagArgMap,
 
     /// This is not used for highlighting or rendering any error message. Rather, it can be used
@@ -307,6 +296,7 @@ pub struct DiagInner {
 
     pub is_lint: Option<IsLint>,
 
+    pub long_ty_path: Option<PathBuf>,
     /// With `-Ztrack_diagnostics` enabled,
     /// we print where in rustc this error was emitted.
     pub(crate) emitted_at: DiagLocation,
@@ -322,14 +312,16 @@ impl DiagInner {
     pub fn new_with_messages(level: Level, messages: Vec<(DiagMessage, Style)>) -> Self {
         DiagInner {
             level,
+            lint_id: None,
             messages,
             code: None,
             span: MultiSpan::new(),
             children: vec![],
-            suggestions: Ok(vec![]),
+            suggestions: Suggestions::Enabled(vec![]),
             args: Default::default(),
             sort_span: DUMMY_SP,
             is_lint: None,
+            long_ty_path: None,
             emitted_at: DiagLocation::caller(),
         }
     }
@@ -343,7 +335,7 @@ impl DiagInner {
         match self.level {
             Level::Bug | Level::Fatal | Level::Error | Level::DelayedBug => true,
 
-            Level::ForceWarning(_)
+            Level::ForceWarning
             | Level::Warning
             | Level::Note
             | Level::OnceNote
@@ -351,32 +343,7 @@ impl DiagInner {
             | Level::OnceHelp
             | Level::FailureNote
             | Level::Allow
-            | Level::Expect(_) => false,
-        }
-    }
-
-    pub(crate) fn update_unstable_expectation_id(
-        &mut self,
-        unstable_to_stable: &FxIndexMap<LintExpectationId, LintExpectationId>,
-    ) {
-        if let Level::Expect(expectation_id) | Level::ForceWarning(Some(expectation_id)) =
-            &mut self.level
-        {
-            if expectation_id.is_stable() {
-                return;
-            }
-
-            // The unstable to stable map only maps the unstable `AttrId` to a stable `HirId` with an attribute index.
-            // The lint index inside the attribute is manually transferred here.
-            let lint_index = expectation_id.get_lint_index();
-            expectation_id.set_lint_index(None);
-            let mut stable_id = unstable_to_stable
-                .get(expectation_id)
-                .expect("each unstable `LintExpectationId` must have a matching stable id")
-                .normalize();
-
-            stable_id.set_lint_index(lint_index);
-            *expectation_id = stable_id;
+            | Level::Expect => false,
         }
     }
 
@@ -387,7 +354,7 @@ impl DiagInner {
 
     pub(crate) fn is_force_warn(&self) -> bool {
         match self.level {
-            Level::ForceWarning(_) => {
+            Level::ForceWarning => {
                 assert!(self.is_lint.is_some());
                 true
             }
@@ -423,7 +390,7 @@ impl DiagInner {
     }
 
     pub(crate) fn arg(&mut self, name: impl Into<DiagArgName>, arg: impl IntoDiagArg) {
-        self.args.insert(name.into(), arg.into_diag_arg());
+        self.args.insert(name.into(), arg.into_diag_arg(&mut self.long_ty_path));
     }
 
     /// Fields used for Hash, and PartialEq trait.
@@ -435,7 +402,7 @@ impl DiagInner {
         &Option<ErrCode>,
         &MultiSpan,
         &[Subdiag],
-        &Result<Vec<CodeSuggestion>, SuggestionsDisabled>,
+        &Suggestions,
         Vec<(&DiagArgName, &DiagArgValue)>,
         &Option<IsLint>,
     ) {
@@ -485,14 +452,14 @@ pub struct Subdiag {
 /// - The `EmissionGuarantee`, which determines the type returned from `emit`.
 ///
 /// Each constructed `Diag` must be consumed by a function such as `emit`,
-/// `cancel`, `delay_as_bug`, or `into_diag`. A panic occurrs if a `Diag`
+/// `cancel`, `delay_as_bug`, or `into_diag`. A panic occurs if a `Diag`
 /// is dropped without being consumed by one of these functions.
 ///
 /// If there is some state in a downstream crate you would like to access in
 /// the methods of `Diag` here, consider extending `DiagCtxtFlags`.
 #[must_use]
 pub struct Diag<'a, G: EmissionGuarantee = ErrorGuaranteed> {
-    pub dcx: &'a DiagCtxt,
+    pub dcx: DiagCtxtHandle<'a>,
 
     /// Why the `Option`? It is always `Some` until the `Diag` is consumed via
     /// `emit`, `cancel`, etc. At that point it is consumed and replaced with
@@ -512,7 +479,7 @@ pub struct Diag<'a, G: EmissionGuarantee = ErrorGuaranteed> {
 // would be bad.
 impl<G> !Clone for Diag<'_, G> {}
 
-rustc_data_structures::static_assert_size!(Diag<'_, ()>, 2 * std::mem::size_of::<usize>());
+rustc_data_structures::static_assert_size!(Diag<'_, ()>, 3 * size_of::<usize>());
 
 impl<G: EmissionGuarantee> Deref for Diag<'_, G> {
     type Target = DiagInner;
@@ -580,13 +547,18 @@ macro_rules! with_fn {
 impl<'a, G: EmissionGuarantee> Diag<'a, G> {
     #[rustc_lint_diagnostics]
     #[track_caller]
-    pub fn new(dcx: &'a DiagCtxt, level: Level, message: impl Into<DiagMessage>) -> Self {
+    pub fn new(dcx: DiagCtxtHandle<'a>, level: Level, message: impl Into<DiagMessage>) -> Self {
         Self::new_diagnostic(dcx, DiagInner::new(level, message))
+    }
+
+    /// Allow moving diagnostics between different error tainting contexts
+    pub fn with_dcx(mut self, dcx: DiagCtxtHandle<'_>) -> Diag<'_, G> {
+        Diag { dcx, diag: self.diag.take(), _marker: PhantomData }
     }
 
     /// Creates a new `Diag` with an already constructed diagnostic.
     #[track_caller]
-    pub(crate) fn new_diagnostic(dcx: &'a DiagCtxt, diag: DiagInner) -> Self {
+    pub(crate) fn new_diagnostic(dcx: DiagCtxtHandle<'a>, diag: DiagInner) -> Self {
         debug!("Created new diagnostic");
         Self { dcx, diag: Some(Box::new(diag)), _marker: PhantomData }
     }
@@ -662,23 +634,30 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
     #[rustc_lint_diagnostics]
     pub fn note_expected_found(
         &mut self,
-        expected_label: &dyn fmt::Display,
+        expected_label: &str,
         expected: DiagStyledString,
-        found_label: &dyn fmt::Display,
+        found_label: &str,
         found: DiagStyledString,
     ) -> &mut Self {
-        self.note_expected_found_extra(expected_label, expected, found_label, found, &"", &"")
+        self.note_expected_found_extra(
+            expected_label,
+            expected,
+            found_label,
+            found,
+            DiagStyledString::normal(""),
+            DiagStyledString::normal(""),
+        )
     }
 
     #[rustc_lint_diagnostics]
     pub fn note_expected_found_extra(
         &mut self,
-        expected_label: &dyn fmt::Display,
+        expected_label: &str,
         expected: DiagStyledString,
-        found_label: &dyn fmt::Display,
+        found_label: &str,
         found: DiagStyledString,
-        expected_extra: &dyn fmt::Display,
-        found_extra: &dyn fmt::Display,
+        expected_extra: DiagStyledString,
+        found_extra: DiagStyledString,
     ) -> &mut Self {
         let expected_label = expected_label.to_string();
         let expected_label = if expected_label.is_empty() {
@@ -702,11 +681,14 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
             " ".repeat(expected_padding),
             expected_label
         ))];
-        msg.extend(expected.0.into_iter());
-        msg.push(StringPart::normal(format!("`{expected_extra}\n")));
+        msg.extend(expected.0);
+        msg.push(StringPart::normal(format!("`")));
+        msg.extend(expected_extra.0);
+        msg.push(StringPart::normal(format!("\n")));
         msg.push(StringPart::normal(format!("{}{} `", " ".repeat(found_padding), found_label)));
-        msg.extend(found.0.into_iter());
-        msg.push(StringPart::normal(format!("`{found_extra}")));
+        msg.extend(found.0);
+        msg.push(StringPart::normal(format!("`")));
+        msg.extend(found_extra.0);
 
         // For now, just attach these as notes.
         self.highlighted_note(msg);
@@ -734,6 +716,16 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
     #[rustc_lint_diagnostics]
     pub fn highlighted_note(&mut self, msg: Vec<StringPart>) -> &mut Self {
         self.sub_with_highlights(Level::Note, msg, MultiSpan::new());
+        self
+    }
+
+    #[rustc_lint_diagnostics]
+    pub fn highlighted_span_note(
+        &mut self,
+        span: impl Into<MultiSpan>,
+        msg: Vec<StringPart>,
+    ) -> &mut Self {
+        self.sub_with_highlights(Level::Note, msg, span.into());
         self
     }
 
@@ -811,6 +803,17 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
         self
     }
 
+    /// Add a help message attached to this diagnostic with a customizable highlighted message.
+    #[rustc_lint_diagnostics]
+    pub fn highlighted_span_help(
+        &mut self,
+        span: impl Into<MultiSpan>,
+        msg: Vec<StringPart>,
+    ) -> &mut Self {
+        self.sub_with_highlights(Level::Help, msg, span.into());
+        self
+    }
+
     /// Prints the span with some help above it.
     /// This is like [`Diag::help()`], but it gets its own span.
     #[rustc_lint_diagnostics]
@@ -823,16 +826,32 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
         self
     }
 
-    /// Disallow attaching suggestions this diagnostic.
+    /// Disallow attaching suggestions to this diagnostic.
     /// Any suggestions attached e.g. with the `span_suggestion_*` methods
     /// (before and after the call to `disable_suggestions`) will be ignored.
     #[rustc_lint_diagnostics]
     pub fn disable_suggestions(&mut self) -> &mut Self {
-        self.suggestions = Err(SuggestionsDisabled);
+        self.suggestions = Suggestions::Disabled;
         self
     }
 
-    /// Helper for pushing to `self.suggestions`, if available (not disable).
+    /// Prevent new suggestions from being added to this diagnostic.
+    ///
+    /// Suggestions added before the call to `.seal_suggestions()` will be preserved
+    /// and new suggestions will be ignored.
+    #[rustc_lint_diagnostics]
+    pub fn seal_suggestions(&mut self) -> &mut Self {
+        if let Suggestions::Enabled(suggestions) = &mut self.suggestions {
+            let suggestions_slice = std::mem::take(suggestions).into_boxed_slice();
+            self.suggestions = Suggestions::Sealed(suggestions_slice);
+        }
+        self
+    }
+
+    /// Helper for pushing to `self.suggestions`.
+    ///
+    /// A new suggestion is added if suggestions are enabled for this diagnostic.
+    /// Otherwise, they are ignored.
     #[rustc_lint_diagnostics]
     fn push_suggestion(&mut self, suggestion: CodeSuggestion) {
         for subst in &suggestion.substitutions {
@@ -846,7 +865,7 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
             }
         }
 
-        if let Ok(suggestions) = &mut self.suggestions {
+        if let Suggestions::Enabled(suggestions) = &mut self.suggestions {
             suggestions.push(suggestion);
         }
     }
@@ -869,7 +888,7 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
         )
     } }
 
-    /// Show a suggestion that has multiple parts to it, always as it's own subdiagnostic.
+    /// Show a suggestion that has multiple parts to it, always as its own subdiagnostic.
     /// In other words, multiple changes need to be applied as part of this suggestion.
     #[rustc_lint_diagnostics]
     pub fn multipart_suggestion_verbose(
@@ -895,8 +914,8 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
         applicability: Applicability,
         style: SuggestionStyle,
     ) -> &mut Self {
-        suggestion.sort_unstable();
-        suggestion.dedup();
+        let mut seen = crate::FxHashSet::default();
+        suggestion.retain(|(span, msg)| seen.insert((span.lo(), span.hi(), msg.clone())));
 
         let parts = suggestion
             .into_iter()
@@ -1194,17 +1213,20 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
     /// used in the subdiagnostic, so suitable for use with repeated messages (i.e. re-use of
     /// interpolated variables).
     #[rustc_lint_diagnostics]
-    pub fn subdiagnostic(
-        &mut self,
-        dcx: &crate::DiagCtxt,
-        subdiagnostic: impl Subdiagnostic,
-    ) -> &mut Self {
-        subdiagnostic.add_to_diag_with(self, &|diag, msg| {
-            let args = diag.args.iter();
-            let msg = diag.subdiagnostic_message_to_diagnostic_message(msg);
-            dcx.eagerly_translate(msg, args)
-        });
+    pub fn subdiagnostic(&mut self, subdiagnostic: impl Subdiagnostic) -> &mut Self {
+        subdiagnostic.add_to_diag(self);
         self
+    }
+
+    /// Fluent variables are not namespaced from each other, so when
+    /// `Diagnostic`s and `Subdiagnostic`s use the same variable name,
+    /// one value will clobber the other. Eagerly translating the
+    /// diagnostic uses the variables defined right then, before the
+    /// clobbering occurs.
+    pub fn eagerly_translate(&self, msg: impl Into<SubdiagMessage>) -> SubdiagMessage {
+        let args = self.args.iter();
+        let msg = self.subdiagnostic_message_to_diagnostic_message(msg.into());
+        self.dcx.eagerly_translate(msg, args)
     }
 
     with_fn! { with_span,
@@ -1229,6 +1251,17 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
     #[rustc_lint_diagnostics]
     pub fn code(&mut self, code: ErrCode) -> &mut Self {
         self.code = Some(code);
+        self
+    } }
+
+    with_fn! { with_lint_id,
+    /// Add an argument.
+    #[rustc_lint_diagnostics]
+    pub fn lint_id(
+        &mut self,
+        id: LintExpectationId,
+    ) -> &mut Self {
+        self.lint_id = Some(id);
         self
     } }
 
@@ -1285,7 +1318,35 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
     /// `cancel`, etc. Afterwards, `drop` is the only code that will be run on
     /// `self`.
     fn take_diag(&mut self) -> DiagInner {
-        Box::into_inner(self.diag.take().unwrap())
+        if let Some(path) = &self.long_ty_path {
+            self.note(format!(
+                "the full name for the type has been written to '{}'",
+                path.display()
+            ));
+            self.note("consider using `--verbose` to print the full type name to the console");
+        }
+        *self.diag.take().unwrap()
+    }
+
+    /// This method allows us to access the path of the file where "long types" are written to.
+    ///
+    /// When calling `Diag::emit`, as part of that we will check if a `long_ty_path` has been set,
+    /// and if it has been then we add a note mentioning the file where the "long types" were
+    /// written to.
+    ///
+    /// When calling `tcx.short_string()` after a `Diag` is constructed, the preferred way of doing
+    /// so is `tcx.short_string(ty, diag.long_ty_path())`. The diagnostic itself is the one that
+    /// keeps the existence of a "long type" anywhere in the diagnostic, so the note telling the
+    /// user where we wrote the file to is only printed once at most, *and* it makes it much harder
+    /// to forget to set it.
+    ///
+    /// If the diagnostic hasn't been created before a "short ty string" is created, then you should
+    /// ensure that this method is called to set it `*diag.long_ty_path() = path`.
+    ///
+    /// As a rule of thumb, if you see or add at least one `tcx.short_string()` call anywhere, in a
+    /// scope, `diag.long_ty_path()` should be called once somewhere close by.
+    pub fn long_ty_path(&mut self) -> &mut Option<PathBuf> {
+        &mut self.long_ty_path
     }
 
     /// Most `emit_producing_guarantee` functions use this as a starting point.
@@ -1343,7 +1404,8 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
 
     /// See `DiagCtxt::stash_diagnostic` for details.
     pub fn stash(mut self, span: Span, key: StashKey) -> Option<ErrorGuaranteed> {
-        self.dcx.stash_diagnostic(span, key, self.take_diag())
+        let diag = self.take_diag();
+        self.dcx.stash_diagnostic(span, key, diag)
     }
 
     /// Delay emission of this diagnostic as a bug.

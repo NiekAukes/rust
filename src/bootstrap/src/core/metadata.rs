@@ -1,10 +1,17 @@
+//! This module interacts with Cargo metadata to collect and store information about
+//! the packages in the Rust workspace.
+//!
+//! It runs `cargo metadata` to gather details about each package, including its name,
+//! source, dependencies, targets, and available features. The collected metadata is then
+//! used to update the `Build` structure, ensuring proper dependency resolution and
+//! compilation flow.
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
 
 use serde_derive::Deserialize;
 
-use crate::utils::helpers::output;
-use crate::{t, Build, Crate};
+use crate::utils::exec::command;
+use crate::{Build, Crate, t};
 
 /// For more information, see the output of
 /// <https://doc.rust-lang.org/nightly/cargo/commands/cargo-metadata.html>
@@ -21,7 +28,7 @@ struct Package {
     source: Option<String>,
     manifest_path: String,
     dependencies: Vec<Dependency>,
-    targets: Vec<Target>,
+    features: BTreeMap<String, Vec<String>>,
 }
 
 /// For more information, see the output of
@@ -30,11 +37,6 @@ struct Package {
 struct Dependency {
     name: String,
     source: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Target {
-    kind: Vec<String>,
 }
 
 /// Collects and stores package metadata of each workspace members into `build`,
@@ -51,8 +53,12 @@ pub fn build(build: &mut Build) {
                 .filter(|dep| dep.source.is_none())
                 .map(|dep| dep.name)
                 .collect();
-            let has_lib = package.targets.iter().any(|t| t.kind.iter().any(|k| k == "lib"));
-            let krate = Crate { name: name.clone(), deps, path, has_lib };
+            let krate = Crate {
+                name: name.clone(),
+                deps,
+                path,
+                features: package.features.keys().cloned().collect(),
+            };
             let relative_path = krate.local_path(build);
             build.crates.insert(name.clone(), krate);
             let existing_path = build.crate_paths.insert(relative_path, name);
@@ -67,11 +73,11 @@ pub fn build(build: &mut Build) {
 
 /// Invokes `cargo metadata` to get package metadata of each workspace member.
 ///
-/// Note that `src/tools/cargo` is no longer a workspace member but we still
-/// treat it as one here, by invoking an additional `cargo metadata` command.
-fn workspace_members(build: &Build) -> impl Iterator<Item = Package> {
+/// This is used to resolve specific crate paths in `fn should_run` to compile
+/// particular crate (e.g., `x build sysroot` to build library/sysroot).
+fn workspace_members(build: &Build) -> Vec<Package> {
     let collect_metadata = |manifest_path| {
-        let mut cargo = Command::new(&build.initial_cargo);
+        let mut cargo = command(&build.initial_cargo);
         cargo
             // Will read the libstd Cargo.toml
             // which uses the unstable `public-dependency` feature.
@@ -82,19 +88,14 @@ fn workspace_members(build: &Build) -> impl Iterator<Item = Package> {
             .arg("--no-deps")
             .arg("--manifest-path")
             .arg(build.src.join(manifest_path));
-        let metadata_output = output(&mut cargo);
+        let metadata_output = cargo.run_always().run_capture_stdout(build).stdout();
         let Output { packages, .. } = t!(serde_json::from_str(&metadata_output));
         packages
     };
 
-    // Collects `metadata.packages` from all workspaces.
-    let packages = collect_metadata("Cargo.toml");
-    let cargo_packages = collect_metadata("src/tools/cargo/Cargo.toml");
-    let ra_packages = collect_metadata("src/tools/rust-analyzer/Cargo.toml");
-    let bootstrap_packages = collect_metadata("src/bootstrap/Cargo.toml");
-
-    // We only care about the root package from `src/tool/cargo` workspace.
-    let cargo_package = cargo_packages.into_iter().find(|pkg| pkg.name == "cargo").into_iter();
-
-    packages.into_iter().chain(cargo_package).chain(ra_packages).chain(bootstrap_packages)
+    // Collects `metadata.packages` from the root and library workspaces.
+    let mut packages = vec![];
+    packages.extend(collect_metadata("Cargo.toml"));
+    packages.extend(collect_metadata("library/Cargo.toml"));
+    packages
 }

@@ -1,6 +1,8 @@
 use crate::cmp;
-use crate::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Result as IoResult};
-use crate::sys::rand::rdrand64;
+use crate::io::{
+    BorrowedCursor, Error as IoError, ErrorKind, IoSlice, IoSliceMut, Result as IoResult,
+};
+use crate::random::{DefaultRandomSource, Random};
 use crate::time::{Duration, Instant};
 
 pub(crate) mod alloc;
@@ -33,6 +35,19 @@ pub fn read(fd: Fd, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
             }
         }
         Ok(userbuf.len())
+    }
+}
+
+/// Usercall `read` with an uninitialized buffer. See the ABI documentation for
+/// more information.
+#[unstable(feature = "sgx_platform", issue = "56975")]
+pub fn read_buf(fd: Fd, mut buf: BorrowedCursor<'_>) -> IoResult<()> {
+    unsafe {
+        let mut userbuf = alloc::User::<[u8]>::uninitialized(buf.capacity());
+        let len = raw::read(fd, userbuf.as_mut_ptr().cast(), userbuf.len()).from_sgx_result()?;
+        userbuf[..len].copy_to_enclave(&mut buf.as_mut()[..len]);
+        buf.advance_unchecked(len);
+        Ok(())
     }
 }
 
@@ -164,17 +179,19 @@ pub fn wait(event_mask: u64, mut timeout: u64) -> IoResult<u64> {
         // trusted to ensure accurate timeouts.
         if let Ok(timeout_signed) = i64::try_from(timeout) {
             let tenth = timeout_signed / 10;
-            let deviation = (rdrand64() as i64).checked_rem(tenth).unwrap_or(0);
+            let deviation = i64::random(&mut DefaultRandomSource).checked_rem(tenth).unwrap_or(0);
             timeout = timeout_signed.saturating_add(deviation) as _;
         }
     }
     unsafe { raw::wait(event_mask, timeout).from_sgx_result() }
 }
 
-/// This function makes an effort to wait for a non-spurious event at least as
-/// long as `duration`. Note that in general there is no guarantee about accuracy
-/// of time and timeouts in SGX model. The enclave runner serving usercalls may
-/// lie about current time and/or ignore timeout values.
+/// Makes an effort to wait for a non-spurious event at least as long as
+/// `duration`.
+///
+/// Note that in general there is no guarantee about accuracy of time and
+/// timeouts in SGX model. The enclave runner serving usercalls may lie about
+/// current time and/or ignore timeout values.
 ///
 /// Once the event is observed, `should_wake_up` will be used to determine
 /// whether or not the event was spurious.

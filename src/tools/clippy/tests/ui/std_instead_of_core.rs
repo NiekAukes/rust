@@ -1,7 +1,7 @@
 //@aux-build:proc_macro_derive.rs
 
 #![warn(clippy::std_instead_of_core)]
-#![allow(unused_imports)]
+#![allow(unused_imports, deprecated)]
 
 extern crate alloc;
 
@@ -45,8 +45,8 @@ fn std_instead_of_core() {
 
     let _ = std::env!("PATH");
 
-    // do not lint until `error_in_core` is stable
     use std::error::Error;
+    //~^ ERROR: used import from `std` instead of `core`
 
     // lint items re-exported from private modules, `core::iter::traits::iterator::Iterator`
     use std::iter::Iterator;
@@ -75,8 +75,24 @@ mod std_in_proc_macro_derive {
     struct B {}
 }
 
-fn main() {
-    std_instead_of_core();
-    std_instead_of_alloc();
-    alloc_instead_of_core();
+// Some intrinsics are usable on stable but live in an unstable module, but should still suggest
+// replacing std -> core
+fn intrinsic(a: *mut u8, b: *mut u8) {
+    unsafe {
+        std::intrinsics::copy(a, b, 1);
+        //~^ std_instead_of_core
+    }
+}
+
+#[clippy::msrv = "1.76"]
+fn msrv_1_76(_: std::net::IpAddr) {}
+
+#[clippy::msrv = "1.77"]
+fn msrv_1_77(_: std::net::IpAddr) {}
+//~^ std_instead_of_core
+
+#[warn(clippy::std_instead_of_core)]
+#[rustfmt::skip]
+fn issue14982() {
+    use std::{collections::HashMap, hash::Hash};
 }

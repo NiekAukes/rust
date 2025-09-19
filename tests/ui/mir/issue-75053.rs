@@ -1,6 +1,7 @@
+//@ check-pass
 //@ compile-flags: -Z mir-opt-level=3
 
-#![feature(type_alias_impl_trait, rustc_attrs)]
+#![feature(type_alias_impl_trait)]
 
 use std::marker::PhantomData;
 
@@ -13,9 +14,10 @@ trait MyFrom<T>: Sized {
     fn my_from(value: T) -> Result<Self, Self::Error>;
 }
 
-trait F {}
+pub trait F {}
 impl F for () {}
-type DummyT<T> = impl F;
+pub type DummyT<T> = impl F;
+#[define_opaque(DummyT)]
 fn _dummy_t<T>() -> DummyT<T> {}
 
 struct Phantom1<T>(PhantomData<T>);
@@ -42,8 +44,6 @@ impl<T: MyFrom<Phantom2<DummyT<U>>>, U> MyIndex<Phantom1<T>> for Scope<U> {
     }
 }
 
-#[rustc_error]
 fn main() {
-    //~^ ERROR
     let _pos: Phantom1<DummyT<()>> = Scope::new().my_index();
 }

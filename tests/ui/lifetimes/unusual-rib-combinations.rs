@@ -2,9 +2,8 @@ struct S<'a>(&'a u8);
 fn foo() {}
 
 // Paren generic args in AnonConst
-fn a() -> [u8; foo::()] {
-//~^ ERROR parenthesized type parameters may only be used with a `Fn` trait
-//~| ERROR mismatched types
+fn a() -> [u8; foo()] {
+    //~^ ERROR mismatched types
     panic!()
 }
 
@@ -21,7 +20,6 @@ fn c<T = u8()>() {}
 // Elided lifetime in path in ConstGeneric
 fn d<const C: S>() {}
 //~^ ERROR missing lifetime specifier
-//~| ERROR `S<'_>` is forbidden as the type of a const generic parameter
 
 trait Foo<'a> {}
 struct Bar<const N: &'a (dyn for<'a> Foo<'a>)>;

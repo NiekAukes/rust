@@ -1,17 +1,14 @@
 //! Definitions of integer that is known not to equal zero.
 
+use super::{IntErrorKind, ParseIntError};
+use crate::clone::UseCloned;
 use crate::cmp::Ordering;
-use crate::fmt;
 use crate::hash::{Hash, Hasher};
-use crate::intrinsics;
 use crate::marker::{Freeze, StructuralPartialEq};
 use crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Neg, Rem, RemAssign};
 use crate::panic::{RefUnwindSafe, UnwindSafe};
-use crate::ptr;
 use crate::str::FromStr;
-use crate::ub_checks;
-
-use super::{IntErrorKind, ParseIntError};
+use crate::{fmt, intrinsics, ptr, ub_checks};
 
 /// A marker trait for primitive types which can be zero.
 ///
@@ -33,7 +30,6 @@ use super::{IntErrorKind, ParseIntError};
     reason = "implementation detail which may disappear or be replaced at any time",
     issue = "none"
 )]
-#[const_trait]
 pub unsafe trait ZeroablePrimitive: Sized + Copy + private::Sealed {
     #[doc(hidden)]
     type NonZeroInner: Sized + Copy;
@@ -47,21 +43,7 @@ macro_rules! impl_zeroable_primitive {
                 reason = "implementation detail which may disappear or be replaced at any time",
                 issue = "none"
             )]
-            #[const_trait]
             pub trait Sealed {}
-
-            $(
-                #[derive(Debug, Clone, Copy, PartialEq)]
-                #[repr(transparent)]
-                #[rustc_layout_scalar_valid_range_start(1)]
-                #[rustc_nonnull_optimization_guaranteed]
-                #[unstable(
-                    feature = "nonzero_internals",
-                    reason = "implementation detail which may disappear or be replaced at any time",
-                    issue = "none"
-                )]
-                pub struct $NonZeroInner($primitive);
-            )+
         }
 
         $(
@@ -70,15 +52,15 @@ macro_rules! impl_zeroable_primitive {
                 reason = "implementation detail which may disappear or be replaced at any time",
                 issue = "none"
             )]
-            impl const private::Sealed for $primitive {}
+            impl private::Sealed for $primitive {}
 
             #[unstable(
                 feature = "nonzero_internals",
                 reason = "implementation detail which may disappear or be replaced at any time",
                 issue = "none"
             )]
-            unsafe impl const ZeroablePrimitive for $primitive {
-                type NonZeroInner = private::$NonZeroInner;
+            unsafe impl ZeroablePrimitive for $primitive {
+                type NonZeroInner = super::niche_types::$NonZeroInner;
             }
         )+
     };
@@ -97,6 +79,7 @@ impl_zeroable_primitive!(
     NonZeroI64Inner(i64),
     NonZeroI128Inner(i128),
     NonZeroIsizeInner(isize),
+    NonZeroCharInner(char),
 );
 
 /// A value that is known not to equal zero.
@@ -105,10 +88,29 @@ impl_zeroable_primitive!(
 /// For example, `Option<NonZero<u32>>` is the same size as `u32`:
 ///
 /// ```
-/// use core::{mem::size_of, num::NonZero};
+/// use core::{num::NonZero};
 ///
 /// assert_eq!(size_of::<Option<NonZero<u32>>>(), size_of::<u32>());
 /// ```
+///
+/// # Layout
+///
+/// `NonZero<T>` is guaranteed to have the same layout and bit validity as `T`
+/// with the exception that the all-zero bit pattern is invalid.
+/// `Option<NonZero<T>>` is guaranteed to be compatible with `T`, including in
+/// FFI.
+///
+/// Thanks to the [null pointer optimization], `NonZero<T>` and
+/// `Option<NonZero<T>>` are guaranteed to have the same size and alignment:
+///
+/// ```
+/// use std::num::NonZero;
+///
+/// assert_eq!(size_of::<NonZero<u32>>(), size_of::<Option<NonZero<u32>>>());
+/// assert_eq!(align_of::<NonZero<u32>>(), align_of::<Option<NonZero<u32>>>());
+/// ```
+///
+/// [null pointer optimization]: crate::option#representation
 #[stable(feature = "generic_nonzero", since = "1.79.0")]
 #[repr(transparent)]
 #[rustc_nonnull_optimization_guaranteed]
@@ -116,26 +118,40 @@ impl_zeroable_primitive!(
 pub struct NonZero<T: ZeroablePrimitive>(T::NonZeroInner);
 
 macro_rules! impl_nonzero_fmt {
-    ($Trait:ident) => {
-        #[stable(feature = "nonzero", since = "1.28.0")]
-        impl<T> fmt::$Trait for NonZero<T>
-        where
-            T: ZeroablePrimitive + fmt::$Trait,
-        {
-            #[inline]
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.get().fmt(f)
+    ($(#[$Attribute:meta] $Trait:ident)*) => {
+        $(
+            #[$Attribute]
+            impl<T> fmt::$Trait for NonZero<T>
+            where
+                T: ZeroablePrimitive + fmt::$Trait,
+            {
+                #[inline]
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    self.get().fmt(f)
+                }
             }
-        }
+        )*
     };
 }
 
-impl_nonzero_fmt!(Debug);
-impl_nonzero_fmt!(Display);
-impl_nonzero_fmt!(Binary);
-impl_nonzero_fmt!(Octal);
-impl_nonzero_fmt!(LowerHex);
-impl_nonzero_fmt!(UpperHex);
+impl_nonzero_fmt! {
+    #[stable(feature = "nonzero", since = "1.28.0")]
+    Debug
+    #[stable(feature = "nonzero", since = "1.28.0")]
+    Display
+    #[stable(feature = "nonzero", since = "1.28.0")]
+    Binary
+    #[stable(feature = "nonzero", since = "1.28.0")]
+    Octal
+    #[stable(feature = "nonzero", since = "1.28.0")]
+    LowerHex
+    #[stable(feature = "nonzero", since = "1.28.0")]
+    UpperHex
+    #[stable(feature = "nonzero_fmt_exp", since = "1.84.0")]
+    LowerExp
+    #[stable(feature = "nonzero_fmt_exp", since = "1.84.0")]
+    UpperExp
+}
 
 macro_rules! impl_nonzero_auto_trait {
     (unsafe $Trait:ident) => {
@@ -164,9 +180,12 @@ where
 {
     #[inline]
     fn clone(&self) -> Self {
-        Self(self.0)
+        *self
     }
 }
+
+#[unstable(feature = "ergonomic_clones", issue = "132290")]
+impl<T> UseCloned for NonZero<T> where T: ZeroablePrimitive {}
 
 #[stable(feature = "nonzero", since = "1.28.0")]
 impl<T> Copy for NonZero<T> where T: ZeroablePrimitive {}
@@ -361,7 +380,7 @@ where
     }
 
     /// Creates a non-zero without checking whether the value is non-zero.
-    /// This results in undefined behaviour if the value is zero.
+    /// This results in undefined behavior if the value is zero.
     ///
     /// # Safety
     ///
@@ -370,6 +389,7 @@ where
     #[rustc_const_stable(feature = "nonzero", since = "1.28.0")]
     #[must_use]
     #[inline]
+    #[track_caller]
     pub const unsafe fn new_unchecked(n: T) -> Self {
         match Self::new(n) {
             Some(n) => n,
@@ -410,6 +430,7 @@ where
     #[unstable(feature = "nonzero_from_mut", issue = "106290")]
     #[must_use]
     #[inline]
+    #[track_caller]
     pub unsafe fn from_mut_unchecked(n: &mut T) -> &mut Self {
         match Self::from_mut(n) {
             Some(n) => n,
@@ -432,15 +453,21 @@ where
     #[rustc_const_stable(feature = "const_nonzero_get", since = "1.34.0")]
     #[inline]
     pub const fn get(self) -> T {
-        // FIXME: This can be changed to simply `self.0` once LLVM supports `!range` metadata
-        // for function arguments: https://github.com/llvm/llvm-project/issues/76628
-        //
         // Rustc can set range metadata only if it loads `self` from
         // memory somewhere. If the value of `self` was from by-value argument
         // of some not-inlined function, LLVM don't have range metadata
         // to understand that the value cannot be zero.
         //
-        // For now, using the transmute `assume`s the range at runtime.
+        // Using the transmute `assume`s the range at runtime.
+        //
+        // Even once LLVM supports `!range` metadata for function arguments
+        // (see <https://github.com/llvm/llvm-project/issues/76628>), this can't
+        // be `.0` because MCP#807 bans field-projecting into `scalar_valid_range`
+        // types, and it arguably wouldn't want to be anyway because if this is
+        // MIR-inlined, there's no opportunity to put that argument metadata anywhere.
+        //
+        // The good answer here will eventually be pattern types, which will hopefully
+        // allow it to go back to `.0`, maybe with a cast of some sort.
         //
         // SAFETY: `ZeroablePrimitive` guarantees that the size and bit validity
         // of `.0` is such that this transmute is sound.
@@ -453,19 +480,32 @@ macro_rules! nonzero_integer {
         #[$stability:meta]
         Self = $Ty:ident,
         Primitive = $signedness:ident $Int:ident,
-        $(UnsignedNonZero = $UnsignedNonZero:ident,)?
-        UnsignedPrimitive = $UnsignedPrimitive:ty,
+        SignedPrimitive = $Sint:ty,
+        UnsignedPrimitive = $Uint:ty,
 
         // Used in doc comments.
+        rot = $rot:literal,
+        rot_op = $rot_op:literal,
+        rot_result = $rot_result:literal,
+        swap_op = $swap_op:literal,
+        swapped = $swapped:literal,
+        reversed = $reversed:literal,
         leading_zeros_test = $leading_zeros_test:expr,
     ) => {
-        /// An integer that is known not to equal zero.
+        #[doc = sign_dependent_expr!{
+            $signedness ?
+            if signed {
+                concat!("An [`", stringify!($Int), "`] that is known not to equal zero.")
+            }
+            if unsigned {
+                concat!("A [`", stringify!($Int), "`] that is known not to equal zero.")
+            }
+        }]
         ///
         /// This enables some memory layout optimization.
         #[doc = concat!("For example, `Option<", stringify!($Ty), ">` is the same size as `", stringify!($Int), "`:")]
         ///
         /// ```rust
-        /// use std::mem::size_of;
         #[doc = concat!("assert_eq!(size_of::<Option<core::num::", stringify!($Ty), ">>(), size_of::<", stringify!($Int), ">());")]
         /// ```
         ///
@@ -481,7 +521,6 @@ macro_rules! nonzero_integer {
         /// are guaranteed to have the same size and alignment:
         ///
         /// ```
-        /// # use std::mem::{size_of, align_of};
         #[doc = concat!("use std::num::", stringify!($Ty), ";")]
         ///
         #[doc = concat!("assert_eq!(size_of::<", stringify!($Ty), ">(), size_of::<Option<", stringify!($Ty), ">>());")]
@@ -492,7 +531,7 @@ macro_rules! nonzero_integer {
         #[$stability]
         pub type $Ty = NonZero<$Int>;
 
-        impl $Ty {
+        impl NonZero<$Int> {
             /// The size of this non-zero integer type in bits.
             ///
             #[doc = concat!("This value is equal to [`", stringify!($Int), "::BITS`].")]
@@ -500,9 +539,9 @@ macro_rules! nonzero_integer {
             /// # Examples
             ///
             /// ```
-            #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-            ///
-            #[doc = concat!("assert_eq!(", stringify!($Ty), "::BITS, ", stringify!($Int), "::BITS);")]
+            /// # use std::num::NonZero;
+            /// #
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::BITS, ", stringify!($Int), "::BITS);")]
             /// ```
             #[stable(feature = "nonzero_bits", since = "1.67.0")]
             pub const BITS: u32 = <$Int>::BITS;
@@ -513,12 +552,16 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
-            #[doc = concat!("let n = std::num::", stringify!($Ty), "::new(", $leading_zeros_test, ").unwrap();")]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::<", stringify!($Int), ">::new(", $leading_zeros_test, ")?;")]
             ///
             /// assert_eq!(n.leading_zeros(), 0);
+            /// # Some(())
+            /// # }
             /// ```
             #[stable(feature = "nonzero_leading_trailing_zeros", since = "1.53.0")]
             #[rustc_const_stable(feature = "nonzero_leading_trailing_zeros", since = "1.53.0")]
@@ -528,7 +571,7 @@ macro_rules! nonzero_integer {
             pub const fn leading_zeros(self) -> u32 {
                 // SAFETY: since `self` cannot be zero, it is safe to call `ctlz_nonzero`.
                 unsafe {
-                    intrinsics::ctlz_nonzero(self.get() as $UnsignedPrimitive)
+                    intrinsics::ctlz_nonzero(self.get() as $Uint)
                 }
             }
 
@@ -539,12 +582,16 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
-            #[doc = concat!("let n = std::num::", stringify!($Ty), "::new(0b0101000).unwrap();")]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::<", stringify!($Int), ">::new(0b0101000)?;")]
             ///
             /// assert_eq!(n.trailing_zeros(), 3);
+            /// # Some(())
+            /// # }
             /// ```
             #[stable(feature = "nonzero_leading_trailing_zeros", since = "1.53.0")]
             #[rustc_const_stable(feature = "nonzero_leading_trailing_zeros", since = "1.53.0")]
@@ -554,23 +601,79 @@ macro_rules! nonzero_integer {
             pub const fn trailing_zeros(self) -> u32 {
                 // SAFETY: since `self` cannot be zero, it is safe to call `cttz_nonzero`.
                 unsafe {
-                    intrinsics::cttz_nonzero(self.get() as $UnsignedPrimitive)
+                    intrinsics::cttz_nonzero(self.get() as $Uint)
                 }
+            }
+
+            /// Returns `self` with only the most significant bit set.
+            ///
+            /// # Example
+            ///
+            /// ```
+            /// #![feature(isolate_most_least_significant_one)]
+            ///
+            /// # use core::num::NonZero;
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let a = NonZero::<", stringify!($Int), ">::new(0b_01100100)?;")]
+            #[doc = concat!("let b = NonZero::<", stringify!($Int), ">::new(0b_01000000)?;")]
+            ///
+            /// assert_eq!(a.isolate_most_significant_one(), b);
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "isolate_most_least_significant_one", issue = "136909")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn isolate_most_significant_one(self) -> Self {
+                let n = self.get() & (((1 as $Int) << (<$Int>::BITS - 1)).wrapping_shr(self.leading_zeros()));
+
+                // SAFETY:
+                // `self` is non-zero, so masking to preserve only the most
+                // significant set bit will result in a non-zero `n`.
+                unsafe { NonZero::new_unchecked(n) }
+            }
+
+            /// Returns `self` with only the least significant bit set.
+            ///
+            /// # Example
+            ///
+            /// ```
+            /// #![feature(isolate_most_least_significant_one)]
+            ///
+            /// # use core::num::NonZero;
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let a = NonZero::<", stringify!($Int), ">::new(0b_01100100)?;")]
+            #[doc = concat!("let b = NonZero::<", stringify!($Int), ">::new(0b_00000100)?;")]
+            ///
+            /// assert_eq!(a.isolate_least_significant_one(), b);
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "isolate_most_least_significant_one", issue = "136909")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn isolate_least_significant_one(self) -> Self {
+                let n = self.get();
+                let n = n & n.wrapping_neg();
+
+                // SAFETY: `self` is non-zero, so `self` with only its least
+                // significant set bit will remain non-zero.
+                unsafe { NonZero::new_unchecked(n) }
             }
 
             /// Returns the number of ones in the binary representation of `self`.
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
-            /// #![feature(non_zero_count_ones)]
-            ///
+            /// # use std::num::NonZero;
+            /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            /// # use std::num::*;
-            /// #
             #[doc = concat!("let a = NonZero::<", stringify!($Int), ">::new(0b100_0000)?;")]
             #[doc = concat!("let b = NonZero::<", stringify!($Int), ">::new(0b100_0011)?;")]
             ///
@@ -580,8 +683,8 @@ macro_rules! nonzero_integer {
             /// # }
             /// ```
             ///
-            #[unstable(feature = "non_zero_count_ones", issue = "120287")]
-            #[rustc_const_unstable(feature = "non_zero_count_ones", issue = "120287")]
+            #[stable(feature = "non_zero_count_ones", since = "1.86.0")]
+            #[rustc_const_stable(feature = "non_zero_count_ones", since = "1.86.0")]
             #[doc(alias = "popcount")]
             #[doc(alias = "popcnt")]
             #[must_use = "this returns the result of the operation, \
@@ -594,11 +697,258 @@ macro_rules! nonzero_integer {
                 unsafe { NonZero::new_unchecked(self.get().count_ones()) }
             }
 
+            /// Shifts the bits to the left by a specified amount, `n`,
+            /// wrapping the truncated bits to the end of the resulting integer.
+            ///
+            /// Please note this isn't the same operation as the `<<` shifting operator!
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(", $rot_op, stringify!($Int), ")?;")]
+            #[doc = concat!("let m = NonZero::new(", $rot_result, ")?;")]
+            ///
+            #[doc = concat!("assert_eq!(n.rotate_left(", $rot, "), m);")]
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn rotate_left(self, n: u32) -> Self {
+                let result = self.get().rotate_left(n);
+                // SAFETY: Rotating bits preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
+            /// Shifts the bits to the right by a specified amount, `n`,
+            /// wrapping the truncated bits to the beginning of the resulting
+            /// integer.
+            ///
+            /// Please note this isn't the same operation as the `>>` shifting operator!
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(", $rot_result, stringify!($Int), ")?;")]
+            #[doc = concat!("let m = NonZero::new(", $rot_op, ")?;")]
+            ///
+            #[doc = concat!("assert_eq!(n.rotate_right(", $rot, "), m);")]
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn rotate_right(self, n: u32) -> Self {
+                let result = self.get().rotate_right(n);
+                // SAFETY: Rotating bits preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
+            /// Reverses the byte order of the integer.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(", $swap_op, stringify!($Int), ")?;")]
+            /// let m = n.swap_bytes();
+            ///
+            #[doc = concat!("assert_eq!(m, NonZero::new(", $swapped, ")?);")]
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn swap_bytes(self) -> Self {
+                let result = self.get().swap_bytes();
+                // SAFETY: Shuffling bytes preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
+            /// Reverses the order of bits in the integer. The least significant bit becomes the most significant bit,
+            /// second least-significant bit becomes second most-significant bit, etc.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(", $swap_op, stringify!($Int), ")?;")]
+            /// let m = n.reverse_bits();
+            ///
+            #[doc = concat!("assert_eq!(m, NonZero::new(", $reversed, ")?);")]
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn reverse_bits(self) -> Self {
+                let result = self.get().reverse_bits();
+                // SAFETY: Reversing bits preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
+            /// Converts an integer from big endian to the target's endianness.
+            ///
+            /// On big endian this is a no-op. On little endian the bytes are
+            /// swapped.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            #[doc = concat!("use std::num::", stringify!($Ty), ";")]
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(0x1A", stringify!($Int), ")?;")]
+            ///
+            /// if cfg!(target_endian = "big") {
+            #[doc = concat!("    assert_eq!(", stringify!($Ty), "::from_be(n), n)")]
+            /// } else {
+            #[doc = concat!("    assert_eq!(", stringify!($Ty), "::from_be(n), n.swap_bytes())")]
+            /// }
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use]
+            #[inline(always)]
+            pub const fn from_be(x: Self) -> Self {
+                let result = $Int::from_be(x.get());
+                // SAFETY: Shuffling bytes preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
+            /// Converts an integer from little endian to the target's endianness.
+            ///
+            /// On little endian this is a no-op. On big endian the bytes are
+            /// swapped.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            #[doc = concat!("use std::num::", stringify!($Ty), ";")]
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(0x1A", stringify!($Int), ")?;")]
+            ///
+            /// if cfg!(target_endian = "little") {
+            #[doc = concat!("    assert_eq!(", stringify!($Ty), "::from_le(n), n)")]
+            /// } else {
+            #[doc = concat!("    assert_eq!(", stringify!($Ty), "::from_le(n), n.swap_bytes())")]
+            /// }
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use]
+            #[inline(always)]
+            pub const fn from_le(x: Self) -> Self {
+                let result = $Int::from_le(x.get());
+                // SAFETY: Shuffling bytes preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
+            /// Converts `self` to big endian from the target's endianness.
+            ///
+            /// On big endian this is a no-op. On little endian the bytes are
+            /// swapped.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(0x1A", stringify!($Int), ")?;")]
+            ///
+            /// if cfg!(target_endian = "big") {
+            ///     assert_eq!(n.to_be(), n)
+            /// } else {
+            ///     assert_eq!(n.to_be(), n.swap_bytes())
+            /// }
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn to_be(self) -> Self {
+                let result = self.get().to_be();
+                // SAFETY: Shuffling bytes preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
+            /// Converts `self` to little endian from the target's endianness.
+            ///
+            /// On little endian this is a no-op. On big endian the bytes are
+            /// swapped.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(nonzero_bitwise)]
+            /// # use std::num::NonZero;
+            /// #
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("let n = NonZero::new(0x1A", stringify!($Int), ")?;")]
+            ///
+            /// if cfg!(target_endian = "little") {
+            ///     assert_eq!(n.to_le(), n)
+            /// } else {
+            ///     assert_eq!(n.to_le(), n.swap_bytes())
+            /// }
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "nonzero_bitwise", issue = "128281")]
+            #[must_use = "this returns the result of the operation, \
+                        without modifying the original"]
+            #[inline(always)]
+            pub const fn to_le(self) -> Self {
+                let result = self.get().to_le();
+                // SAFETY: Shuffling bytes preserves the property int > 0.
+                unsafe { Self::new_unchecked(result) }
+            }
+
             nonzero_integer_signedness_dependent_methods! {
-                Self = $Ty,
                 Primitive = $signedness $Int,
-                $(UnsignedNonZero = $UnsignedNonZero,)?
-                UnsignedPrimitive = $UnsignedPrimitive,
+                SignedPrimitive = $Sint,
+                UnsignedPrimitive = $Uint,
             }
 
             /// Multiplies two non-zero integers together.
@@ -608,13 +958,13 @@ macro_rules! nonzero_integer {
             /// # Examples
             ///
             /// ```
-            #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+            /// # use std::num::NonZero;
+            /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
-            #[doc = concat!("let four = ", stringify!($Ty), "::new(4)?;")]
-            #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                            stringify!($Int), "::MAX)?;")]
+            #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
+            #[doc = concat!("let four = NonZero::new(4", stringify!($Int), ")?;")]
+            #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
             ///
             /// assert_eq!(Some(four), two.checked_mul(two));
             /// assert_eq!(None, max.checked_mul(two));
@@ -642,18 +992,18 @@ macro_rules! nonzero_integer {
             }
 
             /// Multiplies two non-zero integers together.
-            #[doc = concat!("Return [`", stringify!($Ty), "::MAX`] on overflow.")]
+            #[doc = concat!("Return [`NonZero::<", stringify!($Int), ">::MAX`] on overflow.")]
             ///
             /// # Examples
             ///
             /// ```
-            #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+            /// # use std::num::NonZero;
+            /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
-            #[doc = concat!("let four = ", stringify!($Ty), "::new(4)?;")]
-            #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                            stringify!($Int), "::MAX)?;")]
+            #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
+            #[doc = concat!("let four = NonZero::new(4", stringify!($Int), ")?;")]
+            #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
             ///
             /// assert_eq!(four, two.saturating_mul(two));
             /// assert_eq!(max, four.saturating_mul(max));
@@ -679,9 +1029,9 @@ macro_rules! nonzero_integer {
 
             /// Multiplies two non-zero integers together,
             /// assuming overflow cannot occur.
-            /// Overflow is unchecked, and it is undefined behaviour to overflow
+            /// Overflow is unchecked, and it is undefined behavior to overflow
             /// *even if the result would wrap to a non-zero value*.
-            /// The behaviour is undefined as soon as
+            /// The behavior is undefined as soon as
             #[doc = sign_dependent_expr!{
                 $signedness ?
                 if signed {
@@ -698,11 +1048,12 @@ macro_rules! nonzero_integer {
             /// ```
             /// #![feature(nonzero_ops)]
             ///
-            #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+            /// # use std::num::NonZero;
+            /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
-            #[doc = concat!("let four = ", stringify!($Ty), "::new(4)?;")]
+            #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
+            #[doc = concat!("let four = NonZero::new(4", stringify!($Int), ")?;")]
             ///
             /// assert_eq!(four, unsafe { two.unchecked_mul(two) });
             /// # Some(())
@@ -724,13 +1075,13 @@ macro_rules! nonzero_integer {
             /// # Examples
             ///
             /// ```
-            #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+            /// # use std::num::NonZero;
+            /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            #[doc = concat!("let three = ", stringify!($Ty), "::new(3)?;")]
-            #[doc = concat!("let twenty_seven = ", stringify!($Ty), "::new(27)?;")]
-            #[doc = concat!("let half_max = ", stringify!($Ty), "::new(",
-                            stringify!($Int), "::MAX / 2)?;")]
+            #[doc = concat!("let three = NonZero::new(3", stringify!($Int), ")?;")]
+            #[doc = concat!("let twenty_seven = NonZero::new(27", stringify!($Int), ")?;")]
+            #[doc = concat!("let half_max = NonZero::new(", stringify!($Int), "::MAX / 2)?;")]
             ///
             /// assert_eq!(Some(twenty_seven), three.checked_pow(3));
             /// assert_eq!(None, half_max.checked_pow(3));
@@ -761,24 +1112,24 @@ macro_rules! nonzero_integer {
             #[doc = sign_dependent_expr!{
                 $signedness ?
                 if signed {
-                    concat!("Return [`", stringify!($Ty), "::MIN`] ",
-                                "or [`", stringify!($Ty), "::MAX`] on overflow.")
+                    concat!("Return [`NonZero::<", stringify!($Int), ">::MIN`] ",
+                                "or [`NonZero::<", stringify!($Int), ">::MAX`] on overflow.")
                 }
                 if unsigned {
-                    concat!("Return [`", stringify!($Ty), "::MAX`] on overflow.")
+                    concat!("Return [`NonZero::<", stringify!($Int), ">::MAX`] on overflow.")
                 }
             }]
             ///
             /// # Examples
             ///
             /// ```
-            #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+            /// # use std::num::NonZero;
+            /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            #[doc = concat!("let three = ", stringify!($Ty), "::new(3)?;")]
-            #[doc = concat!("let twenty_seven = ", stringify!($Ty), "::new(27)?;")]
-            #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                            stringify!($Int), "::MAX)?;")]
+            #[doc = concat!("let three = NonZero::new(3", stringify!($Int), ")?;")]
+            #[doc = concat!("let twenty_seven = NonZero::new(27", stringify!($Int), ")?;")]
+            #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
             ///
             /// assert_eq!(twenty_seven, three.saturating_pow(3));
             /// assert_eq!(max, max.saturating_pow(3));
@@ -804,7 +1155,7 @@ macro_rules! nonzero_integer {
         }
 
         #[stable(feature = "nonzero_parse", since = "1.35.0")]
-        impl FromStr for $Ty {
+        impl FromStr for NonZero<$Int> {
             type Err = ParseIntError;
             fn from_str(src: &str) -> Result<Self, Self::Err> {
                 Self::new(<$Int>::from_str_radix(src, 10)?)
@@ -814,25 +1165,60 @@ macro_rules! nonzero_integer {
             }
         }
 
-        nonzero_integer_signedness_dependent_impls!($Ty $signedness $Int);
+        nonzero_integer_signedness_dependent_impls!($signedness $Int);
     };
 
-    (Self = $Ty:ident, Primitive = unsigned $Int:ident $(,)?) => {
+    (
+        Self = $Ty:ident,
+        Primitive = unsigned $Int:ident,
+        SignedPrimitive = $Sint:ident,
+        rot = $rot:literal,
+        rot_op = $rot_op:literal,
+        rot_result = $rot_result:literal,
+        swap_op = $swap_op:literal,
+        swapped = $swapped:literal,
+        reversed = $reversed:literal,
+        $(,)?
+    ) => {
         nonzero_integer! {
             #[stable(feature = "nonzero", since = "1.28.0")]
             Self = $Ty,
             Primitive = unsigned $Int,
+            SignedPrimitive = $Sint,
             UnsignedPrimitive = $Int,
+            rot = $rot,
+            rot_op = $rot_op,
+            rot_result = $rot_result,
+            swap_op = $swap_op,
+            swapped = $swapped,
+            reversed = $reversed,
             leading_zeros_test = concat!(stringify!($Int), "::MAX"),
         }
     };
 
-    (Self = $Ty:ident, Primitive = signed $Int:ident, $($rest:tt)*) => {
+    (
+        Self = $Ty:ident,
+        Primitive = signed $Int:ident,
+        UnsignedPrimitive = $Uint:ident,
+        rot = $rot:literal,
+        rot_op = $rot_op:literal,
+        rot_result = $rot_result:literal,
+        swap_op = $swap_op:literal,
+        swapped = $swapped:literal,
+        reversed = $reversed:literal,
+    ) => {
         nonzero_integer! {
             #[stable(feature = "signed_nonzero", since = "1.34.0")]
             Self = $Ty,
             Primitive = signed $Int,
-            $($rest)*
+            SignedPrimitive = $Int,
+            UnsignedPrimitive = $Uint,
+            rot = $rot,
+            rot_op = $rot_op,
+            rot_result = $rot_result,
+            swap_op = $swap_op,
+            swapped = $swapped,
+            reversed = $reversed,
             leading_zeros_test = concat!("-1", stringify!($Int)),
         }
     };
@@ -840,58 +1226,93 @@ macro_rules! nonzero_integer {
 
 macro_rules! nonzero_integer_signedness_dependent_impls {
     // Impls for unsigned nonzero types only.
-    ($Ty:ident unsigned $Int:ty) => {
+    (unsigned $Int:ty) => {
         #[stable(feature = "nonzero_div", since = "1.51.0")]
-        impl Div<$Ty> for $Int {
+        impl Div<NonZero<$Int>> for $Int {
             type Output = $Int;
 
-            /// This operation rounds towards zero,
-            /// truncating any fractional part of the exact result, and cannot panic.
+            /// Same as `self / other.get()`, but because `other` is a `NonZero<_>`,
+            /// there's never a runtime check for division-by-zero.
+            ///
+            /// This operation rounds towards zero, truncating any fractional
+            /// part of the exact result, and cannot panic.
+            #[doc(alias = "unchecked_div")]
             #[inline]
-            fn div(self, other: $Ty) -> $Int {
-                // SAFETY: div by zero is checked because `other` is a nonzero,
+            fn div(self, other: NonZero<$Int>) -> $Int {
+                // SAFETY: Division by zero is checked because `other` is non-zero,
                 // and MIN/-1 is checked because `self` is an unsigned int.
                 unsafe { intrinsics::unchecked_div(self, other.get()) }
             }
         }
 
         #[stable(feature = "nonzero_div_assign", since = "1.79.0")]
-        impl DivAssign<$Ty> for $Int {
-            /// This operation rounds towards zero,
-            /// truncating any fractional part of the exact result, and cannot panic.
+        impl DivAssign<NonZero<$Int>> for $Int {
+            /// Same as `self /= other.get()`, but because `other` is a `NonZero<_>`,
+            /// there's never a runtime check for division-by-zero.
+            ///
+            /// This operation rounds towards zero, truncating any fractional
+            /// part of the exact result, and cannot panic.
             #[inline]
-            fn div_assign(&mut self, other: $Ty) {
+            fn div_assign(&mut self, other: NonZero<$Int>) {
                 *self = *self / other;
             }
         }
 
         #[stable(feature = "nonzero_div", since = "1.51.0")]
-        impl Rem<$Ty> for $Int {
+        impl Rem<NonZero<$Int>> for $Int {
             type Output = $Int;
 
             /// This operation satisfies `n % d == n - (n / d) * d`, and cannot panic.
             #[inline]
-            fn rem(self, other: $Ty) -> $Int {
-                // SAFETY: rem by zero is checked because `other` is a nonzero,
+            fn rem(self, other: NonZero<$Int>) -> $Int {
+                // SAFETY: Remainder by zero is checked because `other` is non-zero,
                 // and MIN/-1 is checked because `self` is an unsigned int.
                 unsafe { intrinsics::unchecked_rem(self, other.get()) }
             }
         }
 
         #[stable(feature = "nonzero_div_assign", since = "1.79.0")]
-        impl RemAssign<$Ty> for $Int {
+        impl RemAssign<NonZero<$Int>> for $Int {
             /// This operation satisfies `n % d == n - (n / d) * d`, and cannot panic.
             #[inline]
-            fn rem_assign(&mut self, other: $Ty) {
+            fn rem_assign(&mut self, other: NonZero<$Int>) {
                 *self = *self % other;
             }
         }
-    };
 
+        impl NonZero<$Int> {
+            /// Calculates the quotient of `self` and `rhs`, rounding the result towards positive infinity.
+            ///
+            /// The result is guaranteed to be non-zero.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// # #![feature(unsigned_nonzero_div_ceil)]
+            /// # use std::num::NonZero;
+            #[doc = concat!("let one = NonZero::new(1", stringify!($Int), ").unwrap();")]
+            #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX).unwrap();")]
+            /// assert_eq!(one.div_ceil(max), one);
+            ///
+            #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ").unwrap();")]
+            #[doc = concat!("let three = NonZero::new(3", stringify!($Int), ").unwrap();")]
+            /// assert_eq!(three.div_ceil(two), two);
+            /// ```
+            #[unstable(feature = "unsigned_nonzero_div_ceil", issue = "132968")]
+            #[must_use = "this returns the result of the operation, \
+                          without modifying the original"]
+            #[inline]
+            pub const fn div_ceil(self, rhs: Self) -> Self {
+                let v = self.get().div_ceil(rhs.get());
+                // SAFETY: ceiled division of two positive integers can never be zero.
+                unsafe { Self::new_unchecked(v) }
+            }
+        }
+    };
     // Impls for signed nonzero types only.
-    ($Ty:ident signed $Int:ty) => {
+    (signed $Int:ty) => {
         #[stable(feature = "signed_nonzero_neg", since = "1.71.0")]
-        impl Neg for $Ty {
+        impl Neg for NonZero<$Int> {
             type Output = Self;
 
             #[inline]
@@ -901,7 +1322,7 @@ macro_rules! nonzero_integer_signedness_dependent_impls {
             }
         }
 
-        forward_ref_unop! { impl Neg, neg for $Ty,
+        forward_ref_unop! { impl Neg, neg for NonZero<$Int>,
         #[stable(feature = "signed_nonzero_neg", since = "1.71.0")] }
     };
 }
@@ -910,8 +1331,8 @@ macro_rules! nonzero_integer_signedness_dependent_impls {
 macro_rules! nonzero_integer_signedness_dependent_methods {
     // Associated items for unsigned nonzero types only.
     (
-        Self = $Ty:ident,
         Primitive = unsigned $Int:ident,
+        SignedPrimitive = $Sint:ty,
         UnsignedPrimitive = $Uint:ty,
     ) => {
         /// The smallest value that can be represented by this non-zero
@@ -920,8 +1341,9 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::MIN.get(), 1", stringify!($Int), ");")]
+        /// # use std::num::NonZero;
+        /// #
+        #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::MIN.get(), 1", stringify!($Int), ");")]
         /// ```
         #[stable(feature = "nonzero_min_max", since = "1.70.0")]
         pub const MIN: Self = Self::new(1).unwrap();
@@ -933,8 +1355,9 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::MAX.get(), ", stringify!($Int), "::MAX);")]
+        /// # use std::num::NonZero;
+        /// #
+        #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::MAX.get(), ", stringify!($Int), "::MAX);")]
         /// ```
         #[stable(feature = "nonzero_min_max", since = "1.70.0")]
         pub const MAX: Self = Self::new(<$Int>::MAX).unwrap();
@@ -947,13 +1370,13 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let one = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
-        #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MAX)?;")]
+        #[doc = concat!("let one = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
+        #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
         ///
         /// assert_eq!(Some(two), one.checked_add(1));
         /// assert_eq!(None, max.checked_add(1));
@@ -981,18 +1404,18 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         }
 
         /// Adds an unsigned integer to a non-zero value.
-        #[doc = concat!("Return [`", stringify!($Ty), "::MAX`] on overflow.")]
+        #[doc = concat!("Return [`NonZero::<", stringify!($Int), ">::MAX`] on overflow.")]
         ///
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let one = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
-        #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MAX)?;")]
+        #[doc = concat!("let one = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
+        #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
         ///
         /// assert_eq!(two, one.saturating_add(1));
         /// assert_eq!(max, max.saturating_add(1));
@@ -1017,9 +1440,9 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
 
         /// Adds an unsigned integer to a non-zero value,
         /// assuming overflow cannot occur.
-        /// Overflow is unchecked, and it is undefined behaviour to overflow
+        /// Overflow is unchecked, and it is undefined behavior to overflow
         /// *even if the result would wrap to a non-zero value*.
-        /// The behaviour is undefined as soon as
+        /// The behavior is undefined as soon as
         #[doc = concat!("`self + rhs > ", stringify!($Int), "::MAX`.")]
         ///
         /// # Examples
@@ -1027,11 +1450,12 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// ```
         /// #![feature(nonzero_ops)]
         ///
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let one = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
+        #[doc = concat!("let one = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
         ///
         /// assert_eq!(two, unsafe { one.unchecked_add(1) });
         /// # Some(())
@@ -1046,7 +1470,7 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
             unsafe { Self::new_unchecked(self.get().unchecked_add(other)) }
         }
 
-        /// Returns the smallest power of two greater than or equal to n.
+        /// Returns the smallest power of two greater than or equal to `self`.
         /// Checks for overflow and returns [`None`]
         /// if the next power of two is greater than the type’s maximum value.
         /// As a consequence, the result cannot wrap to zero.
@@ -1054,14 +1478,14 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
-        #[doc = concat!("let three = ", stringify!($Ty), "::new(3)?;")]
-        #[doc = concat!("let four = ", stringify!($Ty), "::new(4)?;")]
-        #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MAX)?;")]
+        #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
+        #[doc = concat!("let three = NonZero::new(3", stringify!($Int), ")?;")]
+        #[doc = concat!("let four = NonZero::new(4", stringify!($Int), ")?;")]
+        #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
         ///
         /// assert_eq!(Some(two), two.checked_next_power_of_two() );
         /// assert_eq!(Some(four), three.checked_next_power_of_two() );
@@ -1094,10 +1518,15 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::new(7).unwrap().ilog2(), 2);")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::new(8).unwrap().ilog2(), 3);")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::new(9).unwrap().ilog2(), 3);")]
+        /// # use std::num::NonZero;
+        /// #
+        /// # fn main() { test().unwrap(); }
+        /// # fn test() -> Option<()> {
+        #[doc = concat!("assert_eq!(NonZero::new(7", stringify!($Int), ")?.ilog2(), 2);")]
+        #[doc = concat!("assert_eq!(NonZero::new(8", stringify!($Int), ")?.ilog2(), 3);")]
+        #[doc = concat!("assert_eq!(NonZero::new(9", stringify!($Int), ")?.ilog2(), 3);")]
+        /// # Some(())
+        /// # }
         /// ```
         #[stable(feature = "int_log", since = "1.67.0")]
         #[rustc_const_stable(feature = "int_log", since = "1.67.0")]
@@ -1118,10 +1547,15 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::new(99).unwrap().ilog10(), 1);")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::new(100).unwrap().ilog10(), 2);")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::new(101).unwrap().ilog10(), 2);")]
+        /// # use std::num::NonZero;
+        /// #
+        /// # fn main() { test().unwrap(); }
+        /// # fn test() -> Option<()> {
+        #[doc = concat!("assert_eq!(NonZero::new(99", stringify!($Int), ")?.ilog10(), 1);")]
+        #[doc = concat!("assert_eq!(NonZero::new(100", stringify!($Int), ")?.ilog10(), 2);")]
+        #[doc = concat!("assert_eq!(NonZero::new(101", stringify!($Int), ")?.ilog10(), 2);")]
+        /// # Some(())
+        /// # }
         /// ```
         #[stable(feature = "int_log", since = "1.67.0")]
         #[rustc_const_stable(feature = "int_log", since = "1.67.0")]
@@ -1132,7 +1566,7 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
             super::int_log10::$Int(self.get())
         }
 
-        /// Calculates the middle point of `self` and `rhs`.
+        /// Calculates the midpoint (average) between `self` and `rhs`.
         ///
         /// `midpoint(a, b)` is `(a + b) >> 1` as if it were performed in a
         /// sufficiently-large signed integral type. This implies that the result is
@@ -1141,25 +1575,25 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        /// #![feature(num_midpoint)]
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        ///
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let one = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let two = ", stringify!($Ty), "::new(2)?;")]
-        #[doc = concat!("let four = ", stringify!($Ty), "::new(4)?;")]
+        #[doc = concat!("let one = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ")?;")]
+        #[doc = concat!("let four = NonZero::new(4", stringify!($Int), ")?;")]
         ///
         /// assert_eq!(one.midpoint(four), two);
         /// assert_eq!(four.midpoint(one), two);
         /// # Some(())
         /// # }
         /// ```
-        #[unstable(feature = "num_midpoint", issue = "110840")]
-        #[rustc_const_unstable(feature = "const_num_midpoint", issue = "110840")]
-        #[rustc_allow_const_fn_unstable(const_num_midpoint)]
+        #[stable(feature = "num_midpoint", since = "1.85.0")]
+        #[rustc_const_stable(feature = "num_midpoint", since = "1.85.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
+        #[doc(alias = "average_floor")]
+        #[doc(alias = "average")]
         #[inline]
         pub const fn midpoint(self, rhs: Self) -> Self {
             // SAFETY: The only way to get `0` with midpoint is to have two opposite or
@@ -1176,13 +1610,17 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         ///
         /// # Examples
         ///
-        /// Basic usage:
-        ///
         /// ```
-        #[doc = concat!("let eight = std::num::", stringify!($Ty), "::new(8).unwrap();")]
+        /// # use std::num::NonZero;
+        /// #
+        /// # fn main() { test().unwrap(); }
+        /// # fn test() -> Option<()> {
+        #[doc = concat!("let eight = NonZero::new(8", stringify!($Int), ")?;")]
         /// assert!(eight.is_power_of_two());
-        #[doc = concat!("let ten = std::num::", stringify!($Ty), "::new(10).unwrap();")]
+        #[doc = concat!("let ten = NonZero::new(10", stringify!($Int), ")?;")]
         /// assert!(!ten.is_power_of_two());
+        /// # Some(())
+        /// # }
         /// ```
         #[must_use]
         #[stable(feature = "nonzero_is_power_of_two", since = "1.59.0")]
@@ -1196,13 +1634,65 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
 
             intrinsics::ctpop(self.get()) < 2
         }
+
+        /// Returns the square root of the number, rounded down.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// # use std::num::NonZero;
+        /// #
+        /// # fn main() { test().unwrap(); }
+        /// # fn test() -> Option<()> {
+        #[doc = concat!("let ten = NonZero::new(10", stringify!($Int), ")?;")]
+        #[doc = concat!("let three = NonZero::new(3", stringify!($Int), ")?;")]
+        ///
+        /// assert_eq!(ten.isqrt(), three);
+        /// # Some(())
+        /// # }
+        /// ```
+        #[stable(feature = "isqrt", since = "1.84.0")]
+        #[rustc_const_stable(feature = "isqrt", since = "1.84.0")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        pub const fn isqrt(self) -> Self {
+            let result = self.get().isqrt();
+
+            // SAFETY: Integer square root is a monotonically nondecreasing
+            // function, which means that increasing the input will never cause
+            // the output to decrease. Thus, since the input for nonzero
+            // unsigned integers has a lower bound of 1, the lower bound of the
+            // results will be sqrt(1), which is 1, so a result can't be zero.
+            unsafe { Self::new_unchecked(result) }
+        }
+
+        /// Returns the bit pattern of `self` reinterpreted as a signed integer of the same size.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// # use std::num::NonZero;
+        ///
+        #[doc = concat!("let n = NonZero::<", stringify!($Int), ">::MAX;")]
+        ///
+        #[doc = concat!("assert_eq!(n.cast_signed(), NonZero::new(-1", stringify!($Sint), ").unwrap());")]
+        /// ```
+        #[stable(feature = "integer_sign_cast", since = "1.87.0")]
+        #[rustc_const_stable(feature = "integer_sign_cast", since = "1.87.0")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline(always)]
+        pub const fn cast_signed(self) -> NonZero<$Sint> {
+            // SAFETY: `self.get()` can't be zero
+            unsafe { NonZero::new_unchecked(self.get().cast_signed()) }
+        }
     };
 
     // Associated items for signed nonzero types only.
     (
-        Self = $Ty:ident,
         Primitive = signed $Int:ident,
-        UnsignedNonZero = $Uty:ident,
+        SignedPrimitive = $Sint:ty,
         UnsignedPrimitive = $Uint:ty,
     ) => {
         /// The smallest value that can be represented by this non-zero
@@ -1216,8 +1706,9 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::MIN.get(), ", stringify!($Int), "::MIN);")]
+        /// # use std::num::NonZero;
+        /// #
+        #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::MIN.get(), ", stringify!($Int), "::MIN);")]
         /// ```
         #[stable(feature = "nonzero_min_max", since = "1.70.0")]
         pub const MIN: Self = Self::new(<$Int>::MIN).unwrap();
@@ -1233,24 +1724,26 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Examples
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        #[doc = concat!("assert_eq!(", stringify!($Ty), "::MAX.get(), ", stringify!($Int), "::MAX);")]
+        /// # use std::num::NonZero;
+        /// #
+        #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::MAX.get(), ", stringify!($Int), "::MAX);")]
         /// ```
         #[stable(feature = "nonzero_min_max", since = "1.70.0")]
         pub const MAX: Self = Self::new(<$Int>::MAX).unwrap();
 
         /// Computes the absolute value of self.
         #[doc = concat!("See [`", stringify!($Int), "::abs`]")]
-        /// for documentation on overflow behaviour.
+        /// for documentation on overflow behavior.
         ///
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let neg = ", stringify!($Ty), "::new(-1)?;")]
+        #[doc = concat!("let pos = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg = NonZero::new(-1", stringify!($Int), ")?;")]
         ///
         /// assert_eq!(pos, pos.abs());
         /// assert_eq!(pos, neg.abs());
@@ -1269,19 +1762,19 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
 
         /// Checked absolute value.
         /// Checks for overflow and returns [`None`] if
-        #[doc = concat!("`self == ", stringify!($Ty), "::MIN`.")]
+        #[doc = concat!("`self == NonZero::<", stringify!($Int), ">::MIN`.")]
         /// The result cannot be zero.
         ///
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let neg = ", stringify!($Ty), "::new(-1)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let pos = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg = NonZero::new(-1", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
         ///
         /// assert_eq!(Some(pos), neg.checked_abs());
         /// assert_eq!(None, min.checked_abs());
@@ -1309,13 +1802,13 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let neg = ", stringify!($Ty), "::new(-1)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let pos = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg = NonZero::new(-1", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
         ///
         /// assert_eq!((pos, false), pos.overflowing_abs());
         /// assert_eq!((pos, false), neg.overflowing_abs());
@@ -1343,17 +1836,15 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let neg = ", stringify!($Ty), "::new(-1)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
-        #[doc = concat!("let min_plus = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN + 1)?;")]
-        #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MAX)?;")]
+        #[doc = concat!("let pos = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg = NonZero::new(-1", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let min_plus = NonZero::new(", stringify!($Int), "::MIN + 1)?;")]
+        #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
         ///
         /// assert_eq!(pos, pos.saturating_abs());
         /// assert_eq!(pos, neg.saturating_abs());
@@ -1378,15 +1869,14 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let neg = ", stringify!($Ty), "::new(-1)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
-        #[doc = concat!("# let max = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MAX)?;")]
+        #[doc = concat!("let pos = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg = NonZero::new(-1", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("# let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
         ///
         /// assert_eq!(pos, pos.wrapping_abs());
         /// assert_eq!(pos, neg.wrapping_abs());
@@ -1411,18 +1901,15 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
-        #[doc = concat!("# use std::num::", stringify!($Uty), ";")]
-        ///
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let u_pos = ", stringify!($Uty), "::new(1)?;")]
-        #[doc = concat!("let i_pos = ", stringify!($Ty), "::new(1)?;")]
-        #[doc = concat!("let i_neg = ", stringify!($Ty), "::new(-1)?;")]
-        #[doc = concat!("let i_min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
-        #[doc = concat!("let u_max = ", stringify!($Uty), "::new(",
-                        stringify!($Uint), "::MAX / 2 + 1)?;")]
+        #[doc = concat!("let u_pos = NonZero::new(1", stringify!($Uint), ")?;")]
+        #[doc = concat!("let i_pos = NonZero::new(1", stringify!($Int), ")?;")]
+        #[doc = concat!("let i_neg = NonZero::new(-1", stringify!($Int), ")?;")]
+        #[doc = concat!("let i_min = NonZero::new(", stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let u_max = NonZero::new(", stringify!($Uint), "::MAX / 2 + 1)?;")]
         ///
         /// assert_eq!(u_pos, i_pos.unsigned_abs());
         /// assert_eq!(u_pos, i_neg.unsigned_abs());
@@ -1435,9 +1922,9 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
-        pub const fn unsigned_abs(self) -> $Uty {
+        pub const fn unsigned_abs(self) -> NonZero<$Uint> {
             // SAFETY: absolute value of nonzero cannot yield zero values.
-            unsafe { $Uty::new_unchecked(self.get().unsigned_abs()) }
+            unsafe { NonZero::new_unchecked(self.get().unsigned_abs()) }
         }
 
         /// Returns `true` if `self` is positive and `false` if the
@@ -1446,11 +1933,12 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos_five = ", stringify!($Ty), "::new(5)?;")]
-        #[doc = concat!("let neg_five = ", stringify!($Ty), "::new(-5)?;")]
+        #[doc = concat!("let pos_five = NonZero::new(5", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg_five = NonZero::new(-5", stringify!($Int), ")?;")]
         ///
         /// assert!(pos_five.is_positive());
         /// assert!(!neg_five.is_positive());
@@ -1471,11 +1959,12 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos_five = ", stringify!($Ty), "::new(5)?;")]
-        #[doc = concat!("let neg_five = ", stringify!($Ty), "::new(-5)?;")]
+        #[doc = concat!("let pos_five = NonZero::new(5", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg_five = NonZero::new(-5", stringify!($Int), ")?;")]
         ///
         /// assert!(neg_five.is_negative());
         /// assert!(!pos_five.is_negative());
@@ -1491,18 +1980,18 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         }
 
         /// Checked negation. Computes `-self`,
-        #[doc = concat!("returning `None` if `self == ", stringify!($Ty), "::MIN`.")]
+        #[doc = concat!("returning `None` if `self == NonZero::<", stringify!($Int), ">::MIN`.")]
         ///
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos_five = ", stringify!($Ty), "::new(5)?;")]
-        #[doc = concat!("let neg_five = ", stringify!($Ty), "::new(-5)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let pos_five = NonZero::new(5", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg_five = NonZero::new(-5", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
         ///
         /// assert_eq!(pos_five.checked_neg(), Some(neg_five));
         /// assert_eq!(min.checked_neg(), None);
@@ -1523,18 +2012,18 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// Negates self, overflowing if this is equal to the minimum value.
         ///
         #[doc = concat!("See [`", stringify!($Int), "::overflowing_neg`]")]
-        /// for documentation on overflow behaviour.
+        /// for documentation on overflow behavior.
         ///
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos_five = ", stringify!($Ty), "::new(5)?;")]
-        #[doc = concat!("let neg_five = ", stringify!($Ty), "::new(-5)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let pos_five = NonZero::new(5", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg_five = NonZero::new(-5", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
         ///
         /// assert_eq!(pos_five.overflowing_neg(), (neg_five, false));
         /// assert_eq!(min.overflowing_neg(), (min, true));
@@ -1551,24 +2040,22 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         }
 
         /// Saturating negation. Computes `-self`,
-        #[doc = concat!("returning [`", stringify!($Ty), "::MAX`]")]
-        #[doc = concat!("if `self == ", stringify!($Ty), "::MIN`")]
+        #[doc = concat!("returning [`NonZero::<", stringify!($Int), ">::MAX`]")]
+        #[doc = concat!("if `self == NonZero::<", stringify!($Int), ">::MIN`")]
         /// instead of overflowing.
         ///
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos_five = ", stringify!($Ty), "::new(5)?;")]
-        #[doc = concat!("let neg_five = ", stringify!($Ty), "::new(-5)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
-        #[doc = concat!("let min_plus_one = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN + 1)?;")]
-        #[doc = concat!("let max = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MAX)?;")]
+        #[doc = concat!("let pos_five = NonZero::new(5", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg_five = NonZero::new(-5", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let min_plus_one = NonZero::new(", stringify!($Int), "::MIN + 1)?;")]
+        #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX)?;")]
         ///
         /// assert_eq!(pos_five.saturating_neg(), neg_five);
         /// assert_eq!(min.saturating_neg(), max);
@@ -1590,18 +2077,18 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// of the type.
         ///
         #[doc = concat!("See [`", stringify!($Int), "::wrapping_neg`]")]
-        /// for documentation on overflow behaviour.
+        /// for documentation on overflow behavior.
         ///
         /// # Example
         ///
         /// ```
-        #[doc = concat!("# use std::num::", stringify!($Ty), ";")]
+        /// # use std::num::NonZero;
+        /// #
         /// # fn main() { test().unwrap(); }
         /// # fn test() -> Option<()> {
-        #[doc = concat!("let pos_five = ", stringify!($Ty), "::new(5)?;")]
-        #[doc = concat!("let neg_five = ", stringify!($Ty), "::new(-5)?;")]
-        #[doc = concat!("let min = ", stringify!($Ty), "::new(",
-                        stringify!($Int), "::MIN)?;")]
+        #[doc = concat!("let pos_five = NonZero::new(5", stringify!($Int), ")?;")]
+        #[doc = concat!("let neg_five = NonZero::new(-5", stringify!($Int), ")?;")]
+        #[doc = concat!("let min = NonZero::new(", stringify!($Int), "::MIN)?;")]
         ///
         /// assert_eq!(pos_five.wrapping_neg(), neg_five);
         /// assert_eq!(min.wrapping_neg(), min);
@@ -1616,87 +2103,225 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
             // SAFETY: negation of nonzero cannot yield zero values.
             unsafe { Self::new_unchecked(result) }
         }
-    };
-}
 
-// Use this when the generated code should differ between signed and unsigned types.
-macro_rules! sign_dependent_expr {
-    (signed ? if signed { $signed_case:expr } if unsigned { $unsigned_case:expr } ) => {
-        $signed_case
-    };
-    (unsigned ? if signed { $signed_case:expr } if unsigned { $unsigned_case:expr } ) => {
-        $unsigned_case
+        /// Returns the bit pattern of `self` reinterpreted as an unsigned integer of the same size.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// # use std::num::NonZero;
+        ///
+        #[doc = concat!("let n = NonZero::new(-1", stringify!($Int), ").unwrap();")]
+        ///
+        #[doc = concat!("assert_eq!(n.cast_unsigned(), NonZero::<", stringify!($Uint), ">::MAX);")]
+        /// ```
+        #[stable(feature = "integer_sign_cast", since = "1.87.0")]
+        #[rustc_const_stable(feature = "integer_sign_cast", since = "1.87.0")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline(always)]
+        pub const fn cast_unsigned(self) -> NonZero<$Uint> {
+            // SAFETY: `self.get()` can't be zero
+            unsafe { NonZero::new_unchecked(self.get().cast_unsigned()) }
+        }
+
     };
 }
 
 nonzero_integer! {
     Self = NonZeroU8,
     Primitive = unsigned u8,
+    SignedPrimitive = i8,
+    rot = 2,
+    rot_op = "0x82",
+    rot_result = "0xa",
+    swap_op = "0x12",
+    swapped = "0x12",
+    reversed = "0x48",
 }
 
 nonzero_integer! {
     Self = NonZeroU16,
     Primitive = unsigned u16,
+    SignedPrimitive = i16,
+    rot = 4,
+    rot_op = "0xa003",
+    rot_result = "0x3a",
+    swap_op = "0x1234",
+    swapped = "0x3412",
+    reversed = "0x2c48",
 }
 
 nonzero_integer! {
     Self = NonZeroU32,
     Primitive = unsigned u32,
+    SignedPrimitive = i32,
+    rot = 8,
+    rot_op = "0x10000b3",
+    rot_result = "0xb301",
+    swap_op = "0x12345678",
+    swapped = "0x78563412",
+    reversed = "0x1e6a2c48",
 }
 
 nonzero_integer! {
     Self = NonZeroU64,
     Primitive = unsigned u64,
+    SignedPrimitive = i64,
+    rot = 12,
+    rot_op = "0xaa00000000006e1",
+    rot_result = "0x6e10aa",
+    swap_op = "0x1234567890123456",
+    swapped = "0x5634129078563412",
+    reversed = "0x6a2c48091e6a2c48",
 }
 
 nonzero_integer! {
     Self = NonZeroU128,
     Primitive = unsigned u128,
+    SignedPrimitive = i128,
+    rot = 16,
+    rot_op = "0x13f40000000000000000000000004f76",
+    rot_result = "0x4f7613f4",
+    swap_op = "0x12345678901234567890123456789012",
+    swapped = "0x12907856341290785634129078563412",
+    reversed = "0x48091e6a2c48091e6a2c48091e6a2c48",
 }
 
+#[cfg(target_pointer_width = "16")]
 nonzero_integer! {
     Self = NonZeroUsize,
     Primitive = unsigned usize,
+    SignedPrimitive = isize,
+    rot = 4,
+    rot_op = "0xa003",
+    rot_result = "0x3a",
+    swap_op = "0x1234",
+    swapped = "0x3412",
+    reversed = "0x2c48",
+}
+
+#[cfg(target_pointer_width = "32")]
+nonzero_integer! {
+    Self = NonZeroUsize,
+    Primitive = unsigned usize,
+    SignedPrimitive = isize,
+    rot = 8,
+    rot_op = "0x10000b3",
+    rot_result = "0xb301",
+    swap_op = "0x12345678",
+    swapped = "0x78563412",
+    reversed = "0x1e6a2c48",
+}
+
+#[cfg(target_pointer_width = "64")]
+nonzero_integer! {
+    Self = NonZeroUsize,
+    Primitive = unsigned usize,
+    SignedPrimitive = isize,
+    rot = 12,
+    rot_op = "0xaa00000000006e1",
+    rot_result = "0x6e10aa",
+    swap_op = "0x1234567890123456",
+    swapped = "0x5634129078563412",
+    reversed = "0x6a2c48091e6a2c48",
 }
 
 nonzero_integer! {
     Self = NonZeroI8,
     Primitive = signed i8,
-    UnsignedNonZero = NonZeroU8,
     UnsignedPrimitive = u8,
+    rot = 2,
+    rot_op = "-0x7e",
+    rot_result = "0xa",
+    swap_op = "0x12",
+    swapped = "0x12",
+    reversed = "0x48",
 }
 
 nonzero_integer! {
     Self = NonZeroI16,
     Primitive = signed i16,
-    UnsignedNonZero = NonZeroU16,
     UnsignedPrimitive = u16,
+    rot = 4,
+    rot_op = "-0x5ffd",
+    rot_result = "0x3a",
+    swap_op = "0x1234",
+    swapped = "0x3412",
+    reversed = "0x2c48",
 }
 
 nonzero_integer! {
     Self = NonZeroI32,
     Primitive = signed i32,
-    UnsignedNonZero = NonZeroU32,
     UnsignedPrimitive = u32,
+    rot = 8,
+    rot_op = "0x10000b3",
+    rot_result = "0xb301",
+    swap_op = "0x12345678",
+    swapped = "0x78563412",
+    reversed = "0x1e6a2c48",
 }
 
 nonzero_integer! {
     Self = NonZeroI64,
     Primitive = signed i64,
-    UnsignedNonZero = NonZeroU64,
     UnsignedPrimitive = u64,
+    rot = 12,
+    rot_op = "0xaa00000000006e1",
+    rot_result = "0x6e10aa",
+    swap_op = "0x1234567890123456",
+    swapped = "0x5634129078563412",
+    reversed = "0x6a2c48091e6a2c48",
 }
 
 nonzero_integer! {
     Self = NonZeroI128,
     Primitive = signed i128,
-    UnsignedNonZero = NonZeroU128,
     UnsignedPrimitive = u128,
+    rot = 16,
+    rot_op = "0x13f40000000000000000000000004f76",
+    rot_result = "0x4f7613f4",
+    swap_op = "0x12345678901234567890123456789012",
+    swapped = "0x12907856341290785634129078563412",
+    reversed = "0x48091e6a2c48091e6a2c48091e6a2c48",
 }
 
+#[cfg(target_pointer_width = "16")]
 nonzero_integer! {
     Self = NonZeroIsize,
     Primitive = signed isize,
-    UnsignedNonZero = NonZeroUsize,
     UnsignedPrimitive = usize,
+    rot = 4,
+    rot_op = "-0x5ffd",
+    rot_result = "0x3a",
+    swap_op = "0x1234",
+    swapped = "0x3412",
+    reversed = "0x2c48",
+}
+
+#[cfg(target_pointer_width = "32")]
+nonzero_integer! {
+    Self = NonZeroIsize,
+    Primitive = signed isize,
+    UnsignedPrimitive = usize,
+    rot = 8,
+    rot_op = "0x10000b3",
+    rot_result = "0xb301",
+    swap_op = "0x12345678",
+    swapped = "0x78563412",
+    reversed = "0x1e6a2c48",
+}
+
+#[cfg(target_pointer_width = "64")]
+nonzero_integer! {
+    Self = NonZeroIsize,
+    Primitive = signed isize,
+    UnsignedPrimitive = usize,
+    rot = 12,
+    rot_op = "0xaa00000000006e1",
+    rot_result = "0x6e10aa",
+    swap_op = "0x1234567890123456",
+    swapped = "0x5634129078563412",
+    reversed = "0x6a2c48091e6a2c48",
 }

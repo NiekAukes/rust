@@ -1,9 +1,10 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
 use rustc_errors::Applicability;
 use rustc_hir::{Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::ty;
 use rustc_middle::ty::layout::LayoutOf;
-use rustc_middle::ty::{self, ConstKind};
 use rustc_session::impl_lint_pass;
 use rustc_span::{BytePos, Pos, Span};
 
@@ -32,13 +33,14 @@ declare_clippy_lint! {
 }
 
 pub struct LargeConstArrays {
-    maximum_allowed_size: u128,
+    maximum_allowed_size: u64,
 }
 
 impl LargeConstArrays {
-    #[must_use]
-    pub fn new(maximum_allowed_size: u128) -> Self {
-        Self { maximum_allowed_size }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            maximum_allowed_size: conf.array_size_threshold,
+        }
     }
 }
 
@@ -46,20 +48,20 @@ impl_lint_pass!(LargeConstArrays => [LARGE_CONST_ARRAYS]);
 
 impl<'tcx> LateLintPass<'tcx> for LargeConstArrays {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
-        if !item.span.from_expansion()
-            && let ItemKind::Const(_, generics, _) = &item.kind
+        if let ItemKind::Const(ident, generics, _, _) = &item.kind
             // Since static items may not have generics, skip generic const items.
             // FIXME(generic_const_items): I don't think checking `generics.hwcp` suffices as it
             // doesn't account for empty where-clauses that only consist of keyword `where` IINM.
             && generics.params.is_empty() && !generics.has_where_clause_predicates
+            && !item.span.from_expansion()
             && let ty = cx.tcx.type_of(item.owner_id).instantiate_identity()
             && let ty::Array(element_type, cst) = ty.kind()
-            && let ConstKind::Value(ty::ValTree::Leaf(element_count)) = cst.kind()
-            && let Ok(element_count) = element_count.try_to_target_usize(cx.tcx)
+            && let Some(element_count) = cx.tcx
+                .try_normalize_erasing_regions(cx.typing_env(), *cst).unwrap_or(*cst).try_to_target_usize(cx.tcx)
             && let Ok(element_size) = cx.layout_of(*element_type).map(|l| l.size.bytes())
-            && self.maximum_allowed_size < u128::from(element_count) * u128::from(element_size)
+            && u128::from(self.maximum_allowed_size) < u128::from(element_count) * u128::from(element_size)
         {
-            let hi_pos = item.ident.span.lo() - BytePos::from_usize(1);
+            let hi_pos = ident.span.lo() - BytePos::from_usize(1);
             let sugg_span = Span::new(
                 hi_pos - BytePos::from_usize("const".len()),
                 hi_pos,

@@ -1,9 +1,7 @@
-use crate::{
-    intrinsics,
-    iter::{from_fn, TrustedLen, TrustedRandomAccess},
-    num::NonZeroUsize,
-    ops::{Range, Try},
-};
+use crate::intrinsics;
+use crate::iter::{TrustedLen, TrustedRandomAccess, from_fn};
+use crate::num::NonZero;
+use crate::ops::{Range, Try};
 
 /// An iterator for stepping iterators by a custom amount.
 ///
@@ -42,10 +40,10 @@ impl<I> StepBy<I> {
     /// The `step` that was originally passed to `Iterator::step_by(step)`,
     /// aka `self.step_minus_one + 1`.
     #[inline]
-    fn original_step(&self) -> NonZeroUsize {
+    fn original_step(&self) -> NonZero<usize> {
         // SAFETY: By type invariant, `step_minus_one` cannot be `MAX`, which
         // means the addition cannot overflow and the result cannot be zero.
-        unsafe { NonZeroUsize::new_unchecked(intrinsics::unchecked_add(self.step_minus_one, 1)) }
+        unsafe { NonZero::new_unchecked(intrinsics::unchecked_add(self.step_minus_one, 1)) }
     }
 }
 
@@ -231,12 +229,12 @@ unsafe impl<I: Iterator> StepByImpl<I> for StepBy<I> {
     #[inline]
     default fn spec_size_hint(&self) -> (usize, Option<usize>) {
         #[inline]
-        fn first_size(step: NonZeroUsize) -> impl Fn(usize) -> usize {
+        fn first_size(step: NonZero<usize>) -> impl Fn(usize) -> usize {
             move |n| if n == 0 { 0 } else { 1 + (n - 1) / step }
         }
 
         #[inline]
-        fn other_size(step: NonZeroUsize) -> impl Fn(usize) -> usize {
+        fn other_size(step: NonZero<usize>) -> impl Fn(usize) -> usize {
             move |n| n / step
         }
 
@@ -414,9 +412,9 @@ unsafe impl<I: DoubleEndedIterator + ExactSizeIterator> StepByBackImpl<I> for St
 /// These only work for unsigned types, and will need to be reworked
 /// if you want to use it to specialize on signed types.
 ///
-/// Currently these are only implemented for integers up to usize due to
-/// correctness issues around ExactSizeIterator impls on 16bit platforms.
-/// And since ExactSizeIterator is a prerequisite for backwards iteration
+/// Currently these are only implemented for integers up to `usize` due to
+/// correctness issues around `ExactSizeIterator` impls on 16bit platforms.
+/// And since `ExactSizeIterator` is a prerequisite for backwards iteration
 /// and we must consistently specialize backwards and forwards iteration
 /// that makes the situation complicated enough that it's not covered
 /// for now.

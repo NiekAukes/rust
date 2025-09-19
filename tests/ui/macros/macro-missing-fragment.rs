@@ -1,23 +1,17 @@
-#![warn(missing_fragment_specifier)]
+//! Ensure that macros produce an error if fragment specifiers are missing.
 
 macro_rules! used_arm {
-    ( $( any_token $field_rust_type )* ) => {};
-    //~^ ERROR missing fragment
-    //~| WARN missing fragment
-    //~| WARN this was previously accepted
+    ( $( any_token $field_rust_type )* ) => {}; //~ ERROR missing fragment
+                                                //~| ERROR missing fragment
 }
 
 macro_rules! used_macro_unused_arm {
     () => {};
-    ( $name ) => {};
-    //~^ WARN missing fragment
-    //~| WARN this was previously accepted
+    ( $name ) => {}; //~ ERROR missing fragment
 }
 
 macro_rules! unused_macro {
-    ( $name ) => {};
-    //~^ WARN missing fragment
-    //~| WARN this was previously accepted
+    ( $name ) => {}; //~ ERROR missing fragment
 }
 
 fn main() {

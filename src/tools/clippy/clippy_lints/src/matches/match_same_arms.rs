@@ -1,17 +1,18 @@
-use clippy_utils::diagnostics::span_lint_hir_and_then;
-use clippy_utils::source::snippet;
-use clippy_utils::{is_lint_allowed, path_to_local, search_same, SpanlessEq, SpanlessHash};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::source::SpanRangeExt;
+use clippy_utils::{SpanlessEq, SpanlessHash, fulfill_or_allowed, is_lint_allowed, path_to_local, search_same};
 use core::cmp::Ordering;
 use core::{iter, slice};
+use itertools::Itertools;
 use rustc_arena::DroplessArena;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
 use rustc_hir::def_id::DefId;
-use rustc_hir::{Arm, Expr, ExprKind, HirId, HirIdMap, HirIdMapEntry, HirIdSet, Pat, PatKind, RangeEnd};
+use rustc_hir::{Arm, Expr, HirId, HirIdMap, HirIdMapEntry, HirIdSet, Pat, PatExpr, PatExprKind, PatKind, RangeEnd};
 use rustc_lint::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
-use rustc_lint::LateContext;
+use rustc_lint::{LateContext, LintContext};
 use rustc_middle::ty;
-use rustc_span::{ErrorGuaranteed, Symbol};
+use rustc_span::{ErrorGuaranteed, Span, Symbol};
 
 use super::MATCH_SAME_ARMS;
 
@@ -74,8 +75,8 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, arms: &'tcx [Arm<'_>]) {
                         // check if using the same bindings as before
                         HirIdMapEntry::Occupied(entry) => return *entry.get() == b_id,
                     }
-                // the names technically don't have to match; this makes the lint more conservative
-                && cx.tcx.hir().name(a_id) == cx.tcx.hir().name(b_id)
+                    // the names technically don't have to match; this makes the lint more conservative
+                    && cx.tcx.hir_name(a_id) == cx.tcx.hir_name(b_id)
                     && cx.typeck_results().expr_ty(a) == cx.typeck_results().expr_ty(b)
                     && pat_contains_local(lhs.pat, a_id)
                     && pat_contains_local(rhs.pat, b_id)
@@ -111,54 +112,76 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, arms: &'tcx [Arm<'_>]) {
     };
 
     let indexed_arms: Vec<(usize, &Arm<'_>)> = arms.iter().enumerate().collect();
-    for (&(i, arm1), &(j, arm2)) in search_same(&indexed_arms, hash, eq) {
-        if matches!(arm2.pat.kind, PatKind::Wild) {
-            if !cx.tcx.features().non_exhaustive_omitted_patterns_lint
-                || is_lint_allowed(cx, NON_EXHAUSTIVE_OMITTED_PATTERNS, arm2.hir_id)
-            {
-                span_lint_hir_and_then(
-                    cx,
-                    MATCH_SAME_ARMS,
-                    arm1.hir_id,
-                    arm1.span,
-                    "this match arm has an identical body to the `_` wildcard arm",
-                    |diag| {
-                        diag.span_suggestion(arm1.span, "try removing the arm", "", Applicability::MaybeIncorrect)
-                            .help("or try changing either arm body")
-                            .span_note(arm2.span, "`_` wildcard arm here");
-                    },
-                );
-            }
-        } else {
-            let back_block = backwards_blocking_idxs[j];
-            let (keep_arm, move_arm) = if back_block < i || (back_block == 0 && forwards_blocking_idxs[i] <= j) {
-                (arm1, arm2)
-            } else {
-                (arm2, arm1)
-            };
+    for mut group in search_same(&indexed_arms, hash, eq) {
+        // Filter out (and fulfill) `#[allow]`ed and `#[expect]`ed arms
+        group.retain(|(_, arm)| !fulfill_or_allowed(cx, MATCH_SAME_ARMS, [arm.hir_id]));
 
-            span_lint_hir_and_then(
-                cx,
-                MATCH_SAME_ARMS,
-                keep_arm.hir_id,
-                keep_arm.span,
-                "this match arm has an identical body to another arm",
-                |diag| {
-                    let move_pat_snip = snippet(cx, move_arm.pat.span, "<pat2>");
-                    let keep_pat_snip = snippet(cx, keep_arm.pat.span, "<pat1>");
-
-                    diag.span_suggestion(
-                        keep_arm.pat.span,
-                        "try merging the arm patterns",
-                        format!("{keep_pat_snip} | {move_pat_snip}"),
-                        Applicability::MaybeIncorrect,
-                    )
-                    .help("or try changing either arm body")
-                    .span_note(move_arm.span, "other arm here");
-                },
-            );
+        if group.len() < 2 {
+            continue;
         }
+
+        span_lint_and_then(
+            cx,
+            MATCH_SAME_ARMS,
+            group.iter().map(|(_, arm)| arm.span).collect_vec(),
+            "these match arms have identical bodies",
+            |diag| {
+                diag.help("if this is unintentional make the arms return different values");
+
+                if let [prev @ .., (_, last)] = group.as_slice()
+                    && is_wildcard_arm(last.pat)
+                    && is_lint_allowed(cx, NON_EXHAUSTIVE_OMITTED_PATTERNS, last.hir_id)
+                {
+                    diag.span_label(last.span, "the wildcard arm");
+
+                    let s = if prev.len() > 1 { "s" } else { "" };
+                    diag.multipart_suggestion_verbose(
+                        format!("otherwise remove the non-wildcard arm{s}"),
+                        prev.iter()
+                            .map(|(_, arm)| (adjusted_arm_span(cx, arm.span), String::new()))
+                            .collect(),
+                        Applicability::MaybeIncorrect,
+                    );
+                } else if let &[&(first_idx, _), .., &(last_idx, _)] = group.as_slice() {
+                    let back_block = backwards_blocking_idxs[last_idx];
+                    let split = if back_block < first_idx
+                        || (back_block == 0 && forwards_blocking_idxs[first_idx] <= last_idx)
+                    {
+                        group.split_first()
+                    } else {
+                        group.split_last()
+                    };
+
+                    if let Some(((_, dest), src)) = split
+                        && let Some(pat_snippets) = group
+                            .iter()
+                            .map(|(_, arm)| arm.pat.span.get_source_text(cx))
+                            .collect::<Option<Vec<_>>>()
+                    {
+                        let mut suggs = src
+                            .iter()
+                            .map(|(_, arm)| (adjusted_arm_span(cx, arm.span), String::new()))
+                            .collect_vec();
+
+                        suggs.push((dest.pat.span, pat_snippets.iter().join(" | ")));
+                        diag.multipart_suggestion_verbose(
+                            "otherwise merge the patterns into a single arm",
+                            suggs,
+                            Applicability::MaybeIncorrect,
+                        );
+                    }
+                }
+            },
+        );
     }
+}
+
+/// Extend arm's span to include the comma and whitespaces after it.
+fn adjusted_arm_span(cx: &LateContext<'_>, span: Span) -> Span {
+    let source_map = cx.sess().source_map();
+    source_map
+        .span_extend_while(span, |c| c == ',' || c.is_ascii_whitespace())
+        .unwrap_or(span)
 }
 
 #[derive(Clone, Copy)]
@@ -242,10 +265,13 @@ fn iter_matching_struct_fields<'a>(
 impl<'a> NormalizedPat<'a> {
     fn from_pat(cx: &LateContext<'_>, arena: &'a DroplessArena, pat: &'a Pat<'_>) -> Self {
         match pat.kind {
+            PatKind::Missing => unreachable!(),
             PatKind::Wild | PatKind::Binding(.., None) => Self::Wild,
-            PatKind::Binding(.., Some(pat)) | PatKind::Box(pat) | PatKind::Deref(pat) | PatKind::Ref(pat, _) => {
-                Self::from_pat(cx, arena, pat)
-            },
+            PatKind::Binding(.., Some(pat))
+            | PatKind::Box(pat)
+            | PatKind::Deref(pat)
+            | PatKind::Ref(pat, _)
+            | PatKind::Guard(pat, _) => Self::from_pat(cx, arena, pat),
             PatKind::Never => Self::Never,
             PatKind::Struct(ref path, fields, _) => {
                 let fields =
@@ -279,7 +305,11 @@ impl<'a> NormalizedPat<'a> {
                 Self::Tuple(var_id, pats)
             },
             PatKind::Or(pats) => Self::Or(arena.alloc_from_iter(pats.iter().map(|pat| Self::from_pat(cx, arena, pat)))),
-            PatKind::Path(ref path) => Self::Path(cx.qpath_res(path, pat.hir_id).opt_def_id()),
+            PatKind::Expr(PatExpr {
+                kind: PatExprKind::Path(path),
+                hir_id,
+                ..
+            }) => Self::Path(cx.qpath_res(path, *hir_id).opt_def_id()),
             PatKind::Tuple(pats, wild_idx) => {
                 let field_count = match cx.typeck_results().pat_ty(pat).kind() {
                     ty::Tuple(subs) => subs.len(),
@@ -298,9 +328,9 @@ impl<'a> NormalizedPat<'a> {
                 );
                 Self::Tuple(None, pats)
             },
-            PatKind::Lit(e) => match &e.kind {
+            PatKind::Expr(e) => match &e.kind {
                 // TODO: Handle negative integers. They're currently treated as a wild match.
-                ExprKind::Lit(lit) => match lit.node {
+                PatExprKind::Lit { lit, negated: false } => match lit.node {
                     LitKind::Str(sym, _) => Self::LitStr(sym),
                     LitKind::ByteStr(ref bytes, _) | LitKind::CStr(ref bytes, _) => Self::LitBytes(bytes),
                     LitKind::Byte(val) => Self::LitInt(val.into()),
@@ -317,7 +347,7 @@ impl<'a> NormalizedPat<'a> {
                 let start = match start {
                     None => 0,
                     Some(e) => match &e.kind {
-                        ExprKind::Lit(lit) => match lit.node {
+                        PatExprKind::Lit { lit, negated: false } => match lit.node {
                             LitKind::Int(val, _) => val.get(),
                             LitKind::Char(val) => val.into(),
                             LitKind::Byte(val) => val.into(),
@@ -329,7 +359,7 @@ impl<'a> NormalizedPat<'a> {
                 let (end, bounds) = match end {
                     None => (u128::MAX, RangeEnd::Included),
                     Some(e) => match &e.kind {
-                        ExprKind::Lit(lit) => match lit.node {
+                        PatExprKind::Lit { lit, negated: false } => match lit.node {
                             LitKind::Int(val, _) => (val.get(), bounds),
                             LitKind::Char(val) => (val.into(), bounds),
                             LitKind::Byte(val) => (val.into(), bounds),
@@ -431,4 +461,12 @@ fn bindings_eq(pat: &Pat<'_>, mut ids: HirIdSet) -> bool {
     // FIXME(rust/#120456) - is `swap_remove` correct?
     pat.each_binding_or_first(&mut |_, id, _, _| result &= ids.swap_remove(&id));
     result && ids.is_empty()
+}
+
+fn is_wildcard_arm(pat: &Pat<'_>) -> bool {
+    match pat.kind {
+        PatKind::Wild => true,
+        PatKind::Or([.., last]) => matches!(last.kind, PatKind::Wild),
+        _ => false,
+    }
 }

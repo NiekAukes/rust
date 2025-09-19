@@ -1,13 +1,14 @@
 use std::convert::Infallible;
 use std::ops::ControlFlow;
 
-use clippy_utils::consts::{constant, Constant};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint;
-use clippy_utils::visitors::{for_each_expr, Descend};
-use clippy_utils::{method_chain_args, sext};
+use clippy_utils::visitors::{Descend, for_each_expr_without_closures};
+use clippy_utils::{method_chain_args, sext, sym};
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, Ty};
+use rustc_span::Symbol;
 
 use super::CAST_SIGN_LOSS;
 
@@ -16,24 +17,24 @@ use super::CAST_SIGN_LOSS;
 ///
 /// Methods that can overflow and return a negative value must not be included in this list,
 /// because casting their return values can still result in sign loss.
-const METHODS_RET_POSITIVE: &[&str] = &[
-    "checked_abs",
-    "saturating_abs",
-    "isqrt",
-    "checked_isqrt",
-    "rem_euclid",
-    "checked_rem_euclid",
-    "wrapping_rem_euclid",
+const METHODS_RET_POSITIVE: &[Symbol] = &[
+    sym::checked_abs,
+    sym::saturating_abs,
+    sym::isqrt,
+    sym::checked_isqrt,
+    sym::rem_euclid,
+    sym::checked_rem_euclid,
+    sym::wrapping_rem_euclid,
 ];
 
 /// A list of methods that act like `pow()`. See `pow_call_result_sign()` for details.
 ///
 /// Methods that can overflow and return a negative value must not be included in this list,
 /// because casting their return values can still result in sign loss.
-const METHODS_POW: &[&str] = &["pow", "saturating_pow", "checked_pow"];
+const METHODS_POW: &[Symbol] = &[sym::pow, sym::saturating_pow, sym::checked_pow];
 
 /// A list of methods that act like `unwrap()`, and don't change the sign of the inner value.
-const METHODS_UNWRAP: &[&str] = &["unwrap", "unwrap_unchecked", "expect", "into_ok"];
+const METHODS_UNWRAP: &[Symbol] = &[sym::unwrap, sym::unwrap_unchecked, sym::expect, sym::into_ok];
 
 pub(super) fn check<'cx>(
     cx: &LateContext<'cx>,
@@ -88,7 +89,7 @@ fn get_const_signed_int_eval<'cx>(
 ) -> Option<i128> {
     let ty = ty.into().unwrap_or_else(|| cx.typeck_results().expr_ty(expr));
 
-    if let Constant::Int(n) = constant(cx, cx.typeck_results(), expr)?
+    if let Constant::Int(n) = ConstEvalCtxt::new(cx).eval(expr)?
         && let ty::Int(ity) = *ty.kind()
     {
         return Some(sext(cx.tcx, n, ity));
@@ -103,7 +104,7 @@ fn get_const_unsigned_int_eval<'cx>(
 ) -> Option<u128> {
     let ty = ty.into().unwrap_or_else(|| cx.typeck_results().expr_ty(expr));
 
-    if let Constant::Int(n) = constant(cx, cx.typeck_results(), expr)?
+    if let Constant::Int(n) = ConstEvalCtxt::new(cx).eval(expr)?
         && let ty::Uint(_ity) = *ty.kind()
     {
         return Some(n);
@@ -129,7 +130,7 @@ fn expr_sign<'cx, 'tcx>(cx: &LateContext<'cx>, mut expr: &'tcx Expr<'tcx>, ty: i
 
     // Calling on methods that always return non-negative values.
     if let ExprKind::MethodCall(path, caller, args, ..) = expr.kind {
-        let mut method_name = path.ident.name.as_str();
+        let mut method_name = path.ident.name;
 
         // Peel unwrap(), expect(), etc.
         while let Some(&found_name) = METHODS_UNWRAP.iter().find(|&name| &method_name == name)
@@ -138,15 +139,15 @@ fn expr_sign<'cx, 'tcx>(cx: &LateContext<'cx>, mut expr: &'tcx Expr<'tcx>, ty: i
         {
             // The original type has changed, but we can't use `ty` here anyway, because it has been
             // moved.
-            method_name = inner_path.ident.name.as_str();
+            method_name = inner_path.ident.name;
             expr = recv;
         }
 
-        if METHODS_POW.iter().any(|&name| method_name == name)
+        if METHODS_POW.contains(&method_name)
             && let [arg] = args
         {
             return pow_call_result_sign(cx, caller, arg);
-        } else if METHODS_RET_POSITIVE.iter().any(|&name| method_name == name) {
+        } else if METHODS_RET_POSITIVE.contains(&method_name) {
             return Sign::ZeroOrPositive;
         }
     }
@@ -205,7 +206,7 @@ fn expr_muldiv_sign(cx: &LateContext<'_>, expr: &Expr<'_>) -> Sign {
             // - uncertain if there are any uncertain values (because they could be negative or positive),
             Sign::Uncertain => return Sign::Uncertain,
             Sign::ZeroOrPositive => (),
-        };
+        }
     }
 
     // A mul/div is:
@@ -236,7 +237,7 @@ fn expr_add_sign(cx: &LateContext<'_>, expr: &Expr<'_>) -> Sign {
             // - uncertain if there are any uncertain values (because they could be negative or positive),
             Sign::Uncertain => return Sign::Uncertain,
             Sign::ZeroOrPositive => positive_count += 1,
-        };
+        }
     }
 
     // A sum is:
@@ -255,8 +256,10 @@ fn expr_add_sign(cx: &LateContext<'_>, expr: &Expr<'_>) -> Sign {
 
 /// Peels binary operators such as [`BinOpKind::Mul`], [`BinOpKind::Div`] or [`BinOpKind::Rem`],
 /// where the result depends on:
+///
 /// - the number of negative values in the entire expression, or
 /// - the number of negative values on the left hand side of the expression.
+///
 /// Ignores overflow.
 ///
 ///
@@ -264,7 +267,7 @@ fn expr_add_sign(cx: &LateContext<'_>, expr: &Expr<'_>) -> Sign {
 fn exprs_with_muldiv_binop_peeled<'e>(expr: &'e Expr<'_>) -> Vec<&'e Expr<'e>> {
     let mut res = vec![];
 
-    for_each_expr(expr, |sub_expr| -> ControlFlow<Infallible, Descend> {
+    for_each_expr_without_closures(expr, |sub_expr| -> ControlFlow<Infallible, Descend> {
         // We don't check for mul/div/rem methods here, but we could.
         if let ExprKind::Binary(op, lhs, _rhs) = sub_expr.kind {
             if matches!(op.node, BinOpKind::Mul | BinOpKind::Div) {
@@ -303,15 +306,17 @@ fn exprs_with_muldiv_binop_peeled<'e>(expr: &'e Expr<'_>) -> Vec<&'e Expr<'e>> {
 }
 
 /// Peels binary operators such as [`BinOpKind::Add`], where the result depends on:
+///
 /// - all the expressions being positive, or
 /// - all the expressions being negative.
+///
 /// Ignores overflow.
 ///
 /// Expressions using other operators are preserved, so we can try to evaluate them later.
 fn exprs_with_add_binop_peeled<'e>(expr: &'e Expr<'_>) -> Vec<&'e Expr<'e>> {
     let mut res = vec![];
 
-    for_each_expr(expr, |sub_expr| -> ControlFlow<Infallible, Descend> {
+    for_each_expr_without_closures(expr, |sub_expr| -> ControlFlow<Infallible, Descend> {
         // We don't check for add methods here, but we could.
         if let ExprKind::Binary(op, _lhs, _rhs) = sub_expr.kind {
             if matches!(op.node, BinOpKind::Add) {

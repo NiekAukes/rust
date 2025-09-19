@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 #![allow(missing_docs, nonstandard_style)]
-#![deny(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod abi;
 
@@ -16,26 +16,13 @@ pub mod itron {
     use super::unsupported;
 }
 
-pub mod alloc;
-#[path = "../unsupported/args.rs"]
-pub mod args;
-pub mod env;
 // `error` is `pub(crate)` so that it can be accessed by `itron/error.rs` as
 // `crate::sys::error`
 pub(crate) mod error;
-pub mod fs;
-pub mod io;
-pub mod net;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
-#[path = "../unsupported/process.rs"]
-pub mod process;
-pub mod stdio;
-pub use self::itron::thread;
-pub mod thread_local_dtor;
-pub mod thread_local_key;
-pub use self::itron::thread_parking;
+pub use self::itron::{thread, thread_parking};
 pub mod time;
 
 // SAFETY: must be called only once during runtime initialization.
@@ -55,7 +42,7 @@ pub fn unsupported_err() -> crate::io::Error {
 
 #[inline]
 pub fn is_interrupted(code: i32) -> bool {
-    net::is_interrupted(code)
+    crate::sys::net::is_interrupted(code)
 }
 
 pub fn decode_error_kind(code: i32) -> crate::io::ErrorKind {
@@ -65,14 +52,4 @@ pub fn decode_error_kind(code: i32) -> crate::io::ErrorKind {
 #[inline]
 pub fn abort_internal() -> ! {
     unsafe { libc::abort() }
-}
-
-pub fn hashmap_random_keys() -> (u64, u64) {
-    unsafe {
-        let mut out = crate::mem::MaybeUninit::<[u64; 2]>::uninit();
-        let result = abi::SOLID_RNG_SampleRandomBytes(out.as_mut_ptr() as *mut u8, 16);
-        assert_eq!(result, 0, "SOLID_RNG_SampleRandomBytes failed: {result}");
-        let [x1, x2] = out.assume_init();
-        (x1, x2)
-    }
 }

@@ -1,16 +1,12 @@
 use super::Builder;
 use crate::any::Any;
-use crate::mem;
 use crate::panic::panic_any;
 use crate::result;
-use crate::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::{channel, Sender},
-    Arc, Barrier,
-};
+use crate::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::mpsc::{Sender, channel};
+use crate::sync::{Arc, Barrier};
 use crate::thread::{self, Scope, ThreadId};
-use crate::time::Duration;
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 
 // !!! These tests are dangerous. If something is buggy, they will hang, !!!
 // !!! instead of exiting cleanly. This might wedge the buildbots.       !!!
@@ -112,6 +108,7 @@ fn test_is_finished() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_join_panic() {
     match thread::spawn(move || panic!()).join() {
         result::Result::Err(_) => (),
@@ -214,6 +211,7 @@ fn test_simple_newsched_spawn() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_try_panic_message_string_literal() {
     match thread::spawn(move || {
         panic!("static string");
@@ -230,6 +228,7 @@ fn test_try_panic_message_string_literal() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_try_panic_any_message_owned_str() {
     match thread::spawn(move || {
         panic_any("owned string".to_string());
@@ -246,6 +245,7 @@ fn test_try_panic_any_message_owned_str() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_try_panic_any_message_any() {
     match thread::spawn(move || {
         panic_any(Box::new(413u16) as Box<dyn Any + Send>);
@@ -264,6 +264,7 @@ fn test_try_panic_any_message_any() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_try_panic_any_message_unit_struct() {
     struct Juju;
 
@@ -331,7 +332,7 @@ fn sleep_ms_smoke() {
 
 #[test]
 fn test_size_of_option_thread_id() {
-    assert_eq!(mem::size_of::<Option<ThreadId>>(), mem::size_of::<ThreadId>());
+    assert_eq!(size_of::<Option<ThreadId>>(), size_of::<ThreadId>());
 }
 
 #[test]

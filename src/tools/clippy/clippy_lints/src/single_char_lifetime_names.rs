@@ -1,7 +1,6 @@
-use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::diagnostics::span_lint_and_then;
 use rustc_ast::ast::{GenericParam, GenericParamKind};
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
@@ -9,11 +8,10 @@ declare_clippy_lint! {
     /// Checks for lifetimes with names which are one character
     /// long.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// A single character is likely not enough to express the
     /// purpose of a lifetime. Using a longer name can make code
-    /// easier to understand, especially for those who are new to
-    /// Rust.
+    /// easier to understand.
     ///
     /// ### Known problems
     /// Rust programmers and learning resources tend to use single
@@ -43,21 +41,24 @@ declare_lint_pass!(SingleCharLifetimeNames => [SINGLE_CHAR_LIFETIME_NAMES]);
 
 impl EarlyLintPass for SingleCharLifetimeNames {
     fn check_generic_param(&mut self, ctx: &EarlyContext<'_>, param: &GenericParam) {
-        if in_external_macro(ctx.sess(), param.ident.span) {
+        if param.ident.span.in_external_macro(ctx.sess().source_map()) {
             return;
         }
 
-        if let GenericParamKind::Lifetime = param.kind {
-            if !param.is_placeholder && param.ident.as_str().len() <= 2 {
-                span_lint_and_help(
-                    ctx,
-                    SINGLE_CHAR_LIFETIME_NAMES,
-                    param.ident.span,
-                    "single-character lifetime names are likely uninformative",
-                    None,
-                    "use a more informative name",
-                );
-            }
+        if let GenericParamKind::Lifetime = param.kind
+            && !param.is_placeholder
+            && param.ident.as_str().len() <= 2
+        {
+            #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+            span_lint_and_then(
+                ctx,
+                SINGLE_CHAR_LIFETIME_NAMES,
+                param.ident.span,
+                "single-character lifetime names are likely uninformative",
+                |diag| {
+                    diag.help("use a more informative name");
+                },
+            );
         }
     }
 }

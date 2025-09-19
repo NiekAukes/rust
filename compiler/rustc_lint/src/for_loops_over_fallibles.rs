@@ -1,18 +1,17 @@
-use crate::{
-    lints::{
-        ForLoopsOverFalliblesDiag, ForLoopsOverFalliblesLoopSub, ForLoopsOverFalliblesQuestionMark,
-        ForLoopsOverFalliblesSuggestion,
-    },
-    LateContext, LateLintPass, LintContext,
-};
-
 use hir::{Expr, Pat};
-use rustc_hir as hir;
-use rustc_infer::{infer::TyCtxtInferExt, traits::ObligationCause};
-use rustc_middle::ty::{self, List};
+use rustc_hir::{self as hir, LangItem};
+use rustc_infer::infer::TyCtxtInferExt;
+use rustc_infer::traits::ObligationCause;
+use rustc_middle::ty;
 use rustc_session::{declare_lint, declare_lint_pass};
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 use rustc_trait_selection::traits::ObligationCtxt;
+
+use crate::lints::{
+    ForLoopsOverFalliblesDiag, ForLoopsOverFalliblesLoopSub, ForLoopsOverFalliblesQuestionMark,
+    ForLoopsOverFalliblesSuggestion,
+};
+use crate::{LateContext, LateLintPass, LintContext};
 
 declare_lint! {
     /// The `for_loops_over_fallibles` lint checks for `for` loops over `Option` or `Result` values.
@@ -50,42 +49,59 @@ impl<'tcx> LateLintPass<'tcx> for ForLoopsOverFallibles {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         let Some((pat, arg)) = extract_for_loop(expr) else { return };
 
+        let arg_span = arg.span.source_callsite();
+
         let ty = cx.typeck_results().expr_ty(arg);
 
-        let &ty::Adt(adt, args) = ty.kind() else { return };
+        let (adt, args, ref_mutability) = match ty.kind() {
+            &ty::Adt(adt, args) => (adt, args, None),
+            &ty::Ref(_, ty, mutability) => match ty.kind() {
+                &ty::Adt(adt, args) => (adt, args, Some(mutability)),
+                _ => return,
+            },
+            _ => return,
+        };
 
         let (article, ty, var) = match adt.did() {
+            did if cx.tcx.is_diagnostic_item(sym::Option, did) && ref_mutability.is_some() => {
+                ("a", "Option", "Some")
+            }
             did if cx.tcx.is_diagnostic_item(sym::Option, did) => ("an", "Option", "Some"),
             did if cx.tcx.is_diagnostic_item(sym::Result, did) => ("a", "Result", "Ok"),
             _ => return,
+        };
+
+        let ref_prefix = match ref_mutability {
+            None => "",
+            Some(ref_mutability) => ref_mutability.ref_prefix_str(),
         };
 
         let sub = if let Some(recv) = extract_iterator_next_call(cx, arg)
             && let Ok(recv_snip) = cx.sess().source_map().span_to_snippet(recv.span)
         {
             ForLoopsOverFalliblesLoopSub::RemoveNext {
-                suggestion: recv.span.between(arg.span.shrink_to_hi()),
+                suggestion: recv.span.between(arg_span.shrink_to_hi()),
                 recv_snip,
             }
         } else {
             ForLoopsOverFalliblesLoopSub::UseWhileLet {
                 start_span: expr.span.with_hi(pat.span.lo()),
-                end_span: pat.span.between(arg.span),
+                end_span: pat.span.between(arg_span),
                 var,
             }
         };
         let question_mark = suggest_question_mark(cx, adt, args, expr.span)
-            .then(|| ForLoopsOverFalliblesQuestionMark { suggestion: arg.span.shrink_to_hi() });
+            .then(|| ForLoopsOverFalliblesQuestionMark { suggestion: arg_span.shrink_to_hi() });
         let suggestion = ForLoopsOverFalliblesSuggestion {
             var,
             start_span: expr.span.with_hi(pat.span.lo()),
-            end_span: pat.span.between(arg.span),
+            end_span: pat.span.between(arg_span),
         };
 
         cx.emit_span_lint(
             FOR_LOOPS_OVER_FALLIBLES,
-            arg.span,
-            ForLoopsOverFalliblesDiag { article, ty, sub, question_mark, suggestion },
+            arg_span,
+            ForLoopsOverFalliblesDiag { article, ref_prefix, ty, sub, question_mark, suggestion },
         );
     }
 }
@@ -112,18 +128,21 @@ fn extract_iterator_next_call<'tcx>(
 ) -> Option<&'tcx Expr<'tcx>> {
     // This won't work for `Iterator::next(iter)`, is this an issue?
     if let hir::ExprKind::MethodCall(_, recv, _, _) = expr.kind
-        && cx.typeck_results().type_dependent_def_id(expr.hir_id) == cx.tcx.lang_items().next_fn()
+        && cx
+            .typeck_results()
+            .type_dependent_def_id(expr.hir_id)
+            .is_some_and(|def_id| cx.tcx.is_lang_item(def_id, LangItem::IteratorNext))
     {
         Some(recv)
     } else {
-        return None;
+        None
     }
 }
 
 fn suggest_question_mark<'tcx>(
     cx: &LateContext<'tcx>,
     adt: ty::AdtDef<'tcx>,
-    args: &List<ty::GenericArg<'tcx>>,
+    args: ty::GenericArgsRef<'tcx>,
     span: Span,
 ) -> bool {
     let Some(body_id) = cx.enclosing_body else { return false };
@@ -138,7 +157,7 @@ fn suggest_question_mark<'tcx>(
     // Check that the function/closure/constant we are in has a `Result` type.
     // Otherwise suggesting using `?` may not be a good idea.
     {
-        let ty = cx.typeck_results().expr_ty(cx.tcx.hir().body(body_id).value);
+        let ty = cx.typeck_results().expr_ty(cx.tcx.hir_body(body_id).value);
         let ty::Adt(ret_adt, ..) = ty.kind() else { return false };
         if !cx.tcx.is_diagnostic_item(sym::Result, ret_adt.did()) {
             return false;
@@ -146,19 +165,16 @@ fn suggest_question_mark<'tcx>(
     }
 
     let ty = args.type_at(0);
-    let infcx = cx.tcx.infer_ctxt().build();
+    let (infcx, param_env) = cx.tcx.infer_ctxt().build_with_typing_env(cx.typing_env());
     let ocx = ObligationCtxt::new(&infcx);
 
-    let body_def_id = cx.tcx.hir().body_owner_def_id(body_id);
-    let cause = ObligationCause::new(
-        span,
-        body_def_id,
-        rustc_infer::traits::ObligationCauseCode::MiscObligation,
-    );
+    let body_def_id = cx.tcx.hir_body_owner_def_id(body_id);
+    let cause =
+        ObligationCause::new(span, body_def_id, rustc_infer::traits::ObligationCauseCode::Misc);
 
     ocx.register_bound(
         cause,
-        cx.param_env,
+        param_env,
         // Erase any region vids from the type, which may not be resolved
         infcx.tcx.erase_regions(ty),
         into_iterator_did,

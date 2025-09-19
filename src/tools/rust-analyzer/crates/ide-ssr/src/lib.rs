@@ -3,8 +3,6 @@
 //! Allows searching the AST for code that matches one or more patterns and then replacing that code
 //! based on a template.
 
-#![warn(rust_2018_idioms, unused_lifetimes)]
-
 // Feature: Structural Search and Replace
 //
 // Search and replace with named wildcards that will match any expression, type, path, pattern or item.
@@ -35,12 +33,10 @@
 //
 // Supported constraints:
 //
-// |===
-// | Constraint    | Restricts placeholder
-//
-// | kind(literal) | Is a literal (e.g. `42` or `"forty two"`)
-// | not(a)        | Negates the constraint `a`
-// |===
+// | Constraint    | Restricts placeholder |
+// |---------------|------------------------|
+// | kind(literal) | Is a literal (e.g. `42` or `"forty two"`) |
+// | not(a)        | Negates the constraint `a` |
 //
 // Available via the command `rust-analyzer.ssr`.
 //
@@ -54,11 +50,9 @@
 // String::from((y + 5).foo(z))
 // ```
 //
-// |===
-// | Editor  | Action Name
-//
-// | VS Code | **rust-analyzer: Structural Search Replace**
-// |===
+// | Editor  | Action Name |
+// |---------|--------------|
+// | VS Code | **rust-analyzer: Structural Search Replace** |
 //
 // Also available as an assist, by writing a comment containing the structural
 // search and replace rule. You will only see the assist if the comment can
@@ -85,12 +79,12 @@ mod tests;
 pub use crate::{errors::SsrError, from_comment::ssr_from_comment, matching::Match};
 
 use crate::{errors::bail, matching::MatchFailureReason};
-use hir::Semantics;
-use ide_db::base_db::{FileId, FilePosition, FileRange};
-use nohash_hasher::IntMap;
+use hir::{FileRange, Semantics};
+use ide_db::symbol_index::SymbolsDatabase;
+use ide_db::text_edit::TextEdit;
+use ide_db::{EditionedFileId, FileId, FxHashMap, RootDatabase, base_db::SourceDatabase};
 use resolving::ResolvedRule;
-use syntax::{ast, AstNode, SyntaxNode, TextRange};
-use text_edit::TextEdit;
+use syntax::{AstNode, SyntaxNode, TextRange, ast};
 
 // A structured search replace rule. Create by calling `parse` on a str.
 #[derive(Debug)]
@@ -118,34 +112,41 @@ pub struct MatchFinder<'db> {
     sema: Semantics<'db, ide_db::RootDatabase>,
     rules: Vec<ResolvedRule>,
     resolution_scope: resolving::ResolutionScope<'db>,
-    restrict_ranges: Vec<FileRange>,
+    restrict_ranges: Vec<ide_db::FileRange>,
 }
 
 impl<'db> MatchFinder<'db> {
     /// Constructs a new instance where names will be looked up as if they appeared at
     /// `lookup_context`.
     pub fn in_context(
-        db: &'db ide_db::RootDatabase,
-        lookup_context: FilePosition,
-        mut restrict_ranges: Vec<FileRange>,
+        db: &'db RootDatabase,
+        lookup_context: ide_db::FilePosition,
+        mut restrict_ranges: Vec<ide_db::FileRange>,
     ) -> Result<MatchFinder<'db>, SsrError> {
         restrict_ranges.retain(|range| !range.range.is_empty());
         let sema = Semantics::new(db);
-        let resolution_scope = resolving::ResolutionScope::new(&sema, lookup_context)
-            .ok_or_else(|| SsrError("no resolution scope for file".into()))?;
+        let file_id = sema
+            .attach_first_edition(lookup_context.file_id)
+            .unwrap_or_else(|| EditionedFileId::current_edition(db, lookup_context.file_id));
+        let resolution_scope = resolving::ResolutionScope::new(
+            &sema,
+            hir::FilePosition { file_id, offset: lookup_context.offset },
+        )
+        .ok_or_else(|| SsrError("no resolution scope for file".into()))?;
         Ok(MatchFinder { sema, rules: Vec::new(), resolution_scope, restrict_ranges })
     }
 
     /// Constructs an instance using the start of the first file in `db` as the lookup context.
     pub fn at_first_file(db: &'db ide_db::RootDatabase) -> Result<MatchFinder<'db>, SsrError> {
-        use ide_db::base_db::SourceDatabaseExt;
-        use ide_db::symbol_index::SymbolsDatabase;
-        if let Some(first_file_id) =
-            db.local_roots().iter().next().and_then(|root| db.source_root(*root).iter().next())
+        if let Some(first_file_id) = db
+            .local_roots()
+            .iter()
+            .next()
+            .and_then(|root| db.source_root(*root).source_root(db).iter().next())
         {
             MatchFinder::in_context(
                 db,
-                FilePosition { file_id: first_file_id, offset: 0.into() },
+                ide_db::FilePosition { file_id: first_file_id, offset: 0.into() },
                 vec![],
             )
         } else {
@@ -168,12 +169,11 @@ impl<'db> MatchFinder<'db> {
     }
 
     /// Finds matches for all added rules and returns edits for all found matches.
-    pub fn edits(&self) -> IntMap<FileId, TextEdit> {
-        use ide_db::base_db::SourceDatabaseExt;
-        let mut matches_by_file = IntMap::default();
+    pub fn edits(&self) -> FxHashMap<FileId, TextEdit> {
+        let mut matches_by_file = FxHashMap::default();
         for m in self.matches().matches {
             matches_by_file
-                .entry(m.range.file_id)
+                .entry(m.range.file_id.file_id(self.sema.db))
                 .or_insert_with(SsrMatches::default)
                 .matches
                 .push(m);
@@ -186,7 +186,7 @@ impl<'db> MatchFinder<'db> {
                     replacing::matches_to_edit(
                         self.sema.db,
                         &matches,
-                        &self.sema.db.file_text(file_id),
+                        &self.sema.db.file_text(file_id).text(self.sema.db),
                         &self.rules,
                     ),
                 )
@@ -220,11 +220,14 @@ impl<'db> MatchFinder<'db> {
     /// Finds all nodes in `file_id` whose text is exactly equal to `snippet` and attempts to match
     /// them, while recording reasons why they don't match. This API is useful for command
     /// line-based debugging where providing a range is difficult.
-    pub fn debug_where_text_equal(&self, file_id: FileId, snippet: &str) -> Vec<MatchDebugInfo> {
-        use ide_db::base_db::SourceDatabaseExt;
+    pub fn debug_where_text_equal(
+        &self,
+        file_id: EditionedFileId,
+        snippet: &str,
+    ) -> Vec<MatchDebugInfo> {
         let file = self.sema.parse(file_id);
         let mut res = Vec::new();
-        let file_text = self.sema.db.file_text(file_id);
+        let file_text = self.sema.db.file_text(file_id.file_id(self.sema.db)).text(self.sema.db);
         let mut remaining_text = &*file_text;
         let mut base = 0;
         let len = snippet.len() as u32;
@@ -281,10 +284,10 @@ impl<'db> MatchFinder<'db> {
                     });
                 }
             } else if let Some(macro_call) = ast::MacroCall::cast(node.clone()) {
-                if let Some(expanded) = self.sema.expand(&macro_call) {
+                if let Some(expanded) = self.sema.expand_macro_call(&macro_call) {
                     if let Some(tt) = macro_call.token_tree() {
                         self.output_debug_for_nodes_at_range(
-                            &expanded,
+                            &expanded.value,
                             range,
                             &Some(self.sema.original_range(tt.syntax())),
                             out,
@@ -351,7 +354,7 @@ impl std::error::Error for SsrError {}
 
 #[cfg(test)]
 impl MatchDebugInfo {
-    pub(crate) fn match_failure_reason(&self) -> Option<&str> {
+    pub fn match_failure_reason(&self) -> Option<&str> {
         self.matched.as_ref().err().map(|r| r.reason.as_str())
     }
 }

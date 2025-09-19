@@ -2,8 +2,6 @@
 //@ revisions: success failure
 //@[success] check-pass
 
-#![feature(lint_reasons)]
-
 use std::future::Future;
 
 pub trait Captures<'a> {}
@@ -77,7 +75,7 @@ impl AsyncTrait for Struct {
         buff: &'b [u8],
         t: T,
     ) -> impl Future<Output = Vec<u8>> {
-        //[failure]~^ ERROR lifetime mismatch
+        //[failure]~^ ERROR the type `impl Future<Output = Vec<u8>>` does not fulfill the required lifetime
         async move {
             let _t = t;
             vec![]

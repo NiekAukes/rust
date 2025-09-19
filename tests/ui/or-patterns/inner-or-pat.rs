@@ -1,7 +1,5 @@
-//@ revisions: or1 or2 or3 or4 or5
+//@ revisions: or1 or3 or4
 //@ [or1] run-pass
-//@ [or2] run-pass
-//@ [or5] run-pass
 
 #![allow(unreachable_patterns)]
 #![allow(unused_variables)]
@@ -51,7 +49,7 @@ fn hey() {
     match x {
         x @ ("foo" | "bar") |
         (x @ "red" | (x @ "blue" |  "red")) => {
-        //[or4]~^ variable `x` is not bound in all patterns
+        //[or4]~^ ERROR variable `x` is not bound in all patterns
         }
         _ => (),
     }

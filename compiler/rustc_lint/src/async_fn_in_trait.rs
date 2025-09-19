@@ -1,9 +1,9 @@
-use crate::lints::AsyncFnInTraitDiag;
-use crate::LateContext;
-use crate::LateLintPass;
 use rustc_hir as hir;
 use rustc_session::{declare_lint, declare_lint_pass};
-use rustc_trait_selection::traits::error_reporting::suggestions::suggest_desugaring_async_fn_to_impl_future_in_trait;
+use rustc_trait_selection::error_reporting::traits::suggestions::suggest_desugaring_async_fn_to_impl_future_in_trait;
+
+use crate::lints::AsyncFnInTraitDiag;
+use crate::{LateContext, LateLintPass};
 
 declare_lint! {
     /// The `async_fn_in_trait` lint detects use of `async fn` in the
@@ -95,7 +95,7 @@ impl<'tcx> LateLintPass<'tcx> for AsyncFnInTrait {
             && let hir::IsAsync::Async(async_span) = sig.header.asyncness
         {
             // RTN can be used to bound `async fn` in traits in a better way than "always"
-            if cx.tcx.features().return_type_notation {
+            if cx.tcx.features().return_type_notation() {
                 return;
             }
 
@@ -104,8 +104,9 @@ impl<'tcx> LateLintPass<'tcx> for AsyncFnInTrait {
                 return;
             }
 
-            let hir::FnRetTy::Return(hir::Ty { kind: hir::TyKind::OpaqueDef(def, ..), .. }) =
-                sig.decl.output
+            let hir::FnRetTy::Return(hir::Ty {
+                kind: hir::TyKind::OpaqueDef(opaq_def, ..), ..
+            }) = sig.decl.output
             else {
                 // This should never happen, but let's not ICE.
                 return;
@@ -114,7 +115,7 @@ impl<'tcx> LateLintPass<'tcx> for AsyncFnInTrait {
                 cx.tcx,
                 sig,
                 body,
-                def.owner_id.def_id,
+                opaq_def.def_id,
                 " + Send",
             );
             cx.tcx.emit_node_span_lint(

@@ -9,8 +9,9 @@ LL | impl Foo for A<N> {}
    |
 help: a struct with a similar name exists
    |
-LL | impl Foo for A<A> {}
-   |                ~
+LL - impl Foo for A<N> {}
+LL + impl Foo for A<A> {}
+   |
 help: you might be missing a type parameter
    |
 LL | impl<N> Foo for A<N> {}
@@ -27,8 +28,9 @@ LL | impl<const N: u8> Foo for C<N, T> {}
    |
 help: a struct with a similar name exists
    |
-LL | impl<const N: u8> Foo for C<N, A> {}
-   |                                ~
+LL - impl<const N: u8> Foo for C<N, T> {}
+LL + impl<const N: u8> Foo for C<N, A> {}
+   |
 help: you might be missing a type parameter
    |
 LL | impl<const N: u8, T> Foo for C<N, T> {}
@@ -49,9 +51,13 @@ error[E0747]: type provided when a constant was expected
   --> $DIR/invalid-const-arguments.rs:10:19
    |
 LL | impl<N> Foo for B<N> {}
-   |      -            ^
-   |      |
-   |      help: consider changing this type parameter to a const parameter: `const N: u8`
+   |                   ^
+   |
+help: consider changing this type parameter to a const parameter
+   |
+LL - impl<N> Foo for B<N> {}
+LL + impl<const N: u8> Foo for B<N> {}
+   |
 
 error[E0747]: unresolved item provided when a constant was expected
   --> $DIR/invalid-const-arguments.rs:14:32

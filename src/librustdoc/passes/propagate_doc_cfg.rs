@@ -1,5 +1,8 @@
 //! Propagates [`#[doc(cfg(...))]`](https://github.com/rust-lang/rust/issues/43781) to child items.
+
 use std::sync::Arc;
+
+use rustc_hir::def_id::LocalDefId;
 
 use crate::clean::cfg::Cfg;
 use crate::clean::inline::{load_attrs, merge_attrs};
@@ -8,11 +11,9 @@ use crate::core::DocContext;
 use crate::fold::DocFolder;
 use crate::passes::Pass;
 
-use rustc_hir::def_id::LocalDefId;
-
 pub(crate) const PROPAGATE_DOC_CFG: Pass = Pass {
     name: "propagate-doc-cfg",
-    run: propagate_doc_cfg,
+    run: Some(propagate_doc_cfg),
     description: "propagates `#[doc(cfg(...))]` to child items",
 };
 
@@ -26,11 +27,11 @@ struct CfgPropagator<'a, 'tcx> {
     cx: &'a mut DocContext<'tcx>,
 }
 
-impl<'a, 'tcx> CfgPropagator<'a, 'tcx> {
+impl CfgPropagator<'_, '_> {
     // Some items need to merge their attributes with their parents' otherwise a few of them
     // (mostly `cfg` ones) will be missing.
     fn merge_with_parent_attributes(&mut self, item: &mut Item) {
-        let check_parent = match &*item.kind {
+        let check_parent = match &item.kind {
             // impl blocks can be in different modules with different cfg and we need to get them
             // as well.
             ItemKind::ImplItem(_) => false,
@@ -60,17 +61,17 @@ impl<'a, 'tcx> CfgPropagator<'a, 'tcx> {
 
         let (_, cfg) =
             merge_attrs(self.cx, item.attrs.other_attrs.as_slice(), Some((&attrs, None)));
-        item.cfg = cfg;
+        item.inner.cfg = cfg;
     }
 }
 
-impl<'a, 'tcx> DocFolder for CfgPropagator<'a, 'tcx> {
+impl DocFolder for CfgPropagator<'_, '_> {
     fn fold_item(&mut self, mut item: Item) -> Option<Item> {
         let old_parent_cfg = self.parent_cfg.clone();
 
         self.merge_with_parent_attributes(&mut item);
 
-        let new_cfg = match (self.parent_cfg.take(), item.cfg.take()) {
+        let new_cfg = match (self.parent_cfg.take(), item.inner.cfg.take()) {
             (None, None) => None,
             (Some(rc), None) | (None, Some(rc)) => Some(rc),
             (Some(mut a), Some(b)) => {
@@ -80,7 +81,7 @@ impl<'a, 'tcx> DocFolder for CfgPropagator<'a, 'tcx> {
             }
         };
         self.parent_cfg = new_cfg.clone();
-        item.cfg = new_cfg;
+        item.inner.cfg = new_cfg;
 
         let old_parent =
             if let Some(def_id) = item.item_id.as_def_id().and_then(|def_id| def_id.as_local()) {

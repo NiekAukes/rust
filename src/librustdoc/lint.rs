@@ -1,9 +1,9 @@
+use std::sync::LazyLock as Lazy;
+
 use rustc_data_structures::fx::FxHashMap;
 use rustc_lint::LintStore;
-use rustc_lint_defs::{declare_tool_lint, Lint, LintId};
-use rustc_session::{lint, Session};
-
-use std::sync::LazyLock as Lazy;
+use rustc_lint_defs::{Lint, LintId, declare_tool_lint};
+use rustc_session::{Session, lint};
 
 /// This function is used to setup the lint initialization. By default, in rustdoc, everything
 /// is "allowed". Depending if we run in test mode or not, we want some of them to be at their
@@ -31,9 +31,9 @@ where
     allowed_lints.extend(lint_opts.iter().map(|(lint, _)| lint).cloned());
 
     let lints = || {
-        lint::builtin::HardwiredLints::get_lints()
+        lint::builtin::HardwiredLints::lint_vec()
             .into_iter()
-            .chain(rustc_lint::SoftLints::get_lints())
+            .chain(rustc_lint::SoftLints::lint_vec())
     };
 
     let lint_opts = lints()
@@ -66,7 +66,7 @@ where
 macro_rules! declare_rustdoc_lint {
     (
         $(#[$attr:meta])* $name: ident, $level: ident, $descr: literal $(,)?
-        $(@feature_gate = $gate:expr;)?
+        $(@feature_gate = $gate:ident;)?
     ) => {
         declare_tool_lint! {
             $(#[$attr])* pub rustdoc::$name, $level, $descr
@@ -128,7 +128,7 @@ declare_rustdoc_lint! {
     MISSING_DOC_CODE_EXAMPLES,
     Allow,
     "detects publicly-exported items without code samples in their documentation",
-    @feature_gate = rustc_span::symbol::sym::rustdoc_missing_doc_code_examples;
+    @feature_gate = rustdoc_missing_doc_code_examples;
 }
 
 declare_rustdoc_lint! {
@@ -213,7 +213,7 @@ pub(crate) static RUSTDOC_LINTS: Lazy<Vec<&'static Lint>> = Lazy::new(|| {
 });
 
 pub(crate) fn register_lints(_sess: &Session, lint_store: &mut LintStore) {
-    lint_store.register_lints(&**RUSTDOC_LINTS);
+    lint_store.register_lints(&RUSTDOC_LINTS);
     lint_store.register_group(
         true,
         "rustdoc::all",
@@ -232,4 +232,5 @@ pub(crate) fn register_lints(_sess: &Session, lint_store: &mut LintStore) {
         .register_renamed("intra_doc_link_resolution_failure", "rustdoc::broken_intra_doc_links");
     lint_store.register_renamed("non_autolinks", "rustdoc::bare_urls");
     lint_store.register_renamed("rustdoc::non_autolinks", "rustdoc::bare_urls");
+    lint_store.register_removed("rustdoc::unportable_markdown", "old parser removed");
 }

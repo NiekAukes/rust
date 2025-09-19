@@ -13,7 +13,7 @@
 //! Code in this module also contains inline tests, which start with
 //! `// test name-of-the-test` comment and look like this:
 //!
-//! ```
+//! ```text
 //! // test function_with_zero_parameters
 //! // fn foo() {}
 //! ```
@@ -39,9 +39,9 @@ mod patterns;
 mod types;
 
 use crate::{
-    parser::{CompletedMarker, Marker, Parser},
     SyntaxKind::{self, *},
-    TokenSet, T,
+    T, TokenSet,
+    parser::{CompletedMarker, Marker, Parser},
 };
 
 pub(crate) mod entry {
@@ -67,7 +67,7 @@ pub(crate) mod entry {
         }
 
         pub(crate) fn pat_top(p: &mut Parser<'_>) {
-            patterns::pattern_top(p);
+            patterns::pattern(p);
         }
 
         pub(crate) fn ty(p: &mut Parser<'_>) {
@@ -80,7 +80,8 @@ pub(crate) mod entry {
             paths::type_path(p);
         }
         pub(crate) fn item(p: &mut Parser<'_>) {
-            items::item_or_macro(p, true);
+            // We can set `is_in_extern=true`, because it only allows `safe fn`, and there is no ambiguity here.
+            items::item_or_macro(p, true, true);
         }
         // Parse a meta item , which excluded [], e.g : #[ MetaItem ]
         pub(crate) fn meta_item(p: &mut Parser<'_>) {
@@ -116,7 +117,7 @@ pub(crate) mod entry {
 
         pub(crate) fn pattern(p: &mut Parser<'_>) {
             let m = p.start();
-            patterns::pattern_top(p);
+            patterns::pattern(p);
             if p.at(EOF) {
                 m.abandon(p);
                 return;
@@ -158,42 +159,6 @@ pub(crate) mod entry {
             attributes::meta(p);
             if p.at(EOF) {
                 m.abandon(p);
-                return;
-            }
-            while !p.at(EOF) {
-                p.bump_any();
-            }
-            m.complete(p, ERROR);
-        }
-
-        pub(crate) fn eager_macro_input(p: &mut Parser<'_>) {
-            let m = p.start();
-
-            let closing_paren_kind = match p.current() {
-                T!['{'] => T!['}'],
-                T!['('] => T![')'],
-                T!['['] => T![']'],
-                _ => {
-                    p.error("expected `{`, `[`, `(`");
-                    while !p.at(EOF) {
-                        p.bump_any();
-                    }
-                    m.complete(p, ERROR);
-                    return;
-                }
-            };
-            p.bump_any();
-            while !p.at(EOF) && !p.at(closing_paren_kind) {
-                if expressions::expr(p).is_none() {
-                    break;
-                }
-                if !p.at(EOF) && !p.at(closing_paren_kind) {
-                    p.expect(T![,]);
-                }
-            }
-            p.expect(closing_paren_kind);
-            if p.at(EOF) {
-                m.complete(p, MACRO_EAGER_INPUT);
                 return;
             }
             while !p.at(EOF) {
@@ -277,7 +242,7 @@ fn opt_visibility(p: &mut Parser<'_>, in_tuple_field: bool) -> bool {
                 // struct MyStruct(pub ());
                 if !(in_tuple_field && matches!(p.nth(1), T![ident] | T![')'])) {
                     p.bump(T!['(']);
-                    paths::use_path(p);
+                    paths::vis_path(p);
                     p.expect(T![')']);
                 }
             }
@@ -287,7 +252,7 @@ fn opt_visibility(p: &mut Parser<'_>, in_tuple_field: bool) -> bool {
             T![in] => {
                 p.bump(T!['(']);
                 p.bump(T![in]);
-                paths::use_path(p);
+                paths::vis_path(p);
                 p.expect(T![')']);
             }
             _ => {}
@@ -342,13 +307,49 @@ fn name(p: &mut Parser<'_>) {
     name_r(p, TokenSet::EMPTY);
 }
 
-fn name_ref(p: &mut Parser<'_>) {
-    if p.at(IDENT) {
+fn name_ref_or_self(p: &mut Parser<'_>) {
+    if matches!(p.current(), T![ident] | T![self]) {
         let m = p.start();
-        p.bump(IDENT);
+        p.bump_any();
         m.complete(p, NAME_REF);
     } else {
-        p.err_and_bump("expected identifier");
+        p.err_and_bump("expected identifier or `self`");
+    }
+}
+
+fn name_ref_or_upper_self(p: &mut Parser<'_>) {
+    if matches!(p.current(), T![ident] | T![Self]) {
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, NAME_REF);
+    } else {
+        p.err_and_bump("expected identifier or `Self`");
+    }
+}
+
+const PATH_NAME_REF_KINDS: TokenSet =
+    TokenSet::new(&[IDENT, T![self], T![super], T![crate], T![Self]]);
+
+fn name_ref_mod_path(p: &mut Parser<'_>) {
+    if p.at_ts(PATH_NAME_REF_KINDS) {
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, NAME_REF);
+    } else {
+        p.err_and_bump("expected identifier, `self`, `super`, `crate`, or `Self`");
+    }
+}
+
+const PATH_NAME_REF_OR_INDEX_KINDS: TokenSet =
+    PATH_NAME_REF_KINDS.union(TokenSet::new(&[INT_NUMBER]));
+
+fn name_ref_mod_path_or_index(p: &mut Parser<'_>) {
+    if p.at_ts(PATH_NAME_REF_OR_INDEX_KINDS) {
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, NAME_REF);
+    } else {
+        p.err_and_bump("expected integer, identifier, `self`, `super`, `crate`, or `Self`");
     }
 }
 
@@ -418,7 +419,7 @@ fn delimited(
         }
         if !p.eat(delim) {
             if p.at_ts(first_set) {
-                p.error(format!("expected {:?}", delim));
+                p.error(format!("expected {delim:?}"));
             } else {
                 break;
             }

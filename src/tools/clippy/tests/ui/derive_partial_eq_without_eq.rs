@@ -9,7 +9,24 @@ pub struct NotPartialEq {
 
 // Eq can be derived but is missing
 #[derive(Debug, PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub struct MissingEq {
+    foo: u32,
+    bar: String,
+}
+
+// Check that we honor the `allow` attribute
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq)]
+pub struct AllowedMissingEq {
+    foo: u32,
+    bar: String,
+}
+
+// Check that we honor the `expect` attribute
+#[expect(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq)]
+pub struct ExpectedMissingEq {
     foo: u32,
     bar: String,
 }
@@ -51,33 +68,39 @@ impl PartialEq for ManualPartialEqImpl {
 
 // Generic fields should be properly checked for Eq-ness
 #[derive(PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub struct GenericNotEq<T: Eq, U: PartialEq> {
     foo: T,
     bar: U,
 }
 
 #[derive(PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub struct GenericEq<T: Eq, U: Eq> {
     foo: T,
     bar: U,
 }
 
 #[derive(PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub struct TupleStruct(u32);
 
 #[derive(PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub struct GenericTupleStruct<T: Eq>(T);
 
 #[derive(PartialEq)]
 pub struct TupleStructNotEq(f32);
 
 #[derive(PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub enum Enum {
     Foo(u32),
     Bar { a: String, b: () },
 }
 
 #[derive(PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub enum GenericEnum<T: Eq, U: Eq, V: Eq> {
     Foo(T),
     Bar { a: U, b: V },
@@ -91,9 +114,11 @@ pub enum EnumNotEq {
 
 // Ensure that rustfix works properly when `PartialEq` has other derives on either side
 #[derive(Debug, PartialEq, Clone)]
+//~^ derive_partial_eq_without_eq
 pub struct RustFixWithOtherDerives;
 
 #[derive(PartialEq)]
+//~^ derive_partial_eq_without_eq
 pub struct Generic<T>(T);
 
 #[derive(PartialEq, Eq)]
@@ -101,9 +126,11 @@ pub struct GenericPhantom<T>(core::marker::PhantomData<T>);
 
 mod _hidden {
     #[derive(PartialEq)]
+    //~^ derive_partial_eq_without_eq
     pub struct Reexported;
 
     #[derive(PartialEq)]
+    //~^ derive_partial_eq_without_eq
     pub struct InPubFn;
 
     #[derive(PartialEq)]
@@ -164,7 +191,8 @@ mod struct_gen {
     }
 
     #[derive(PartialEq)]
-    //~^ ERROR: you are deriving `PartialEq` and can implement `Eq`
+    //~^ derive_partial_eq_without_eq
+
     pub struct Foo<C: Suite>(<C::Group as Group>::Element);
 
     #[derive(PartialEq, Eq)]
@@ -172,7 +200,8 @@ mod struct_gen {
 
     // issue 9319
     #[derive(PartialEq)]
-    //~^ ERROR: you are deriving `PartialEq` and can implement `Eq`
+    //~^ derive_partial_eq_without_eq
+
     pub struct Oof<T: Fn()>(T);
 
     #[derive(PartialEq, Eq)]

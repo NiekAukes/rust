@@ -1,20 +1,19 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use rustc_errors::Diag;
-use rustc_hir as hir;
-use rustc_hir::intravisit::{walk_body, walk_expr, walk_inf, walk_ty, Visitor};
-use rustc_hir::{Body, Expr, ExprKind, GenericArg, Item, ItemKind, QPath, TyKind};
+use rustc_errors::{Applicability, Diag};
+use rustc_hir::intravisit::{Visitor, VisitorExt, walk_body, walk_expr, walk_ty};
+use rustc_hir::{self as hir, AmbigArg, Body, Expr, ExprKind, GenericArg, Item, ItemKind, QPath, TyKind};
 use rustc_hir_analysis::lower_ty;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::{Ty, TypeckResults};
 use rustc_session::declare_lint_pass;
-use rustc_span::symbol::sym;
 use rustc_span::Span;
 
-use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
-use clippy_utils::source::{snippet, snippet_opt};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::source::{IntoSpan, SpanRangeExt, snippet};
+use clippy_utils::sym;
 use clippy_utils::ty::is_type_diagnostic_item;
 
 declare_clippy_lint! {
@@ -59,10 +58,8 @@ declare_clippy_lint! {
 declare_lint_pass!(ImplicitHasher => [IMPLICIT_HASHER]);
 
 impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
-    #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
-        use rustc_span::BytePos;
-
         fn suggestion(
             cx: &LateContext<'_>,
             diag: &mut Diag<'_, ()>,
@@ -79,33 +76,32 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                 &generics_snip[1..generics_snip.len() - 1]
             };
 
-            multispan_sugg(
-                diag,
-                "consider adding a type parameter",
-                vec![
-                    (
-                        generics_suggestion_span,
-                        format!(
-                            "<{generics_snip}{}S: ::std::hash::BuildHasher{}>",
-                            if generics_snip.is_empty() { "" } else { ", " },
-                            if vis.suggestions.is_empty() {
-                                ""
-                            } else {
-                                // request users to add `Default` bound so that generic constructors can be used
-                                " + Default"
-                            },
-                        ),
+            let mut suggestions = vec![
+                (
+                    generics_suggestion_span,
+                    format!(
+                        "<{generics_snip}{}S: ::std::hash::BuildHasher{}>",
+                        if generics_snip.is_empty() { "" } else { ", " },
+                        if vis.suggestions.is_empty() {
+                            ""
+                        } else {
+                            // request users to add `Default` bound so that generic constructors can be used
+                            " + Default"
+                        },
                     ),
-                    (
-                        target.span(),
-                        format!("{}<{}, S>", target.type_name(), target.type_arguments(),),
-                    ),
-                ],
-            );
+                ),
+                (
+                    target.span(),
+                    format!("{}<{}, S>", target.type_name(), target.type_arguments(),),
+                ),
+            ];
+            suggestions.extend(vis.suggestions);
 
-            if !vis.suggestions.is_empty() {
-                multispan_sugg(diag, "...and use generic constructor", vis.suggestions);
-            }
+            diag.multipart_suggestion(
+                "add a type parameter for `BuildHasher`",
+                suggestions,
+                Applicability::MaybeIncorrect,
+            );
         }
 
         if !cx.effective_visibilities.is_exported(item.owner_id.def_id) {
@@ -115,7 +111,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
         match item.kind {
             ItemKind::Impl(impl_) => {
                 let mut vis = ImplicitHasherTypeVisitor::new(cx);
-                vis.visit_ty(impl_.self_ty);
+                vis.visit_ty_unambig(impl_.self_ty);
 
                 for target in &vis.found {
                     if !item.span.eq_ctxt(target.span()) {
@@ -123,17 +119,18 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                     }
 
                     let generics_suggestion_span = impl_.generics.span.substitute_dummy({
-                        let pos = snippet_opt(cx, item.span.until(target.span()))
-                            .and_then(|snip| Some(item.span.lo() + BytePos(snip.find("impl")? as u32 + 4)));
-                        if let Some(pos) = pos {
-                            Span::new(pos, pos, item.span.ctxt(), item.span.parent())
+                        let range = (item.span.lo()..target.span().lo()).map_range(cx, |_, src, range| {
+                            Some(src.get(range.clone())?.find("impl")? + 4..range.end)
+                        });
+                        if let Some(range) = range {
+                            range.with_ctxt(item.span.ctxt())
                         } else {
                             return;
                         }
                     });
 
                     let mut ctr_vis = ImplicitHasherConstructorVisitor::new(cx, target);
-                    for item in impl_.items.iter().map(|item| cx.tcx.hir().impl_item(item.id)) {
+                    for item in impl_.items.iter().map(|item| cx.tcx.hir_impl_item(item.id)) {
                         ctr_vis.visit_impl_item(item);
                     }
 
@@ -151,33 +148,34 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                     );
                 }
             },
-            ItemKind::Fn(ref sig, generics, body_id) => {
-                let body = cx.tcx.hir().body(body_id);
+            ItemKind::Fn {
+                ref sig,
+                generics,
+                body: body_id,
+                ..
+            } => {
+                let body = cx.tcx.hir_body(body_id);
 
                 for ty in sig.decl.inputs {
                     let mut vis = ImplicitHasherTypeVisitor::new(cx);
-                    vis.visit_ty(ty);
+                    vis.visit_ty_unambig(ty);
 
                     for target in &vis.found {
                         if generics.span.from_expansion() {
                             continue;
                         }
                         let generics_suggestion_span = generics.span.substitute_dummy({
-                            let pos = snippet_opt(
-                                cx,
-                                Span::new(
-                                    item.span.lo(),
-                                    body.params[0].pat.span.lo(),
-                                    item.span.ctxt(),
-                                    item.span.parent(),
-                                ),
-                            )
-                            .and_then(|snip| {
-                                let i = snip.find("fn")?;
-                                Some(item.span.lo() + BytePos((i + snip[i..].find('(')?) as u32))
-                            })
-                            .expect("failed to create span for type parameters");
-                            Span::new(pos, pos, item.span.ctxt(), item.span.parent())
+                            let range =
+                                (item.span.lo()..body.params[0].pat.span.lo()).map_range(cx, |_, src, range| {
+                                    let (pre, post) = src.get(range.clone())?.split_once("fn")?;
+                                    let pos = post.find('(')? + pre.len() + 2;
+                                    Some(pos..pos)
+                                });
+                            if let Some(range) = range {
+                                range.with_ctxt(item.span.ctxt())
+                            } else {
+                                return;
+                            }
                         });
 
                         let mut ctr_vis = ImplicitHasherConstructorVisitor::new(cx, target);
@@ -288,21 +286,13 @@ impl<'a, 'tcx> ImplicitHasherTypeVisitor<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for ImplicitHasherTypeVisitor<'a, 'tcx> {
-    fn visit_ty(&mut self, t: &'tcx hir::Ty<'_>) {
-        if let Some(target) = ImplicitHasherType::new(self.cx, t) {
+impl<'tcx> Visitor<'tcx> for ImplicitHasherTypeVisitor<'_, 'tcx> {
+    fn visit_ty(&mut self, t: &'tcx hir::Ty<'_, AmbigArg>) {
+        if let Some(target) = ImplicitHasherType::new(self.cx, t.as_unambig_ty()) {
             self.found.push(target);
         }
 
         walk_ty(self, t);
-    }
-
-    fn visit_infer(&mut self, inf: &'tcx hir::InferArg) {
-        if let Some(target) = ImplicitHasherType::new(self.cx, &inf.to_ty()) {
-            self.found.push(target);
-        }
-
-        walk_inf(self, inf);
     }
 }
 
@@ -325,10 +315,10 @@ impl<'a, 'b, 'tcx> ImplicitHasherConstructorVisitor<'a, 'b, 'tcx> {
     }
 }
 
-impl<'a, 'b, 'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'a, 'b, 'tcx> {
+impl<'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'_, '_, 'tcx> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn visit_body(&mut self, body: &'tcx Body<'_>) {
+    fn visit_body(&mut self, body: &Body<'tcx>) {
         let old_maybe_typeck_results = self.maybe_typeck_results.replace(self.cx.tcx.typeck_body(body.id()));
         walk_body(self, body);
         self.maybe_typeck_results = old_maybe_typeck_results;
@@ -337,6 +327,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'a, 'b, 't
     fn visit_expr(&mut self, e: &'tcx Expr<'_>) {
         if let ExprKind::Call(fun, args) = e.kind
             && let ExprKind::Path(QPath::TypeRelative(ty, method)) = fun.kind
+            && matches!(method.ident.name, sym::new | sym::with_capacity)
             && let TyKind::Path(QPath::Resolved(None, ty_path)) = ty.kind
             && let Some(ty_did) = ty_path.res.opt_def_id()
         {
@@ -344,10 +335,11 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'a, 'b, 't
                 return;
             }
 
-            if self.cx.tcx.is_diagnostic_item(sym::HashMap, ty_did) {
-                if method.ident.name == sym::new {
+            match (self.cx.tcx.get_diagnostic_name(ty_did), method.ident.name) {
+                (Some(sym::HashMap), sym::new) => {
                     self.suggestions.insert(e.span, "HashMap::default()".to_string());
-                } else if method.ident.name == sym!(with_capacity) {
+                },
+                (Some(sym::HashMap), sym::with_capacity) => {
                     self.suggestions.insert(
                         e.span,
                         format!(
@@ -355,11 +347,11 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'a, 'b, 't
                             snippet(self.cx, args[0].span, "capacity"),
                         ),
                     );
-                }
-            } else if self.cx.tcx.is_diagnostic_item(sym::HashSet, ty_did) {
-                if method.ident.name == sym::new {
+                },
+                (Some(sym::HashSet), sym::new) => {
                     self.suggestions.insert(e.span, "HashSet::default()".to_string());
-                } else if method.ident.name == sym!(with_capacity) {
+                },
+                (Some(sym::HashSet), sym::with_capacity) => {
                     self.suggestions.insert(
                         e.span,
                         format!(
@@ -367,14 +359,15 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'a, 'b, 't
                             snippet(self.cx, args[0].span, "capacity"),
                         ),
                     );
-                }
+                },
+                _ => {},
             }
         }
 
         walk_expr(self, e);
     }
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.cx.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.cx.tcx
     }
 }

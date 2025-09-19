@@ -9,16 +9,16 @@
 // To opt-in to hardware accelerated floating point operations, you can use, for example,
 // `-C target-feature=+vfp4` or `-C target-cpu=cortex-m4`.
 
-use crate::spec::{base, Target, TargetOptions};
+use crate::spec::{FloatAbi, Target, TargetMetadata, TargetOptions, base};
 
-pub fn target() -> Target {
+pub(crate) fn target() -> Target {
     Target {
         llvm_target: "thumbv7em-none-eabi".into(),
-        metadata: crate::spec::TargetMetadata {
-            description: None,
-            tier: None,
-            host_tools: None,
-            std: None,
+        metadata: TargetMetadata {
+            description: Some("Bare ARMv7E-M".into()),
+            tier: Some(2),
+            host_tools: Some(false),
+            std: Some(false),
         },
         pointer_width: 32,
         data_layout: "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64".into(),
@@ -26,6 +26,7 @@ pub fn target() -> Target {
 
         options: TargetOptions {
             abi: "eabi".into(),
+            llvm_floatabi: Some(FloatAbi::Soft),
             max_atomic_width: Some(32),
             ..base::thumb::opts()
         },

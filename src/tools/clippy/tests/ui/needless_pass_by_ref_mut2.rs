@@ -5,16 +5,18 @@
 #![allow(clippy::redundant_closure_call)]
 #![warn(clippy::needless_pass_by_ref_mut)]
 
-pub async fn inner_async3(x: &mut i32, y: &mut u32) {
-    //~^ ERROR: this argument is a mutable reference, but not used mutably
+async fn inner_async3(x: &mut i32, y: &mut u32) {
+    //~^ needless_pass_by_ref_mut
+
     async {
         *y += 1;
     }
     .await;
 }
 
-pub async fn inner_async4(u: &mut i32, v: &mut u32) {
-    //~^ ERROR: this argument is a mutable reference, but not used mutably
+async fn inner_async4(u: &mut i32, v: &mut u32) {
+    //~^ needless_pass_by_ref_mut
+
     async {
         *u += 1;
     }

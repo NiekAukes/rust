@@ -62,7 +62,7 @@ use crate::marker::Tuple;
         note = "wrap the `{Self}` in a closure with no arguments: `|| {{ /* code */ }}`"
     ),
     on(
-        _Self = "unsafe fn",
+        Self = "unsafe fn",
         note = "unsafe function cannot be called generically without an unsafe block",
         // SAFETY: tidy is not smart enough to tell that the below unsafe block is a string
         label = "call the function in a closure: `|| unsafe {{ /* code */ }}`"
@@ -72,7 +72,7 @@ use crate::marker::Tuple;
 )]
 #[fundamental] // so that regex can rely that `&str: !FnMut`
 #[must_use = "closures are lazy and do nothing unless called"]
-// FIXME(effects) #[const_trait]
+// FIXME(const_trait_impl) #[const_trait]
 pub trait Fn<Args: Tuple>: FnMut<Args> {
     /// Performs the call operation.
     #[unstable(feature = "fn_traits", issue = "29625")]
@@ -149,7 +149,7 @@ pub trait Fn<Args: Tuple>: FnMut<Args> {
         note = "wrap the `{Self}` in a closure with no arguments: `|| {{ /* code */ }}`"
     ),
     on(
-        _Self = "unsafe fn",
+        Self = "unsafe fn",
         note = "unsafe function cannot be called generically without an unsafe block",
         // SAFETY: tidy is not smart enough to tell that the below unsafe block is a string
         label = "call the function in a closure: `|| unsafe {{ /* code */ }}`"
@@ -159,7 +159,7 @@ pub trait Fn<Args: Tuple>: FnMut<Args> {
 )]
 #[fundamental] // so that regex can rely that `&str: !FnMut`
 #[must_use = "closures are lazy and do nothing unless called"]
-// FIXME(effects) #[const_trait]
+// FIXME(const_trait_impl) #[const_trait]
 pub trait FnMut<Args: Tuple>: FnOnce<Args> {
     /// Performs the call operation.
     #[unstable(feature = "fn_traits", issue = "29625")]
@@ -228,7 +228,7 @@ pub trait FnMut<Args: Tuple>: FnOnce<Args> {
         note = "wrap the `{Self}` in a closure with no arguments: `|| {{ /* code */ }}`"
     ),
     on(
-        _Self = "unsafe fn",
+        Self = "unsafe fn",
         note = "unsafe function cannot be called generically without an unsafe block",
         // SAFETY: tidy is not smart enough to tell that the below unsafe block is a string
         label = "call the function in a closure: `|| unsafe {{ /* code */ }}`"
@@ -238,7 +238,7 @@ pub trait FnMut<Args: Tuple>: FnOnce<Args> {
 )]
 #[fundamental] // so that regex can rely that `&str: !FnMut`
 #[must_use = "closures are lazy and do nothing unless called"]
-// FIXME(effects) #[const_trait]
+// FIXME(const_trait_impl) #[const_trait]
 pub trait FnOnce<Args: Tuple> {
     /// The returned type after the call operator is used.
     #[lang = "fn_once_output"]

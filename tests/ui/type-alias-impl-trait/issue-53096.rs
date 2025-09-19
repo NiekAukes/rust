@@ -1,11 +1,12 @@
-#![feature(rustc_attrs)]
+//@ check-pass
+
 #![feature(type_alias_impl_trait)]
 
-type Foo = impl Fn() -> usize;
-const fn bar() -> Foo {
+pub type Foo = impl Fn() -> usize;
+#[define_opaque(Foo)]
+pub const fn bar() -> Foo {
     || 0usize
 }
 const BAZR: Foo = bar();
 
-#[rustc_error]
-fn main() {} //~ ERROR
+fn main() {}

@@ -4,6 +4,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::thread::LocalKey;
 
 struct NamedStruct1Ignored {
     data: u8,
@@ -11,7 +12,8 @@ struct NamedStruct1Ignored {
 }
 
 impl fmt::Debug for NamedStruct1Ignored {
-    //~^ ERROR: manual `Debug` impl does not include all fields
+    //~^ missing_fields_in_debug
+
     // unused field: hidden
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -30,7 +32,8 @@ struct NamedStructMultipleIgnored {
 }
 
 impl fmt::Debug for NamedStructMultipleIgnored {
-    //~^ ERROR: manual `Debug` impl does not include all fields
+    //~^ missing_fields_in_debug
+
     // unused fields: hidden, hidden2, hidden4
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -92,7 +95,8 @@ struct MultiExprDebugImpl {
 
 // ok
 impl fmt::Debug for MultiExprDebugImpl {
-    //~^ ERROR: manual `Debug` impl does not include all fields
+    //~^ missing_fields_in_debug
+
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut f = formatter.debug_struct("MultiExprDebugImpl");
         f.field("a", &self.a);
@@ -188,6 +192,23 @@ impl fmt::Debug for WithPD {
             .field("a", &self.a)
             .field("b", &self.b)
             .finish()
+    }
+}
+
+struct InClosure {
+    a: u8,
+    b: String,
+}
+
+impl fmt::Debug for InClosure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut d = f.debug_struct("InClosure");
+        d.field("a", &self.a);
+        let mut c = || {
+            d.field("b", &self.b);
+        };
+        c();
+        d.finish()
     }
 }
 

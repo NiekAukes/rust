@@ -1,9 +1,10 @@
-use crate::stable_hasher::{HashStable, StableHasher};
 use std::cmp::Ordering;
 use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::ptr;
+
+use crate::stable_hasher::{HashStable, StableHasher};
 
 mod private {
     #[derive(Clone, Copy, Debug)]
@@ -91,7 +92,10 @@ impl<'a, T: Ord> Ord for Interned<'a, T> {
     }
 }
 
-impl<'a, T> Hash for Interned<'a, T> {
+impl<'a, T> Hash for Interned<'a, T>
+where
+    T: Hash,
+{
     #[inline]
     fn hash<H: Hasher>(&self, s: &mut H) {
         // Pointer hashing is sufficient, due to the uniqueness constraint.

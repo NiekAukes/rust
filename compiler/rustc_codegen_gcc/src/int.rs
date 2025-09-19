@@ -2,24 +2,18 @@
 //! This module exists because some integer types are not supported on some gcc platforms, e.g.
 //! 128-bit integers on 32-bit platforms and thus require to be handled manually.
 
-use std::convert::TryFrom;
+// cSpell:words cmpti divti modti mulodi muloti udivti umodti
 
 use gccjit::{BinaryOp, ComparisonOp, FunctionType, Location, RValue, ToRValue, Type, UnaryOp};
+use rustc_abi::{CanonAbi, Endian, ExternAbi};
 use rustc_codegen_ssa::common::{IntPredicate, TypeKind};
-use rustc_codegen_ssa::traits::{BackendTypes, BaseTypeMethods, BuilderMethods, OverflowOp};
-use rustc_middle::ty::{ParamEnv, Ty};
-use rustc_target::abi::{
-    call::{ArgAbi, ArgAttributes, Conv, FnAbi, PassMode},
-    Endian,
-};
-use rustc_target::spec;
+use rustc_codegen_ssa::traits::{BackendTypes, BaseTypeCodegenMethods, BuilderMethods, OverflowOp};
+use rustc_middle::ty::{self, Ty};
+use rustc_target::callconv::{ArgAbi, ArgAttributes, FnAbi, PassMode};
 
-use crate::builder::ToGccComp;
-use crate::{
-    builder::Builder,
-    common::{SignType, TypeReflection},
-    context::CodegenCx,
-};
+use crate::builder::{Builder, ToGccComp};
+use crate::common::{SignType, TypeReflection};
+use crate::context::CodegenCx;
 
 impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
     pub fn gcc_urem(&self, a: RValue<'gcc>, b: RValue<'gcc>) -> RValue<'gcc> {
@@ -40,7 +34,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
             self.cx.context.new_unary_op(self.location, operation, typ, a)
         } else {
             let element_type = typ.dyncast_array().expect("element type");
-            self.from_low_high_rvalues(
+            self.concat_low_high_rvalues(
                 typ,
                 self.cx.context.new_unary_op(
                     self.location,
@@ -83,9 +77,21 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
                 let b = self.context.new_cast(self.location, b, a_type);
                 a >> b
             } else {
-                a >> b
+                let a_size = a_type.get_size();
+                let b_size = b_type.get_size();
+                match a_size.cmp(&b_size) {
+                    std::cmp::Ordering::Less => {
+                        let a = self.context.new_cast(self.location, a, b_type);
+                        a >> b
+                    }
+                    std::cmp::Ordering::Equal => a >> b,
+                    std::cmp::Ordering::Greater => {
+                        let b = self.context.new_cast(self.location, b, a_type);
+                        a >> b
+                    }
+                }
             }
-        } else if a_type.is_vector() && a_type.is_vector() {
+        } else if a_type.is_vector() && b_type.is_vector() {
             a >> b
         } else if a_native && !b_native {
             self.gcc_lshr(a, self.gcc_int_cast(b, a_type))
@@ -114,7 +120,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
             let shift_value = self.gcc_sub(b, sixty_four);
             let high = self.high(a);
             let sign = if a_type.is_signed(self) { high >> sixty_three } else { zero };
-            let array_value = self.from_low_high_rvalues(a_type, high >> shift_value, sign);
+            let array_value = self.concat_low_high_rvalues(a_type, high >> shift_value, sign);
             then_block.add_assignment(self.location, result, array_value);
             then_block.end_with_jump(self.location, after_block);
 
@@ -126,12 +132,15 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
 
             let shift_value = self.gcc_sub(sixty_four, b);
             // NOTE: cast low to its unsigned type in order to perform a logical right shift.
-            let unsigned_type = native_int_type.to_unsigned(&self.cx);
+            let unsigned_type = native_int_type.to_unsigned(self.cx);
             let casted_low = self.context.new_cast(self.location, self.low(a), unsigned_type);
             let shifted_low = casted_low >> self.context.new_cast(self.location, b, unsigned_type);
             let shifted_low = self.context.new_cast(self.location, shifted_low, native_int_type);
-            let array_value =
-                self.from_low_high_rvalues(a_type, (high << shift_value) | shifted_low, high >> b);
+            let array_value = self.concat_low_high_rvalues(
+                a_type,
+                (high << shift_value) | shifted_low,
+                high >> b,
+            );
             actual_else_block.add_assignment(self.location, result, array_value);
             actual_else_block.end_with_jump(self.location, after_block);
 
@@ -253,12 +262,14 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
         lhs: <Self as BackendTypes>::Value,
         rhs: <Self as BackendTypes>::Value,
     ) -> (<Self as BackendTypes>::Value, <Self as BackendTypes>::Value) {
-        use rustc_middle::ty::{Int, IntTy::*, Uint, UintTy::*};
+        use rustc_middle::ty::IntTy::*;
+        use rustc_middle::ty::UintTy::*;
+        use rustc_middle::ty::{Int, Uint};
 
-        let new_kind = match typ.kind() {
+        let new_kind = match *typ.kind() {
             Int(t @ Isize) => Int(t.normalize(self.tcx.sess.target.pointer_width)),
             Uint(t @ Usize) => Uint(t.normalize(self.tcx.sess.target.pointer_width)),
-            t @ (Uint(_) | Int(_)) => t.clone(),
+            t @ (Uint(_) | Int(_)) => t,
             _ => panic!("tried to get overflow intrinsic for op applied to non-int type"),
         };
 
@@ -312,39 +323,29 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
                 },
             }
         } else {
-            match new_kind {
-                Int(I128) | Uint(U128) => {
-                    let func_name = match oop {
-                        OverflowOp::Add => match new_kind {
-                            Int(I128) => "__rust_i128_addo",
-                            Uint(U128) => "__rust_u128_addo",
-                            _ => unreachable!(),
-                        },
-                        OverflowOp::Sub => match new_kind {
-                            Int(I128) => "__rust_i128_subo",
-                            Uint(U128) => "__rust_u128_subo",
-                            _ => unreachable!(),
-                        },
-                        OverflowOp::Mul => match new_kind {
-                            Int(I128) => "__rust_i128_mulo", // TODO(antoyo): use __muloti4d instead?
-                            Uint(U128) => "__rust_u128_mulo",
-                            _ => unreachable!(),
-                        },
-                    };
-                    return self.operation_with_overflow(func_name, lhs, rhs);
-                }
-                _ => match oop {
-                    OverflowOp::Mul => match new_kind {
-                        Int(I32) => "__mulosi4",
-                        Int(I64) => "__mulodi4",
-                        _ => unreachable!(),
-                    },
-                    _ => unimplemented!("overflow operation for {:?}", new_kind),
+            let (func_name, width) = match oop {
+                OverflowOp::Add => match new_kind {
+                    Int(I128) => ("__rust_i128_addo", 128),
+                    Uint(U128) => ("__rust_u128_addo", 128),
+                    _ => unreachable!(),
                 },
-            }
+                OverflowOp::Sub => match new_kind {
+                    Int(I128) => ("__rust_i128_subo", 128),
+                    Uint(U128) => ("__rust_u128_subo", 128),
+                    _ => unreachable!(),
+                },
+                OverflowOp::Mul => match new_kind {
+                    Int(I32) => ("__mulosi4", 32),
+                    Int(I64) => ("__mulodi4", 64),
+                    Int(I128) => ("__rust_i128_mulo", 128), // TODO(antoyo): use __muloti4d instead?
+                    Uint(U128) => ("__rust_u128_mulo", 128),
+                    _ => unreachable!(),
+                },
+            };
+            return self.operation_with_overflow(func_name, lhs, rhs, width);
         };
 
-        let intrinsic = self.context.get_builtin_function(&name);
+        let intrinsic = self.context.get_builtin_function(name);
         let res = self
             .current_func()
             // TODO(antoyo): is it correct to use rhs type instead of the parameter typ?
@@ -354,79 +355,96 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
         (res.dereference(self.location).to_rvalue(), overflow)
     }
 
+    /// Non-`__builtin_*` overflow operations with a `fn(T, T, &mut i32) -> T` signature.
     pub fn operation_with_overflow(
         &self,
         func_name: &str,
         lhs: RValue<'gcc>,
         rhs: RValue<'gcc>,
+        width: u64,
     ) -> (RValue<'gcc>, RValue<'gcc>) {
         let a_type = lhs.get_type();
         let b_type = rhs.get_type();
         debug_assert!(a_type.dyncast_array().is_some());
         debug_assert!(b_type.dyncast_array().is_some());
+        let overflow_type = self.i32_type;
+        let overflow_param_type = overflow_type.make_pointer();
+        let res_type = a_type;
+
+        let overflow_value =
+            self.current_func().new_local(self.location, overflow_type, "overflow");
+        let overflow_addr = overflow_value.get_address(self.location);
+
         let param_a = self.context.new_parameter(self.location, a_type, "a");
         let param_b = self.context.new_parameter(self.location, b_type, "b");
-        let result_field = self.context.new_field(self.location, a_type, "result");
-        let overflow_field = self.context.new_field(self.location, self.bool_type, "overflow");
+        let param_overflow =
+            self.context.new_parameter(self.location, overflow_param_type, "overflow");
 
-        let ret_ty = Ty::new_tup(self.tcx, &[self.tcx.types.i128, self.tcx.types.bool]);
-        let layout = self.tcx.layout_of(ParamEnv::reveal_all().and(ret_ty)).unwrap();
+        let a_elem_type = a_type.dyncast_array().expect("non-array a value");
+        debug_assert!(a_elem_type.is_integral());
+        let res_ty = match width {
+            32 => self.tcx.types.i32,
+            64 => self.tcx.types.i64,
+            128 => self.tcx.types.i128,
+            _ => unreachable!("unexpected integer size"),
+        };
+        let layout = self
+            .tcx
+            .layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(res_ty))
+            .unwrap();
 
         let arg_abi = ArgAbi { layout, mode: PassMode::Direct(ArgAttributes::new()) };
         let mut fn_abi = FnAbi {
-            args: vec![arg_abi.clone(), arg_abi.clone()].into_boxed_slice(),
+            args: vec![arg_abi.clone(), arg_abi.clone(), arg_abi.clone()].into_boxed_slice(),
             ret: arg_abi,
             c_variadic: false,
-            fixed_count: 2,
-            conv: Conv::C,
+            fixed_count: 3,
+            conv: CanonAbi::C,
             can_unwind: false,
         };
-        fn_abi.adjust_for_foreign_abi(self.cx, spec::abi::Abi::C { unwind: false }).unwrap();
+        fn_abi.adjust_for_foreign_abi(self.cx, ExternAbi::C { unwind: false });
 
-        let indirect = matches!(fn_abi.ret.mode, PassMode::Indirect { .. });
+        let ret_indirect = matches!(fn_abi.ret.mode, PassMode::Indirect { .. });
 
-        let return_type = self.context.new_struct_type(
-            self.location,
-            "result_overflow",
-            &[result_field, overflow_field],
-        );
-        let result = if indirect {
-            let return_value =
-                self.current_func().new_local(self.location, return_type.as_type(), "return_value");
-            let return_param_type = return_type.as_type().make_pointer();
-            let return_param =
-                self.context.new_parameter(self.location, return_param_type, "return_value");
+        let call = if ret_indirect {
+            let res_value = self.current_func().new_local(self.location, res_type, "result_value");
+            let res_addr = res_value.get_address(self.location);
+            let res_param_type = res_type.make_pointer();
+            let param_res = self.context.new_parameter(self.location, res_param_type, "result");
+
             let func = self.context.new_function(
                 self.location,
                 FunctionType::Extern,
                 self.type_void(),
-                &[return_param, param_a, param_b],
+                &[param_res, param_a, param_b, param_overflow],
                 func_name,
                 false,
             );
-            self.llbb().add_eval(
-                self.location,
-                self.context.new_call(
-                    self.location,
-                    func,
-                    &[return_value.get_address(self.location), lhs, rhs],
-                ),
-            );
-            return_value.to_rvalue()
+            let _void =
+                self.context.new_call(self.location, func, &[res_addr, lhs, rhs, overflow_addr]);
+            res_value.to_rvalue()
         } else {
             let func = self.context.new_function(
                 self.location,
                 FunctionType::Extern,
-                return_type.as_type(),
-                &[param_a, param_b],
+                res_type,
+                &[param_a, param_b, param_overflow],
                 func_name,
                 false,
             );
-            self.context.new_call(self.location, func, &[lhs, rhs])
+            self.context.new_call(self.location, func, &[lhs, rhs, overflow_addr])
         };
-        let overflow = result.access_field(self.location, overflow_field);
-        let int_result = result.access_field(self.location, result_field);
-        (int_result, overflow)
+        // NOTE: we must assign the result of the operation to a variable at this point to make
+        // sure it will be evaluated by libgccjit now.
+        // Otherwise, it will only be evaluated when the rvalue for the call is used somewhere else
+        // and overflow_value will not be initialized at the correct point in the program.
+        let result = self.current_func().new_local(self.location, res_type, "result");
+        self.block.add_assignment(self.location, result, call);
+
+        (
+            result.to_rvalue(),
+            self.context.new_cast(self.location, overflow_value, self.bool_type).to_rvalue(),
+        )
     }
 
     pub fn gcc_icmp(
@@ -454,7 +472,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
             let native_int_type = a_type.dyncast_array().expect("get element type");
             // NOTE: cast low to its unsigned type in order to perform a comparison correctly (e.g.
             // the sign is only on high).
-            let unsigned_type = native_int_type.to_unsigned(&self.cx);
+            let unsigned_type = native_int_type.to_unsigned(self.cx);
 
             let lhs_low = self.context.new_cast(self.location, self.low(lhs), unsigned_type);
             let rhs_low = self.context.new_cast(self.location, self.low(rhs), unsigned_type);
@@ -589,7 +607,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
                 | IntPredicate::IntULT
                 | IntPredicate::IntULE => {
                     if !a_type.is_vector() {
-                        let unsigned_type = a_type.to_unsigned(&self.cx);
+                        let unsigned_type = a_type.to_unsigned(self.cx);
                         lhs = self.context.new_cast(self.location, lhs, unsigned_type);
                         rhs = self.context.new_cast(self.location, rhs, unsigned_type);
                     }
@@ -612,7 +630,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
         {
             a ^ b
         } else {
-            self.from_low_high_rvalues(
+            self.concat_low_high_rvalues(
                 a_type,
                 self.low(a) ^ self.low(b),
                 self.high(a) ^ self.high(b),
@@ -635,9 +653,21 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
                 let b = self.context.new_cast(self.location, b, a_type);
                 a << b
             } else {
-                a << b
+                let a_size = a_type.get_size();
+                let b_size = b_type.get_size();
+                match a_size.cmp(&b_size) {
+                    std::cmp::Ordering::Less => {
+                        let a = self.context.new_cast(self.location, a, b_type);
+                        a << b
+                    }
+                    std::cmp::Ordering::Equal => a << b,
+                    std::cmp::Ordering::Greater => {
+                        let b = self.context.new_cast(self.location, b, a_type);
+                        a << b
+                    }
+                }
             }
-        } else if a_type.is_vector() && a_type.is_vector() {
+        } else if a_type.is_vector() && b_type.is_vector() {
             a << b
         } else if a_native && !b_native {
             self.gcc_shl(a, self.gcc_int_cast(b, a_type))
@@ -661,7 +691,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
             self.llbb().end_with_conditional(self.location, condition, then_block, else_block);
 
             let array_value =
-                self.from_low_high_rvalues(a_type, zero, self.low(a) << (b - sixty_four));
+                self.concat_low_high_rvalues(a_type, zero, self.low(a) << (b - sixty_four));
             then_block.add_assignment(self.location, result, array_value);
             then_block.end_with_jump(self.location, after_block);
 
@@ -673,13 +703,13 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
 
             // NOTE: cast low to its unsigned type in order to perform a logical right shift.
             // TODO(antoyo): adjust this ^ comment.
-            let unsigned_type = native_int_type.to_unsigned(&self.cx);
+            let unsigned_type = native_int_type.to_unsigned(self.cx);
             let casted_low = self.context.new_cast(self.location, self.low(a), unsigned_type);
             let shift_value = self.context.new_cast(self.location, sixty_four - b, unsigned_type);
             let high_low =
                 self.context.new_cast(self.location, casted_low >> shift_value, native_int_type);
 
-            let array_value = self.from_low_high_rvalues(
+            let array_value = self.concat_low_high_rvalues(
                 a_type,
                 self.low(a) << b,
                 (self.high(a) << b) | high_low,
@@ -708,12 +738,12 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
 
             // NOTE: we also need to swap the two elements here, in addition to swapping inside
             // the elements themselves like done above.
-            return self.from_low_high_rvalues(arg_type, swapped_msb, swapped_lsb);
+            return self.concat_low_high_rvalues(arg_type, swapped_msb, swapped_lsb);
         }
 
         // TODO(antoyo): check if it's faster to use string literals and a
         // match instead of format!.
-        let bswap = self.cx.context.get_builtin_function(&format!("__builtin_bswap{}", width));
+        let bswap = self.cx.context.get_builtin_function(format!("__builtin_bswap{}", width));
         // FIXME(antoyo): this cast should not be necessary. Remove
         // when having proper sized integer types.
         let param_type = bswap.get_param(0).to_rvalue().get_type();
@@ -727,10 +757,10 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
 impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
     pub fn gcc_int(&self, typ: Type<'gcc>, int: i64) -> RValue<'gcc> {
         if self.is_native_int_type_or_bool(typ) {
-            self.context.new_rvalue_from_long(typ, i64::try_from(int).expect("i64::try_from"))
+            self.context.new_rvalue_from_long(typ, int)
         } else {
             // NOTE: set the sign in high.
-            self.from_low_high(typ, int, -(int.is_negative() as i64))
+            self.concat_low_high(typ, int, -(int.is_negative() as i64))
         }
     }
 
@@ -740,10 +770,9 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             let num = self.context.new_rvalue_from_long(self.u64_type, int as i64);
             self.gcc_int_cast(num, typ)
         } else if self.is_native_int_type_or_bool(typ) {
-            self.context
-                .new_rvalue_from_long(typ, u64::try_from(int).expect("u64::try_from") as i64)
+            self.context.new_rvalue_from_long(typ, int as i64)
         } else {
-            self.from_low_high(typ, int as i64, 0)
+            self.concat_low_high(typ, int as i64, 0)
         }
     }
 
@@ -760,7 +789,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
                 let shift = high << sixty_four;
                 shift | self.context.new_cast(None, low, typ)
             } else {
-                self.from_low_high(typ, low as i64, high as i64)
+                self.concat_low_high(typ, low as i64, high as i64)
             }
         } else if typ.is_i128(self) {
             // FIXME(antoyo): libgccjit cannot create 128-bit values yet.
@@ -775,7 +804,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         if self.is_native_int_type_or_bool(typ) {
             self.context.new_rvalue_zero(typ)
         } else {
-            self.from_low_high(typ, 0, 0)
+            self.concat_low_high(typ, 0, 0)
         }
     }
 
@@ -813,7 +842,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
                 "both types should either be native or non-native for or operation"
             );
             let native_int_type = a_type.dyncast_array().expect("get element type");
-            self.from_low_high_rvalues(
+            self.concat_low_high_rvalues(
                 a_type,
                 self.context.new_binary_op(
                     loc,
@@ -847,6 +876,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         let value_type = value.get_type();
         if self.is_native_int_type_or_bool(dest_typ) && self.is_native_int_type_or_bool(value_type)
         {
+            // TODO: use self.location.
             self.context.new_cast(None, value, dest_typ)
         } else if self.is_native_int_type_or_bool(dest_typ) {
             self.context.new_cast(None, self.low(value), dest_typ)
@@ -858,7 +888,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             let is_negative =
                 self.context.new_comparison(None, ComparisonOp::LessThan, value, zero);
             let is_negative = self.gcc_int_cast(is_negative, dest_element_type);
-            self.from_low_high_rvalues(
+            self.concat_low_high_rvalues(
                 dest_typ,
                 self.context.new_cast(None, value, dest_element_type),
                 self.context.new_unary_op(None, UnaryOp::Minus, dest_element_type, is_negative),
@@ -885,8 +915,11 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
 
         debug_assert!(value_type.dyncast_array().is_some());
         let name_suffix = match self.type_kind(dest_typ) {
+            // cSpell:disable
             TypeKind::Float => "tisf",
             TypeKind::Double => "tidf",
+            TypeKind::FP128 => "titf",
+            // cSpell:enable
             kind => panic!("cannot cast a non-native integer to type {:?}", kind),
         };
         let sign = if signed { "" } else { "un" };
@@ -926,10 +959,12 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             return self.context.new_cast(None, value, dest_typ);
         }
 
-        debug_assert!(value_type.dyncast_array().is_some());
+        debug_assert!(dest_typ.dyncast_array().is_some());
         let name_suffix = match self.type_kind(value_type) {
+            // cSpell:disable
             TypeKind::Float => "sfti",
             TypeKind::Double => "dfti",
+            // cSpell:enable
             kind => panic!("cannot cast a {:?} to non-native integer", kind),
         };
         let sign = if signed { "" } else { "uns" };
@@ -978,7 +1013,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             .to_rvalue()
     }
 
-    fn from_low_high_rvalues(
+    fn concat_low_high_rvalues(
         &self,
         typ: Type<'gcc>,
         low: RValue<'gcc>,
@@ -993,7 +1028,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         self.context.new_array_constructor(None, typ, &values)
     }
 
-    fn from_low_high(&self, typ: Type<'gcc>, low: i64, high: i64) -> RValue<'gcc> {
+    fn concat_low_high(&self, typ: Type<'gcc>, low: i64, high: i64) -> RValue<'gcc> {
         let (first, last) = match self.sess().target.options.endian {
             Endian::Little => (low, high),
             Endian::Big => (high, low),

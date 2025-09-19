@@ -1,25 +1,28 @@
-use crate::util::{
-    check_zero_tts, get_single_str_from_tts, get_single_str_spanned_from_tts, parse_expr,
-};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
+
 use rustc_ast as ast;
 use rustc_ast::ptr::P;
 use rustc_ast::token;
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast_pretty::pprust;
-use rustc_data_structures::sync::Lrc;
 use rustc_expand::base::{
-    resolve_path, DummyResult, ExpandResult, ExtCtxt, MacEager, MacResult, MacroExpanderResult,
+    DummyResult, ExpandResult, ExtCtxt, MacEager, MacResult, MacroExpanderResult, resolve_path,
 };
 use rustc_expand::module::DirOwnership;
-use rustc_parse::new_parser_from_file;
+use rustc_lint_defs::BuiltinLintDiag;
 use rustc_parse::parser::{ForceCollect, Parser};
+use rustc_parse::{new_parser_from_file, unwrap_or_emit_fatal, utf8_error};
 use rustc_session::lint::builtin::INCOMPLETE_INCLUDE;
 use rustc_span::source_map::SourceMap;
-use rustc_span::symbol::Symbol;
-use rustc_span::{Pos, Span};
+use rustc_span::{Pos, Span, Symbol};
 use smallvec::SmallVec;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+
+use crate::errors;
+use crate::util::{
+    check_zero_tts, get_single_str_from_tts, get_single_str_spanned_from_tts, parse_expr,
+};
 
 // These macros all relate to the file system; they either return
 // the column/row/filename of the expression, or they include
@@ -69,7 +72,8 @@ pub(crate) fn expand_file(
     let topmost = cx.expansion_cause().unwrap_or(sp);
     let loc = cx.source_map().lookup_char_pos(topmost.lo());
 
-    use rustc_session::{config::RemapPathScopeComponents, RemapFileNameExt};
+    use rustc_session::RemapFileNameExt;
+    use rustc_session::config::RemapPathScopeComponents;
     ExpandResult::Ready(MacEager::expr(cx.expr_str(
         topmost,
         Symbol::intern(
@@ -125,7 +129,7 @@ pub(crate) fn expand_include<'cx>(
             return ExpandResult::Ready(DummyResult::any(sp, guar));
         }
     };
-    let p = new_parser_from_file(cx.psess(), &file, Some(sp));
+    let p = unwrap_or_emit_fatal(new_parser_from_file(cx.psess(), &file, Some(sp)));
 
     // If in the included file we have e.g., `mod bar;`,
     // then the path of `bar.rs` should be relative to the directory of `file`.
@@ -147,7 +151,7 @@ pub(crate) fn expand_include<'cx>(
                     INCOMPLETE_INCLUDE,
                     self.p.token.span,
                     self.node_id,
-                    "include macro expected single expression in source",
+                    BuiltinLintDiag::IncompleteInclude,
                 );
             }
             Some(expr)
@@ -164,9 +168,13 @@ pub(crate) fn expand_include<'cx>(
                     Ok(Some(item)) => ret.push(item),
                     Ok(None) => {
                         if self.p.token != token::Eof {
-                            let token = pprust::token_to_string(&self.p.token);
-                            let msg = format!("expected item, found `{token}`");
-                            self.p.dcx().span_err(self.p.token.span, msg);
+                            self.p
+                                .dcx()
+                                .create_err(errors::ExpectedItem {
+                                    span: self.p.token.span,
+                                    token: &pprust::token_to_string(&self.p.token),
+                                })
+                                .emit();
                         }
 
                         break;
@@ -201,9 +209,10 @@ pub(crate) fn expand_include_str(
                 let interned_src = Symbol::intern(src);
                 MacEager::expr(cx.expr_str(cx.with_def_site_ctxt(bsp), interned_src))
             }
-            Err(_) => {
-                let guar = cx.dcx().span_err(sp, format!("`{path}` wasn't a utf-8 file"));
-                DummyResult::any(sp, guar)
+            Err(utf8err) => {
+                let mut err = cx.dcx().struct_span_err(sp, format!("`{path}` wasn't a utf-8 file"));
+                utf8_error(cx.source_map(), path.as_str(), None, &mut err, utf8err, &bytes[..]);
+                DummyResult::any(sp, err.emit())
             }
         },
         Err(dummy) => dummy,
@@ -240,7 +249,7 @@ fn load_binary_file(
     original_path: &Path,
     macro_span: Span,
     path_span: Span,
-) -> Result<(Lrc<[u8]>, Span), Box<dyn MacResult>> {
+) -> Result<(Arc<[u8]>, Span), Box<dyn MacResult>> {
     let resolved_path = match resolve_path(&cx.sess, original_path, macro_span) {
         Ok(path) => path,
         Err(err) => {
@@ -265,7 +274,7 @@ fn load_binary_file(
                     .and_then(|path| path.into_os_string().into_string().ok());
 
                 if let Some(new_path) = new_path {
-                    err.span_suggestion(
+                    err.span_suggestion_verbose(
                         path_span,
                         "there is a file with the same name in a different directory",
                         format!("\"{}\"", new_path.replace('\\', "/").escape_debug()),

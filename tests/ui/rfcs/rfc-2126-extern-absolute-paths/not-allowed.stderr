@@ -4,12 +4,10 @@ error[E0432]: unresolved import `alloc`
 LL | use alloc;
    |     ^^^^^ no external crate `alloc`
    |
-help: consider importing one of these items instead
+help: consider importing this module instead
    |
-LL | use core::alloc;
-   |     ~~~~~~~~~~~
 LL | use std::alloc;
-   |     ~~~~~~~~~~
+   |     +++++
 
 error: aborting due to 1 previous error
 

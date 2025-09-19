@@ -25,6 +25,7 @@ use crate::task::{Context, Poll};
 /// [`async`]: ../../std/keyword.async.html
 /// [`Waker`]: crate::task::Waker
 #[doc(notable_trait)]
+#[doc(search_unbox)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 #[stable(feature = "futures_api", since = "1.36.0")]
 #[lang = "future_trait"]
@@ -35,10 +36,10 @@ use crate::task::{Context, Poll};
 pub trait Future {
     /// The type of value produced on completion.
     #[stable(feature = "futures_api", since = "1.36.0")]
-    #[rustc_diagnostic_item = "FutureOutput"]
+    #[lang = "future_output"]
     type Output;
 
-    /// Attempt to resolve the future to a final value, registering
+    /// Attempts to resolve the future to a final value, registering
     /// the current task for wakeup if the value is not yet available.
     ///
     /// # Return value

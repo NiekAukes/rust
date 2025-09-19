@@ -1,4 +1,5 @@
-//@ compile-flags: -O --target=avr-unknown-gnu-atmega328 --crate-type=rlib
+//@ add-core-stubs
+//@ compile-flags: -Copt-level=3 --target=avr-none -C target-cpu=atmega328p --crate-type=rlib -C panic=abort
 //@ needs-llvm-components: avr
 
 // This test validates that function pointers can be stored in global variables
@@ -13,45 +14,11 @@
 #![crate_type = "lib"]
 #![no_core]
 
-#[lang = "sized"]
-pub trait Sized { }
-#[lang = "copy"]
-pub trait Copy { }
-#[lang = "receiver"]
-pub trait Receiver { }
-#[lang = "tuple_trait"]
-pub trait Tuple { }
+extern crate minicore;
+use minicore::*;
 
-pub struct Result<T, E> { _a: T, _b: E }
-
-impl Copy for usize {}
-impl Copy for &usize {}
-
-#[lang = "drop_in_place"]
-pub unsafe fn drop_in_place<T: ?Sized>(_: *mut T) {}
-
-#[lang = "fn_once"]
-pub trait FnOnce<Args: Tuple> {
-    #[lang = "fn_once_output"]
-    type Output;
-
-    extern "rust-call" fn call_once(self, args: Args) -> Self::Output;
-}
-
-#[lang = "fn_mut"]
-pub trait FnMut<Args: Tuple> : FnOnce<Args> {
-    extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output;
-}
-
-#[lang = "fn"]
-pub trait Fn<Args: Tuple>: FnOnce<Args> {
-    /// Performs the call operation.
-    extern "rust-call" fn call(&self, args: Args) -> Self::Output;
-}
-
-extern "rust-intrinsic" {
-    pub fn transmute<Src, Dst>(src: Src) -> Dst;
-}
+#[rustc_intrinsic]
+pub unsafe fn transmute<Src, Dst>(src: Src) -> Dst;
 
 pub static mut STORAGE_FOO: fn(&usize, &mut u32) -> Result<(), ()> = arbitrary_black_box;
 pub static mut STORAGE_BAR: u32 = 12;
@@ -64,7 +31,7 @@ fn arbitrary_black_box(ptr: &usize, _: &mut u32) -> Result<(), ()> {
 
 #[inline(never)]
 #[no_mangle]
-fn call_through_fn_trait(a: &mut impl Fn<(), Output=()>) {
+fn call_through_fn_trait(a: &mut impl Fn<(), Output = ()>) {
     (*a)()
 }
 
@@ -82,7 +49,7 @@ pub extern "C" fn test() {
 
     // A call through the Fn trait must use address space 1.
     //
-    // CHECK: call{{.+}}addrspace(1) void @call_through_fn_trait()
+    // CHECK: call{{.+}}addrspace(1) void @call_through_fn_trait({{.*}})
     call_through_fn_trait(&mut update_bar_value);
 
     // A call through a global variable must use address space 1.
@@ -110,7 +77,10 @@ pub unsafe fn transmute_fn_ptr_to_data(x: fn()) -> *const () {
     transmute(x)
 }
 
-pub enum Either<T, U> { A(T), B(U) }
+pub enum Either<T, U> {
+    A(T),
+    B(U),
+}
 
 // Previously, we would codegen this as passing/returning a scalar pair of `{ i8, ptr }`,
 // with the `ptr` field representing both `&i32` and `fn()` depending on the variant.

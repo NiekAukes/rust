@@ -16,8 +16,7 @@ use metavar_expr::MetaVarExpr;
 use rustc_ast::token::{Delimiter, NonterminalKind, Token, TokenKind};
 use rustc_ast::tokenstream::{DelimSpacing, DelimSpan};
 use rustc_macros::{Decodable, Encodable};
-use rustc_span::symbol::Ident;
-use rustc_span::Span;
+use rustc_span::{Ident, Span};
 
 /// Contains the sub-token-trees of a "delimited" token tree such as `(a b c)`.
 /// The delimiters are not represented explicitly in the `tts` vector.
@@ -68,12 +67,15 @@ pub(crate) enum KleeneOp {
 /// `MetaVarExpr` are "first-class" token trees. Useful for parsing macros.
 #[derive(Debug, PartialEq, Encodable, Decodable)]
 enum TokenTree {
+    /// A token. Unlike `tokenstream::TokenTree::Token` this lacks a `Spacing`.
+    /// See the comments about `Spacing` in the `transcribe` function.
     Token(Token),
     /// A delimited sequence, e.g. `($e:expr)` (RHS) or `{ $e }` (LHS).
     Delimited(DelimSpan, DelimSpacing, Delimited),
     /// A kleene-style repetition sequence, e.g. `$($e:expr)*` (RHS) or `$($e),*` (LHS).
     Sequence(DelimSpan, SequenceRepetition),
-    /// e.g., `$var`.
+    /// e.g., `$var`. The span covers the leading dollar and the ident. (The span within the ident
+    /// only covers the ident, e.g. `var`.)
     MetaVar(Span, Ident),
     /// e.g., `$var:expr`. Only appears on the LHS.
     MetaVarDecl(Span, Ident /* name to bind */, Option<NonterminalKind>),

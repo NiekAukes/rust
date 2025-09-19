@@ -2,7 +2,6 @@
 //@ compile-flags: -Zmir-enable-passes=+Inline
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
-#![feature(control_flow_enum)]
 #![feature(try_trait_v2)]
 #![feature(custom_mir, core_intrinsics, rustc_attrs)]
 
@@ -24,11 +23,11 @@ fn too_complex(x: Result<i32, usize>) -> Option<i32> {
     // CHECK: bb4: {
     // CHECK:     goto -> bb6;
     // CHECK: bb5: {
-    // CHECK:     {{_.*}} = (([[controlflow]] as Break).0: usize);
+    // CHECK:     {{_.*}} = copy (([[controlflow]] as Break).0: usize);
     // CHECK:     _0 = Option::<i32>::None;
     // CHECK:     goto -> bb7;
     // CHECK: bb6: {
-    // CHECK:     {{_.*}} = (([[controlflow]] as Continue).0: i32);
+    // CHECK:     {{_.*}} = copy (([[controlflow]] as Continue).0: i32);
     // CHECK:     _0 = Option::<i32>::Some(
     // CHECK:     goto -> bb7;
     // CHECK: bb7: {
@@ -49,16 +48,16 @@ fn too_complex(x: Result<i32, usize>) -> Option<i32> {
 fn identity(x: Result<i32, i32>) -> Result<i32, i32> {
     // CHECK-LABEL: fn identity(
     // CHECK: bb0: {
-    // CHECK:     [[x:_.*]] = _1;
+    // CHECK:     [[x:_.*]] = copy _1;
     // CHECK:     switchInt(move {{_.*}}) -> [0: bb7, 1: bb6, otherwise: bb1];
     // CHECK: bb1: {
     // CHECK:     unreachable;
     // CHECK: bb2: {
-    // CHECK:     {{_.*}} = (([[controlflow:_.*]] as Continue).0: i32);
+    // CHECK:     {{_.*}} = copy (([[controlflow:_.*]] as Continue).0: i32);
     // CHECK:     _0 = Result::<i32, i32>::Ok(
     // CHECK:     goto -> bb4;
     // CHECK: bb3: {
-    // CHECK:     {{_.*}} = (([[controlflow]] as Break).0: std::result::Result<std::convert::Infallible, i32>);
+    // CHECK:     {{_.*}} = copy (([[controlflow]] as Break).0: std::result::Result<std::convert::Infallible, i32>);
     // CHECK:     _0 = Result::<i32, i32>::Err(
     // CHECK:     goto -> bb4;
     // CHECK: bb4: {
@@ -93,19 +92,19 @@ fn dfa() {
     // CHECK:     {{_.*}} = DFA::A;
     // CHECK:     goto -> bb1;
     // CHECK: bb1: {
-    // CHECK:     switchInt({{.*}}) -> [0: bb4, 1: bb5, 2: bb6, 3: bb3, otherwise: bb2];
+    // CHECK:     switchInt({{.*}}) -> [0: bb6, 1: bb5, 2: bb4, 3: bb3, otherwise: bb2];
     // CHECK: bb2: {
     // CHECK:     unreachable;
     // CHECK: bb3: {
     // CHECK:     return;
     // CHECK: bb4: {
-    // CHECK:     {{_.*}} = DFA::B;
+    // CHECK:     {{_.*}} = DFA::D;
     // CHECK:     goto -> bb1;
     // CHECK: bb5: {
     // CHECK:     {{_.*}} = DFA::C;
     // CHECK:     goto -> bb1;
     // CHECK: bb6: {
-    // CHECK:     {{_.*}} = DFA::D;
+    // CHECK:     {{_.*}} = DFA::B;
     // CHECK:     goto -> bb1;
     let mut state = DFA::A;
     loop {
@@ -157,16 +156,16 @@ fn custom_discr(x: bool) -> u8 {
 #[custom_mir(dialect = "runtime", phase = "post-cleanup")]
 fn multiple_match(x: u8) -> u8 {
     // CHECK-LABEL: fn multiple_match(
-    mir!(
+    mir! {
         {
             // CHECK: bb0: {
-            // CHECK:     switchInt([[x:_.*]]) -> [3: bb1, otherwise: bb2];
+            // CHECK:     switchInt(copy [[x:_.*]]) -> [3: bb1, otherwise: bb2];
             match x { 3 => bb1, _ => bb2 }
         }
         bb1 = {
             // We know `x == 3`, so we can take `bb3`.
             // CHECK: bb1: {
-            // CHECK:     {{_.*}} = [[x]];
+            // CHECK:     {{_.*}} = copy [[x]];
             // CHECK:     goto -> bb3;
             let y = x;
             match y { 3 => bb3, _ => bb4 }
@@ -174,7 +173,7 @@ fn multiple_match(x: u8) -> u8 {
         bb2 = {
             // We know `x != 3`, so we can take `bb6`.
             // CHECK: bb2: {
-            // CHECK:     [[z:_.*]] = [[x]];
+            // CHECK:     [[z:_.*]] = copy [[x]];
             // CHECK:     goto -> bb6;
             let z = x;
             match z { 3 => bb5, _ => bb6 }
@@ -203,7 +202,7 @@ fn multiple_match(x: u8) -> u8 {
         bb6 = {
             // We know `z != 3`, so we CANNOT take `bb7`.
             // CHECK: bb6: {
-            // CHECK:     switchInt([[z]]) -> [1: bb7, otherwise: bb8];
+            // CHECK:     switchInt(copy [[z]]) -> [1: bb7, otherwise: bb8];
             match z { 1 => bb7, _ => bb8 }
         }
         bb7 = {
@@ -220,7 +219,7 @@ fn multiple_match(x: u8) -> u8 {
             RET = 11;
             Return()
         }
-    )
+    }
 }
 
 /// Both 1-3-4 and 2-3-4 are threadable. As 1 and 2 are the only predecessors of 3,
@@ -228,7 +227,7 @@ fn multiple_match(x: u8) -> u8 {
 #[custom_mir(dialect = "runtime", phase = "post-cleanup")]
 fn duplicate_chain(x: bool) -> u8 {
     // CHECK-LABEL: fn duplicate_chain(
-    mir!(
+    mir! {
         let a: u8;
         {
             // CHECK: bb0: {
@@ -278,7 +277,7 @@ fn duplicate_chain(x: bool) -> u8 {
             RET = 9;
             Return()
         }
-    )
+    }
 }
 
 #[rustc_layout_scalar_valid_range_start(1)]
@@ -292,7 +291,7 @@ fn mutate_discriminant() -> u8 {
     // CHECK-NOT: goto -> {{bb.*}};
     // CHECK: switchInt(
     // CHECK-NOT: goto -> {{bb.*}};
-    mir!(
+    mir! {
         let x: Option<NonZeroUsize>;
         {
             SetDiscriminant(x, 1);
@@ -313,7 +312,7 @@ fn mutate_discriminant() -> u8 {
             RET = 2;
             Unreachable()
         }
-    )
+    }
 }
 
 /// Verify that we do not try to reason when there are mutable pointers involved.
@@ -330,11 +329,7 @@ fn mutable_ref() -> bool {
     let a = std::ptr::addr_of_mut!(x);
     x = 7;
     unsafe { *a = 8 };
-    if x == 7 {
-        true
-    } else {
-        false
-    }
+    if x == 7 { true } else { false }
 }
 
 /// This function has 2 TOs: 1-3-4 and 0-1-3-4-6.
@@ -342,7 +337,7 @@ fn mutable_ref() -> bool {
 #[custom_mir(dialect = "runtime", phase = "post-cleanup")]
 fn renumbered_bb(x: bool) -> u8 {
     // CHECK-LABEL: fn renumbered_bb(
-    mir!(
+    mir! {
         let a: bool;
         let b: bool;
         {
@@ -398,7 +393,7 @@ fn renumbered_bb(x: bool) -> u8 {
         // Duplicate of bb4.
         // CHECK: bb9: {
         // CHECK-NEXT: goto -> bb6;
-    )
+    }
 }
 
 /// This function has 3 TOs: 1-4-5, 0-1-4-7-5-8 and 3-4-7-5-6
@@ -408,7 +403,7 @@ fn renumbered_bb(x: bool) -> u8 {
 #[custom_mir(dialect = "runtime", phase = "post-cleanup")]
 fn disappearing_bb(x: u8) -> u8 {
     // CHECK-LABEL: fn disappearing_bb(
-    mir!(
+    mir! {
         let a: bool;
         let b: bool;
         {
@@ -450,7 +445,7 @@ fn disappearing_bb(x: u8) -> u8 {
         // CHECK: goto -> bb5;
         // CHECK: bb10: {
         // CHECK: goto -> bb6;
-    )
+    }
 }
 
 /// Verify that we can thread jumps when we assign from an aggregate constant.
@@ -461,26 +456,22 @@ fn aggregate(x: u8) -> u8 {
     const FOO: (u8, u8) = (5, 13);
 
     let (a, b) = FOO;
-    if a == 7 {
-        b
-    } else {
-        a
-    }
+    if a == 7 { b } else { a }
 }
 
 /// Verify that we can leverage the existence of an `Assume` terminator.
 #[custom_mir(dialect = "runtime", phase = "post-cleanup")]
 fn assume(a: u8, b: bool) -> u8 {
     // CHECK-LABEL: fn assume(
-    mir!(
+    mir! {
         {
             // CHECK: bb0: {
-            // CHECK-NEXT: switchInt(_1) -> [7: bb1, otherwise: bb2]
+            // CHECK-NEXT: switchInt(copy _1) -> [7: bb1, otherwise: bb2]
             match a { 7 => bb1, _ => bb2 }
         }
         bb1 = {
             // CHECK: bb1: {
-            // CHECK-NEXT: assume(_2);
+            // CHECK-NEXT: assume(copy _2);
             // CHECK-NEXT: goto -> bb6;
             Assume(b);
             Goto(bb3)
@@ -492,7 +483,7 @@ fn assume(a: u8, b: bool) -> u8 {
         }
         bb3 = {
             // CHECK: bb3: {
-            // CHECK-NEXT: switchInt(_2) -> [0: bb4, otherwise: bb5];
+            // CHECK-NEXT: switchInt(copy _2) -> [0: bb4, otherwise: bb5];
             match b { false => bb4, _ => bb5 }
         }
         bb4 = {
@@ -511,7 +502,47 @@ fn assume(a: u8, b: bool) -> u8 {
         }
         // CHECK: bb6: {
         // CHECK-NEXT: goto -> bb5;
-    )
+    }
+}
+
+/// Verify that jump threading succeeds seeing through copies of aggregates.
+fn aggregate_copy() -> u32 {
+    // CHECK-LABEL: fn aggregate_copy(
+    // CHECK-NOT: switchInt(
+
+    const Foo: (u32, u32) = (5, 3);
+
+    let a = Foo;
+    // This copies a tuple, we want to ensure that the threading condition on `b.1` propagates to a
+    // condition on `a.1`.
+    let b = a;
+    let c = b.1;
+    if c == 2 { b.0 } else { 13 }
+}
+
+fn floats() -> u32 {
+    // CHECK-LABEL: fn floats(
+    // CHECK: switchInt(
+
+    // Test for issue #128243, where float equality was assumed to be bitwise.
+    // When adding float support, it must be ensured that this continues working properly.
+    let x = if true { -0.0 } else { 1.0 };
+    if x == 0.0 { 0 } else { 1 }
+}
+
+pub fn bitwise_not() -> i32 {
+    // CHECK-LABEL: fn bitwise_not(
+
+    // Test for #131195, which was optimizing `!a == b` into `a != b`.
+    let a = 1;
+    if !a == 0 { 1 } else { 0 }
+}
+
+pub fn logical_not() -> i32 {
+    // CHECK-LABEL: fn logical_not(
+
+    let a = false;
+    if !a == true { 1 } else { 0 }
 }
 
 fn main() {
@@ -528,6 +559,9 @@ fn main() {
     disappearing_bb(7);
     aggregate(7);
     assume(7, false);
+    floats();
+    bitwise_not();
+    logical_not();
 }
 
 // EMIT_MIR jump_threading.too_complex.JumpThreading.diff
@@ -542,3 +576,7 @@ fn main() {
 // EMIT_MIR jump_threading.disappearing_bb.JumpThreading.diff
 // EMIT_MIR jump_threading.aggregate.JumpThreading.diff
 // EMIT_MIR jump_threading.assume.JumpThreading.diff
+// EMIT_MIR jump_threading.aggregate_copy.JumpThreading.diff
+// EMIT_MIR jump_threading.floats.JumpThreading.diff
+// EMIT_MIR jump_threading.bitwise_not.JumpThreading.diff
+// EMIT_MIR jump_threading.logical_not.JumpThreading.diff

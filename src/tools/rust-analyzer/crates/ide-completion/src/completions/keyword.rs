@@ -14,9 +14,9 @@ pub(crate) fn complete_for_and_where(
     match keyword_item {
         Item::Impl(it) => {
             if it.for_token().is_none() && it.trait_().is_none() && it.self_ty().is_some() {
-                add_keyword("for", "for");
+                add_keyword("for", "for $0");
             }
-            add_keyword("where", "where");
+            add_keyword("where", "where $0");
         }
         Item::Enum(_)
         | Item::Fn(_)
@@ -24,7 +24,7 @@ pub(crate) fn complete_for_and_where(
         | Item::Trait(_)
         | Item::TypeAlias(_)
         | Item::Union(_) => {
-            add_keyword("where", "where");
+            add_keyword("where", "where $0");
         }
         _ => (),
     }
@@ -32,14 +32,9 @@ pub(crate) fn complete_for_and_where(
 
 #[cfg(test)]
 mod tests {
-    use expect_test::{expect, Expect};
+    use expect_test::expect;
 
-    use crate::tests::{check_edit, completion_list};
-
-    fn check(ra_fixture: &str, expect: Expect) {
-        let actual = completion_list(ra_fixture);
-        expect.assert_eq(&actual)
-    }
+    use crate::tests::{check, check_edit};
 
     #[test]
     fn test_else_edit_after_if() {
@@ -57,8 +52,11 @@ mod tests {
         check(
             r"fn my_fn() { unsafe $0 }",
             expect![[r#"
+                kw async
+                kw extern
                 kw fn
                 kw impl
+                kw impl for
                 kw trait
             "#]],
         );
@@ -76,19 +74,20 @@ fn foo(a: A) { a.$0 }
 "#,
             expect![[r#"
                 me into_future() (as IntoFuture) fn(self) -> <Self as IntoFuture>::IntoFuture
-                kw await                  expr.await
-                sn box                    Box::new(expr)
-                sn call                   function(expr)
-                sn dbg                    dbg!(expr)
-                sn dbgr                   dbg!(&expr)
-                sn deref                  *expr
-                sn let                    let
-                sn letm                   let mut
-                sn match                  match expr {}
-                sn ref                    &expr
-                sn refm                   &mut expr
-                sn return                 return expr
-                sn unsafe                 unsafe {}
+                kw await                                                           expr.await
+                sn box                                                         Box::new(expr)
+                sn call                                                        function(expr)
+                sn const                                                             const {}
+                sn dbg                                                             dbg!(expr)
+                sn dbgr                                                           dbg!(&expr)
+                sn deref                                                                *expr
+                sn let                                                                    let
+                sn letm                                                               let mut
+                sn match                                                        match expr {}
+                sn ref                                                                  &expr
+                sn refm                                                             &mut expr
+                sn return                                                         return expr
+                sn unsafe                                                           unsafe {}
             "#]],
         );
 
@@ -103,19 +102,20 @@ fn foo() {
 "#,
             expect![[r#"
                 me into_future() (use core::future::IntoFuture) fn(self) -> <Self as IntoFuture>::IntoFuture
-                kw await                  expr.await
-                sn box                    Box::new(expr)
-                sn call                   function(expr)
-                sn dbg                    dbg!(expr)
-                sn dbgr                   dbg!(&expr)
-                sn deref                  *expr
-                sn let                    let
-                sn letm                   let mut
-                sn match                  match expr {}
-                sn ref                    &expr
-                sn refm                   &mut expr
-                sn return                 return expr
-                sn unsafe                 unsafe {}
+                kw await                                                                          expr.await
+                sn box                                                                        Box::new(expr)
+                sn call                                                                       function(expr)
+                sn const                                                                            const {}
+                sn dbg                                                                            dbg!(expr)
+                sn dbgr                                                                          dbg!(&expr)
+                sn deref                                                                               *expr
+                sn let                                                                                   let
+                sn letm                                                                              let mut
+                sn match                                                                       match expr {}
+                sn ref                                                                                 &expr
+                sn refm                                                                            &mut expr
+                sn return                                                                        return expr
+                sn unsafe                                                                          unsafe {}
             "#]],
         );
     }
@@ -132,20 +132,83 @@ fn foo(a: A) { a.$0 }
 "#,
             expect![[r#"
                 me into_future() (as IntoFuture) fn(self) -> <Self as IntoFuture>::IntoFuture
-                kw await                  expr.await
-                sn box                    Box::new(expr)
-                sn call                   function(expr)
-                sn dbg                    dbg!(expr)
-                sn dbgr                   dbg!(&expr)
-                sn deref                  *expr
-                sn let                    let
-                sn letm                   let mut
-                sn match                  match expr {}
-                sn ref                    &expr
-                sn refm                   &mut expr
-                sn return                 return expr
-                sn unsafe                 unsafe {}
+                kw await                                                           expr.await
+                sn box                                                         Box::new(expr)
+                sn call                                                        function(expr)
+                sn const                                                             const {}
+                sn dbg                                                             dbg!(expr)
+                sn dbgr                                                           dbg!(&expr)
+                sn deref                                                                *expr
+                sn let                                                                    let
+                sn letm                                                               let mut
+                sn match                                                        match expr {}
+                sn ref                                                                  &expr
+                sn refm                                                             &mut expr
+                sn return                                                         return expr
+                sn unsafe                                                           unsafe {}
             "#]],
+        );
+    }
+
+    #[test]
+    fn for_in_impl() {
+        check_edit(
+            "for",
+            r#"
+struct X;
+impl X $0 {}
+"#,
+            r#"
+struct X;
+impl X for $0 {}
+"#,
+        );
+        check_edit(
+            "for",
+            r#"
+fn foo() {
+    struct X;
+    impl X $0 {}
+}
+"#,
+            r#"
+fn foo() {
+    struct X;
+    impl X for $0 {}
+}
+"#,
+        );
+        check_edit(
+            "for",
+            r#"
+fn foo() {
+    struct X;
+    impl X $0
+}
+"#,
+            r#"
+fn foo() {
+    struct X;
+    impl X for $0
+}
+"#,
+        );
+        check_edit(
+            "for",
+            r#"
+fn foo() {
+    struct X;
+    impl X { fn bar() { $0 } }
+}
+"#,
+            r#"
+fn foo() {
+    struct X;
+    impl X { fn bar() { for $1 in $2 {
+    $0
+} } }
+}
+"#,
         );
     }
 
@@ -270,5 +333,125 @@ fn main() {
 }
 ",
         )
+    }
+
+    #[test]
+    fn completes_let_in_block() {
+        check_edit(
+            "let",
+            r#"
+fn main() {
+    $0
+}
+"#,
+            r#"
+fn main() {
+    let $1 = $0;
+}
+"#,
+        );
+        check_edit(
+            "letm",
+            r#"
+fn main() {
+    $0
+}
+"#,
+            r#"
+fn main() {
+    let mut $1 = $0;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn completes_let_in_condition() {
+        check_edit(
+            "let",
+            r#"
+fn main() {
+    if $0 {}
+}
+"#,
+            r#"
+fn main() {
+    if let $1 = $0 {}
+}
+"#,
+        );
+        check_edit(
+            "letm",
+            r#"
+fn main() {
+    if $0 {}
+}
+"#,
+            r#"
+fn main() {
+    if let mut $1 = $0 {}
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn completes_let_in_no_empty_condition() {
+        check_edit(
+            "let",
+            r#"
+fn main() {
+    if $0x {}
+}
+"#,
+            r#"
+fn main() {
+    if let $1 = $0x {}
+}
+"#,
+        );
+        check_edit(
+            "letm",
+            r#"
+fn main() {
+    if $0x {}
+}
+"#,
+            r#"
+fn main() {
+    if let mut $1 = $0x {}
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn completes_let_in_condition_block() {
+        check_edit(
+            "let",
+            r#"
+fn main() {
+    if { $0 } {}
+}
+"#,
+            r#"
+fn main() {
+    if { let $1 = $0; } {}
+}
+"#,
+        );
+        check_edit(
+            "letm",
+            r#"
+fn main() {
+    if { $0 } {}
+}
+"#,
+            r#"
+fn main() {
+    if { let mut $1 = $0; } {}
+}
+"#,
+        );
     }
 }

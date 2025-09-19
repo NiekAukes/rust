@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import argparse
 
 CGREEN  = '\33[32m'
 CBOLD   = '\33[1m'
@@ -21,12 +22,17 @@ def fail(msg):
     print("\nTEST FAIL: {}".format(msg))
     sys.exit(1)
 
-def cargo_miri(cmd, quiet = True):
+def cargo_miri(cmd, quiet = True, targets = None):
     args = ["cargo", "miri", cmd] + CARGO_EXTRA_FLAGS
     if quiet:
         args += ["-q"]
-    if 'MIRI_TEST_TARGET' in os.environ:
-        args += ["--target", os.environ['MIRI_TEST_TARGET']]
+
+    if targets is not None:
+        for target in targets:
+            args.extend(("--target", target))
+    elif ARGS.target is not None:
+        args += ["--target", ARGS.target]
+
     return args
 
 def normalize_stdout(str):
@@ -35,7 +41,7 @@ def normalize_stdout(str):
     return str
 
 def check_output(actual, path, name):
-    if os.environ.get("RUSTC_BLESS", "0") != "0":
+    if ARGS.bless:
         # Write the output only if bless is set
         open(path, mode='w').write(actual)
         return True
@@ -130,68 +136,80 @@ def test_cargo_miri_run():
         cargo_miri("run") + ["--target-dir=custom-run", "--", "--target-dir=target/custom-run"],
         "run.args.stdout.ref", "run.custom-target-dir.stderr.ref",
     )
+    test("`cargo miri run` (test local crate detection)",
+         cargo_miri("run") + ["--package=test-local-crate-detection"],
+         "run.local_crate.stdout.ref", "run.local_crate.stderr.ref",
+    )
 
 def test_cargo_miri_test():
-    # rustdoc is not run on foreign targets
-    is_foreign = 'MIRI_TEST_TARGET' in os.environ
-    default_ref = "test.cross-target.stdout.ref" if is_foreign else "test.default.stdout.ref"
-    filter_ref = "test.filter.cross-target.stdout.ref" if is_foreign else "test.filter.stdout.ref"
-
-    # macOS needs permissive provenance inside getrandom_1.
     test("`cargo miri test`",
         cargo_miri("test"),
-        default_ref, "test.stderr-empty.ref",
-        env={'MIRIFLAGS': "-Zmiri-permissive-provenance -Zmiri-seed=4242"},
+        "test.default.stdout.ref", "test.empty.ref",
+        env={'MIRIFLAGS': "-Zmiri-seed=4242"},
     )
     test("`cargo miri test` (no isolation, no doctests)",
         cargo_miri("test") + ["--bins", "--tests"], # no `--lib`, we disabled that in `Cargo.toml`
-        "test.cross-target.stdout.ref", "test.stderr-empty.ref",
-        env={'MIRIFLAGS': "-Zmiri-permissive-provenance -Zmiri-disable-isolation"},
+        "test.no-doc.stdout.ref", "test.empty.ref",
+        env={'MIRIFLAGS': "-Zmiri-disable-isolation"},
     )
     test("`cargo miri test` (with filter)",
         cargo_miri("test") + ["--", "--format=pretty", "pl"],
-        filter_ref, "test.stderr-empty.ref",
+        "test.filter.stdout.ref", "test.empty.ref",
     )
     test("`cargo miri test` (test target)",
         cargo_miri("test") + ["--test", "test", "--", "--format=pretty"],
-        "test.test-target.stdout.ref", "test.stderr-empty.ref",
-        env={'MIRIFLAGS': "-Zmiri-permissive-provenance"},
+        "test.test-target.stdout.ref", "test.empty.ref",
     )
     test("`cargo miri test` (bin target)",
         cargo_miri("test") + ["--bin", "cargo-miri-test", "--", "--format=pretty"],
-        "test.bin-target.stdout.ref", "test.stderr-empty.ref",
+        "test.bin-target.stdout.ref", "test.empty.ref",
     )
     test("`cargo miri t` (subcrate, no isolation)",
         cargo_miri("t") + ["-p", "subcrate"],
-        "test.subcrate.stdout.ref", "test.stderr-proc-macro.ref",
+        "test.subcrate.stdout.ref",
+        "test.empty.ref",
         env={'MIRIFLAGS': "-Zmiri-disable-isolation"},
     )
-    test("`cargo miri test` (subcrate, doctests)",
-        cargo_miri("test") + ["-p", "subcrate", "--doc"],
-        "test.stdout-empty.ref", "test.stderr-proc-macro-doctest.ref",
+    test("`cargo miri test` (proc-macro crate)",
+        cargo_miri("test") + ["-p", "proc_macro_crate"],
+        "test.empty.ref", "test.proc-macro.stderr.ref",
     )
     test("`cargo miri test` (custom target dir)",
         cargo_miri("test") + ["--target-dir=custom-test"],
-        default_ref, "test.stderr-empty.ref",
-        env={'MIRIFLAGS': "-Zmiri-permissive-provenance"},
+        "test.default.stdout.ref", "test.empty.ref",
     )
     del os.environ["CARGO_TARGET_DIR"] # this overrides `build.target-dir` passed by `--config`, so unset it
     test("`cargo miri test` (config-cli)",
         cargo_miri("test") + ["--config=build.target-dir=\"config-cli\""],
-        default_ref, "test.stderr-empty.ref",
-        env={'MIRIFLAGS': "-Zmiri-permissive-provenance"},
+        "test.default.stdout.ref", "test.empty.ref",
     )
+    if ARGS.multi_target:
+        test_cargo_miri_multi_target()
+
+
+def test_cargo_miri_multi_target():
+    test("`cargo miri test` (multiple targets)",
+        cargo_miri("test", targets = ["aarch64-unknown-linux-gnu", "s390x-unknown-linux-gnu"]),
+        "test.multiple_targets.stdout.ref", "test.empty.ref",
+    )
+
+args_parser = argparse.ArgumentParser(description='`cargo miri` testing')
+args_parser.add_argument('--target', help='the target to test')
+args_parser.add_argument('--bless', help='bless the reference files', action='store_true')
+args_parser.add_argument('--multi-target', help='run tests related to multiple targets', action='store_true')
+ARGS = args_parser.parse_args()
 
 os.chdir(os.path.dirname(os.path.realpath(__file__)))
 os.environ["CARGO_TARGET_DIR"] = "target" # this affects the location of the target directory that we need to check
 os.environ["RUST_TEST_NOCAPTURE"] = "0" # this affects test output, so make sure it is not set
 os.environ["RUST_TEST_THREADS"] = "1" # avoid non-deterministic output due to concurrent test runs
 
-target_str = " for target {}".format(os.environ['MIRI_TEST_TARGET']) if 'MIRI_TEST_TARGET' in os.environ else ""
+target_str = " for target {}".format(ARGS.target) if ARGS.target else ""
 print(CGREEN + CBOLD + "## Running `cargo miri` tests{}".format(target_str) + CEND)
 
 test_cargo_miri_run()
 test_cargo_miri_test()
+
 # Ensure we did not create anything outside the expected target dir.
 for target_dir in ["target", "custom-run", "custom-test", "config-cli"]:
     if os.listdir(target_dir) != ["miri"]:

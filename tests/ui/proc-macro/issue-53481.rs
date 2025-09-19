@@ -1,11 +1,11 @@
 //@ check-pass
-//@ aux-build:test-macros.rs
+//@ proc-macro: test-macros.rs
 
 #[macro_use]
 extern crate test_macros;
 
 mod m1 {
-    use m2::Empty;
+    use crate::m2::Empty;
 
     #[derive(Empty)]
     struct A {}

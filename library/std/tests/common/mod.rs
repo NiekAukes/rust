@@ -1,10 +1,9 @@
 #![allow(unused)]
 
-use rand::RngCore;
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
+use std::{env, fs, thread};
+
+use rand::RngCore;
 
 /// Copied from `std::test_helpers::test_rng`, since these tests rely on the
 /// seed not being the same for every RNG invocation too.
@@ -19,7 +18,7 @@ pub(crate) fn test_rng() -> rand_xorshift::XorShiftRng {
     rand::SeedableRng::from_seed(seed)
 }
 
-// Copied from std::sys_common::io
+// Copied from std::test_helpers
 pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {

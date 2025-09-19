@@ -1,29 +1,20 @@
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
-#![feature(rustdoc_internals)]
-#![allow(internal_features)]
 #![feature(decl_macro)]
 #![feature(error_iter)]
-#![feature(extract_if)]
-#![feature(coroutines)]
-#![feature(iter_from_coroutine)]
-#![feature(let_chains)]
+#![feature(file_buffered)]
+#![feature(gen_blocks)]
 #![feature(if_let_guard)]
-#![feature(proc_macro_internals)]
+#![feature(iter_from_coroutine)]
 #![feature(macro_metavar_expr)]
 #![feature(min_specialization)]
-#![feature(trusted_len)]
-#![feature(try_blocks)]
 #![feature(never_type)]
-#![allow(rustc::potential_query_instability)]
-
-extern crate proc_macro;
-
-#[macro_use]
-extern crate rustc_middle;
-
-#[macro_use]
-extern crate tracing;
+#![feature(proc_macro_internals)]
+#![feature(rustdoc_internals)]
+#![feature(trusted_len)]
+// tidy-alphabetical-end
 
 pub use rmeta::provide;
 
@@ -37,9 +28,12 @@ pub mod errors;
 pub mod fs;
 pub mod locator;
 
-pub use creader::{load_symbol_from_dylib, DylibError};
-pub use fs::{emit_wrapper_file, METADATA_FILENAME};
-pub use native_libs::find_native_static_library;
-pub use rmeta::{encode_metadata, rendered_const, EncodedMetadata, METADATA_HEADER};
+pub use creader::{DylibError, load_symbol_from_dylib};
+pub use fs::{METADATA_FILENAME, emit_wrapper_file};
+pub use native_libs::{
+    NativeLibSearchFallback, find_native_static_library, try_find_native_dynamic_library,
+    try_find_native_static_library, walk_native_lib_search_dirs,
+};
+pub use rmeta::{EncodedMetadata, METADATA_HEADER, encode_metadata, rendered_const};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

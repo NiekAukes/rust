@@ -1,6 +1,8 @@
-use crate::spec::{base, Cc, LinkerFlavor, Lld, SanitizerSet, StackProbeType, Target};
+use crate::spec::{
+    Cc, LinkerFlavor, Lld, SanitizerSet, StackProbeType, Target, TargetMetadata, base,
+};
 
-pub fn target() -> Target {
+pub(crate) fn target() -> Target {
     let mut base = base::freebsd::opts();
     base.cpu = "x86-64".into();
     base.plt_by_default = false;
@@ -13,11 +15,11 @@ pub fn target() -> Target {
 
     Target {
         llvm_target: "x86_64-unknown-freebsd".into(),
-        metadata: crate::spec::TargetMetadata {
-            description: None,
-            tier: None,
-            host_tools: None,
-            std: None,
+        metadata: TargetMetadata {
+            description: Some("64-bit FreeBSD".into()),
+            tier: Some(2),
+            host_tools: Some(true),
+            std: Some(true),
         },
         pointer_width: 64,
         data_layout:

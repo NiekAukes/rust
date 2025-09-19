@@ -1,7 +1,8 @@
-use crate::core::DocContext;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, DefIdSet};
 use rustc_middle::ty::TyCtxt;
+
+use crate::core::DocContext;
 
 // FIXME: this may not be exhaustive, but is sufficient for rustdocs current uses
 
@@ -56,10 +57,10 @@ impl LibEmbargoVisitor<'_, '_> {
         }
 
         for item in self.tcx.module_children(def_id).iter() {
-            if let Some(def_id) = item.res.opt_def_id() {
-                if item.vis.is_public() {
-                    self.visit_item(def_id);
-                }
+            if let Some(def_id) = item.res.opt_def_id()
+                && item.vis.is_public()
+            {
+                self.visit_item(def_id);
             }
         }
     }

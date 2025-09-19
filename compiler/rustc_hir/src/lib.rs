@@ -2,13 +2,18 @@
 //!
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/hir.html
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![feature(associated_type_defaults)]
 #![feature(closure_track_caller)]
-#![feature(let_chains)]
+#![feature(debug_closure_helpers)]
+#![feature(exhaustive_patterns)]
+#![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(rustc_attrs)]
 #![feature(variant_count)]
-#![allow(internal_features)]
+#![recursion_limit = "256"]
+// tidy-alphabetical-end
 
 extern crate self as rustc_hir;
 
@@ -22,6 +27,7 @@ mod hir;
 pub mod hir_id;
 pub mod intravisit;
 pub mod lang_items;
+pub mod lints;
 pub mod pat_util;
 mod stable_hash_impls;
 mod target;
@@ -30,6 +36,7 @@ pub mod weak_lang_items;
 #[cfg(test)]
 mod tests;
 
+#[doc(no_inline)]
 pub use hir::*;
 pub use hir_id::*;
 pub use lang_items::{LangItem, LanguageItems};

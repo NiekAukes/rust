@@ -1,4 +1,5 @@
-#![feature(effects, const_trait_impl)]
+//@ compile-flags: -Znext-solver
+#![feature(const_trait_impl)]
 
 #[const_trait]
 pub trait Resource {}

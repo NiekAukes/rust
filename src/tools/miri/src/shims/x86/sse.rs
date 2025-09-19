@@ -1,24 +1,23 @@
+use rustc_abi::CanonAbi;
 use rustc_apfloat::ieee::Single;
-use rustc_middle::mir;
+use rustc_middle::ty::Ty;
 use rustc_span::Symbol;
-use rustc_target::spec::abi::Abi;
+use rustc_target::callconv::FnAbi;
 
 use super::{
-    bin_op_simd_float_all, bin_op_simd_float_first, unary_op_ps, unary_op_ss, FloatBinOp,
-    FloatUnaryOp,
+    FloatBinOp, FloatUnaryOp, bin_op_simd_float_all, bin_op_simd_float_first, unary_op_ps,
+    unary_op_ss,
 };
 use crate::*;
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
-    crate::MiriInterpCxExt<'mir, 'tcx>
-{
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn emulate_x86_sse_intrinsic(
         &mut self,
         link_name: Symbol,
-        abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
         this.expect_target_feature_for_intrinsic(link_name, "sse")?;
@@ -31,18 +30,13 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
         // performed only on the first element, copying the remaining elements from the input
         // vector (for binary operations, from the left-hand side).
         match unprefixed_name {
-            // Used to implement _mm_{add,sub,mul,div,min,max}_ss functions.
+            // Used to implement _mm_{min,max}_ss functions.
             // Performs the operations on the first component of `left` and
             // `right` and copies the remaining components from `left`.
-            "add.ss" | "sub.ss" | "mul.ss" | "div.ss" | "min.ss" | "max.ss" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+            "min.ss" | "max.ss" => {
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which = match unprefixed_name {
-                    "add.ss" => FloatBinOp::Arith(mir::BinOp::Add),
-                    "sub.ss" => FloatBinOp::Arith(mir::BinOp::Sub),
-                    "mul.ss" => FloatBinOp::Arith(mir::BinOp::Mul),
-                    "div.ss" => FloatBinOp::Arith(mir::BinOp::Div),
                     "min.ss" => FloatBinOp::Min,
                     "max.ss" => FloatBinOp::Max,
                     _ => unreachable!(),
@@ -56,8 +50,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // matches the IEEE min/max operations, while x86 has different
             // semantics.
             "min.ps" | "max.ps" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which = match unprefixed_name {
                     "min.ps" => FloatBinOp::Min,
@@ -67,14 +60,13 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
 
                 bin_op_simd_float_all::<Single>(this, which, left, right, dest)?;
             }
-            // Used to implement _mm_{sqrt,rcp,rsqrt}_ss functions.
+            // Used to implement _mm_{rcp,rsqrt}_ss functions.
             // Performs the operations on the first component of `op` and
             // copies the remaining components from `op`.
-            "sqrt.ss" | "rcp.ss" | "rsqrt.ss" => {
-                let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+            "rcp.ss" | "rsqrt.ss" => {
+                let [op] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which = match unprefixed_name {
-                    "sqrt.ss" => FloatUnaryOp::Sqrt,
                     "rcp.ss" => FloatUnaryOp::Rcp,
                     "rsqrt.ss" => FloatUnaryOp::Rsqrt,
                     _ => unreachable!(),
@@ -84,11 +76,10 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             }
             // Used to implement _mm_{sqrt,rcp,rsqrt}_ps functions.
             // Performs the operations on all components of `op`.
-            "sqrt.ps" | "rcp.ps" | "rsqrt.ps" => {
-                let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+            "rcp.ps" | "rsqrt.ps" => {
+                let [op] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which = match unprefixed_name {
-                    "sqrt.ps" => FloatUnaryOp::Sqrt,
                     "rcp.ps" => FloatUnaryOp::Rcp,
                     "rsqrt.ps" => FloatUnaryOp::Rsqrt,
                     _ => unreachable!(),
@@ -105,8 +96,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // _mm_cmp{eq,lt,le,gt,ge,neq,nlt,nle,ngt,nge,ord,unord}_ss are SSE functions
             // with hard-coded operations.
             "cmp.ss" => {
-                let [left, right, imm] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, imm] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which =
                     FloatBinOp::cmp_from_imm(this, this.read_scalar(imm)?.to_i8()?, link_name)?;
@@ -122,8 +112,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // _mm_cmp{eq,lt,le,gt,ge,neq,nlt,nle,ngt,nge,ord,unord}_ps are SSE functions
             // with hard-coded operations.
             "cmp.ps" => {
-                let [left, right, imm] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, imm] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which =
                     FloatBinOp::cmp_from_imm(this, this.read_scalar(imm)?.to_i8()?, link_name)?;
@@ -136,11 +125,10 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             "comieq.ss" | "comilt.ss" | "comile.ss" | "comigt.ss" | "comige.ss" | "comineq.ss"
             | "ucomieq.ss" | "ucomilt.ss" | "ucomile.ss" | "ucomigt.ss" | "ucomige.ss"
             | "ucomineq.ss" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (right, right_len) = this.operand_to_simd(right)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (right, right_len) = this.project_to_simd(right)?;
 
                 assert_eq!(left_len, right_len);
 
@@ -165,8 +153,8 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // _mm_cvtss_si64 and _mm_cvttss_si64 functions.
             // Converts the first component of `op` from f32 to i32/i64.
             "cvtss2si" | "cvttss2si" | "cvtss2si64" | "cvttss2si64" => {
-                let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
-                let (op, _) = this.operand_to_simd(op)?;
+                let [op] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let (op, _) = this.project_to_simd(op)?;
 
                 let op = this.read_immediate(&this.project_index(&op, 0)?)?;
 
@@ -193,11 +181,10 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // are copied from `left`.
             // https://www.felixcloutier.com/x86/cvtsi2ss
             "cvtsi2ss" | "cvtsi642ss" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 assert_eq!(dest_len, left_len);
 
@@ -210,8 +197,8 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                     this.copy_op(&this.project_index(&left, i)?, &this.project_index(&dest, i)?)?;
                 }
             }
-            _ => return Ok(EmulateItemResult::NotSupported),
+            _ => return interp_ok(EmulateItemResult::NotSupported),
         }
-        Ok(EmulateItemResult::NeedsJumping)
+        interp_ok(EmulateItemResult::NeedsReturn)
     }
 }

@@ -1,11 +1,12 @@
+use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
+use rustc_errors::{DiagCtxtHandle, FatalError};
+use rustc_middle::dep_graph::WorkProduct;
+
 use crate::back::lto::{LtoModuleCodegen, SerializedModule, ThinModule};
 use crate::back::write::{CodegenContext, FatLtoInput, ModuleConfig};
 use crate::{CompiledModule, ModuleCodegen};
 
-use rustc_errors::{DiagCtxt, FatalError};
-use rustc_middle::dep_graph::WorkProduct;
-
-pub trait WriteBackendMethods: 'static + Sized + Clone {
+pub trait WriteBackendMethods: Clone + 'static {
     type Module: Send + Sync;
     type TargetMachine;
     type TargetMachineError;
@@ -16,7 +17,7 @@ pub trait WriteBackendMethods: 'static + Sized + Clone {
     /// Merge all modules into main_module and returning it
     fn run_link(
         cgcx: &CodegenContext<Self>,
-        dcx: &DiagCtxt,
+        dcx: DiagCtxtHandle<'_>,
         modules: Vec<ModuleCodegen<Self::Module>>,
     ) -> Result<ModuleCodegen<Self::Module>, FatalError>;
     /// Performs fat LTO by merging all modules into a single one and returning it
@@ -36,32 +37,42 @@ pub trait WriteBackendMethods: 'static + Sized + Clone {
     ) -> Result<(Vec<LtoModuleCodegen<Self>>, Vec<WorkProduct>), FatalError>;
     fn print_pass_timings(&self);
     fn print_statistics(&self);
-    unsafe fn optimize(
+    fn optimize(
         cgcx: &CodegenContext<Self>,
-        dcx: &DiagCtxt,
-        module: &ModuleCodegen<Self::Module>,
+        dcx: DiagCtxtHandle<'_>,
+        module: &mut ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
     ) -> Result<(), FatalError>;
     fn optimize_fat(
         cgcx: &CodegenContext<Self>,
         llmod: &mut ModuleCodegen<Self::Module>,
     ) -> Result<(), FatalError>;
-    unsafe fn optimize_thin(
+    fn optimize_thin(
         cgcx: &CodegenContext<Self>,
         thin: ThinModule<Self>,
     ) -> Result<ModuleCodegen<Self::Module>, FatalError>;
-    unsafe fn codegen(
+    fn codegen(
         cgcx: &CodegenContext<Self>,
-        dcx: &DiagCtxt,
+        dcx: DiagCtxtHandle<'_>,
         module: ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
     ) -> Result<CompiledModule, FatalError>;
-    fn prepare_thin(module: ModuleCodegen<Self::Module>) -> (String, Self::ThinBuffer);
+    fn prepare_thin(
+        module: ModuleCodegen<Self::Module>,
+        want_summary: bool,
+    ) -> (String, Self::ThinBuffer);
     fn serialize_module(module: ModuleCodegen<Self::Module>) -> (String, Self::ModuleBuffer);
+    fn autodiff(
+        cgcx: &CodegenContext<Self>,
+        module: &ModuleCodegen<Self::Module>,
+        diff_fncs: Vec<AutoDiffItem>,
+        config: &ModuleConfig,
+    ) -> Result<(), FatalError>;
 }
 
 pub trait ThinBufferMethods: Send + Sync {
     fn data(&self) -> &[u8];
+    fn thin_link_data(&self) -> &[u8];
 }
 
 pub trait ModuleBufferMethods: Send + Sync {

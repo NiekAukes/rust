@@ -6,27 +6,18 @@ use std::arch::{asm, global_asm};
 
 #[repr(simd)]
 #[derive(Clone, Copy)]
-struct SimdType(f32, f32, f32, f32);
+struct SimdType([f32; 4]);
 
 #[repr(simd)]
-struct SimdNonCopy(f32, f32, f32, f32);
+struct SimdNonCopy([f32; 4]);
 
 fn main() {
     unsafe {
         // Inputs must be initialized
 
-        // Sym operands must point to a function or static
-
-        const C: i32 = 0;
-        static S: i32 = 0;
-        asm!("{}", sym S);
-        asm!("{}", sym main);
-        asm!("{}", sym C);
-        //~^ ERROR invalid `sym` operand
-
         // Register operands must be Copy
 
-        asm!("{:v}", in(vreg) SimdNonCopy(0.0, 0.0, 0.0, 0.0));
+        asm!("{:v}", in(vreg) SimdNonCopy([0.0, 0.0, 0.0, 0.0]));
         //~^ ERROR arguments for inline assembly must be copyable
 
         // Register operands must be integers, floats, SIMD vectors, pointers or
@@ -34,7 +25,7 @@ fn main() {
 
         asm!("{}", in(reg) 0i64);
         asm!("{}", in(reg) 0f64);
-        asm!("{:v}", in(vreg) SimdType(0.0, 0.0, 0.0, 0.0));
+        asm!("{:v}", in(vreg) SimdType([0.0, 0.0, 0.0, 0.0]));
         asm!("{}", in(reg) 0 as *const u8);
         asm!("{}", in(reg) 0 as *mut u8);
         asm!("{}", in(reg) main as fn());
@@ -65,12 +56,3 @@ fn main() {
         asm!("{}", in(reg) u);
     }
 }
-
-// Sym operands must point to a function or static
-
-const C: i32 = 0;
-static S: i32 = 0;
-global_asm!("{}", sym S);
-global_asm!("{}", sym main);
-global_asm!("{}", sym C);
-//~^ ERROR invalid `sym` operand

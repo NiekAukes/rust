@@ -1,25 +1,24 @@
-use crate::rustc_middle::ty::layout::LayoutOf as _;
+use rustc_abi::CanonAbi;
 use rustc_middle::mir;
 use rustc_middle::ty::Ty;
+use rustc_middle::ty::layout::LayoutOf as _;
 use rustc_span::Symbol;
-use rustc_target::spec::abi::Abi;
+use rustc_target::callconv::FnAbi;
 
 use super::{
-    horizontal_bin_op, int_abs, mask_load, mask_store, mpsadbw, packssdw, packsswb, packusdw,
-    packuswb, pmulhrsw, psign, shift_simd_by_scalar, shift_simd_by_simd, ShiftOp,
+    ShiftOp, horizontal_bin_op, int_abs, mask_load, mask_store, mpsadbw, packssdw, packsswb,
+    packusdw, packuswb, pmulhrsw, psign, shift_simd_by_scalar, shift_simd_by_simd,
 };
 use crate::*;
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
-    crate::MiriInterpCxExt<'mir, 'tcx>
-{
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn emulate_x86_avx2_intrinsic(
         &mut self,
         link_name: Symbol,
-        abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
         this.expect_target_feature_for_intrinsic(link_name, "avx2")?;
@@ -30,7 +29,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Used to implement the _mm256_abs_epi{8,16,32} functions.
             // Calculates the absolute value of packed 8/16/32-bit integers.
             "pabs.b" | "pabs.w" | "pabs.d" => {
-                let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [op] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 int_abs(this, op, dest)?;
             }
@@ -38,8 +37,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Horizontally add / add with saturation / subtract adjacent 16/32-bit
             // integer values in `left` and `right`.
             "phadd.w" | "phadd.sw" | "phadd.d" | "phsub.w" | "phsub.sw" | "phsub.d" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let (which, saturating) = match unprefixed_name {
                     "phadd.w" | "phadd.d" => (mir::BinOp::Add, false),
@@ -60,14 +58,14 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             | "gather.d.pd.256" | "gather.q.pd" | "gather.q.pd.256" | "gather.d.ps"
             | "gather.d.ps.256" | "gather.q.ps" | "gather.q.ps.256" => {
                 let [src, slice, offsets, mask, scale] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                    this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 assert_eq!(dest.layout, src.layout);
 
-                let (src, _) = this.operand_to_simd(src)?;
-                let (offsets, offsets_len) = this.operand_to_simd(offsets)?;
-                let (mask, mask_len) = this.operand_to_simd(mask)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (src, _) = this.project_to_simd(src)?;
+                let (offsets, offsets_len) = this.project_to_simd(offsets)?;
+                let (mask, mask_len) = this.project_to_simd(mask)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 // There are cases like dest: i32x4, offsets: i64x2
                 // If dest has more elements than offset, extra dest elements are filled with zero.
@@ -77,11 +75,11 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                 assert_eq!(dest_len, mask_len);
 
                 let mask_item_size = mask.layout.field(this, 0).size;
-                let high_bit_offset = mask_item_size.bits().checked_sub(1).unwrap();
+                let high_bit_offset = mask_item_size.bits().strict_sub(1);
 
                 let scale = this.read_scalar(scale)?.to_i8()?;
                 if !matches!(scale, 1 | 2 | 4 | 8) {
-                    throw_unsup_format!("invalid gather scale {scale}");
+                    panic!("invalid gather scale {scale}");
                 }
                 let scale = i64::from(scale);
 
@@ -95,8 +93,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                         let offset =
                             i64::try_from(this.read_scalar(&offset)?.to_int(offset.layout.size)?)
                                 .unwrap();
-                        let ptr = slice
-                            .wrapping_signed_offset(offset.checked_mul(scale).unwrap(), &this.tcx);
+                        let ptr = slice.wrapping_signed_offset(offset.strict_mul(scale), &this.tcx);
                         // Unaligned copy, which is what we want.
                         this.mem_copy(
                             ptr,
@@ -118,30 +115,29 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // intermediate signed 32-bit integers. Horizontally add adjacent pairs of
             // intermediate 32-bit integers, and pack the results in `dest`.
             "pmadd.wd" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (right, right_len) = this.operand_to_simd(right)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (right, right_len) = this.project_to_simd(right)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 assert_eq!(left_len, right_len);
-                assert_eq!(dest_len.checked_mul(2).unwrap(), left_len);
+                assert_eq!(dest_len.strict_mul(2), left_len);
 
                 for i in 0..dest_len {
-                    let j1 = i.checked_mul(2).unwrap();
+                    let j1 = i.strict_mul(2);
                     let left1 = this.read_scalar(&this.project_index(&left, j1)?)?.to_i16()?;
                     let right1 = this.read_scalar(&this.project_index(&right, j1)?)?.to_i16()?;
 
-                    let j2 = j1.checked_add(1).unwrap();
+                    let j2 = j1.strict_add(1);
                     let left2 = this.read_scalar(&this.project_index(&left, j2)?)?.to_i16()?;
                     let right2 = this.read_scalar(&this.project_index(&right, j2)?)?.to_i16()?;
 
                     let dest = this.project_index(&dest, i)?;
 
                     // Multiplications are i16*i16->i32, which will not overflow.
-                    let mul1 = i32::from(left1).checked_mul(right1.into()).unwrap();
-                    let mul2 = i32::from(left2).checked_mul(right2.into()).unwrap();
+                    let mul1 = i32::from(left1).strict_mul(right1.into());
+                    let mul2 = i32::from(left2).strict_mul(right2.into());
                     // However, this addition can overflow in the most extreme case
                     // (-0x8000)*(-0x8000)+(-0x8000)*(-0x8000) = 0x80000000
                     let res = mul1.wrapping_add(mul2);
@@ -155,30 +151,29 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // the saturating sum of the products with indices `2*i` and `2*i+1`
             // produces the output at index `i`.
             "pmadd.ub.sw" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (right, right_len) = this.operand_to_simd(right)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (right, right_len) = this.project_to_simd(right)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 assert_eq!(left_len, right_len);
-                assert_eq!(dest_len.checked_mul(2).unwrap(), left_len);
+                assert_eq!(dest_len.strict_mul(2), left_len);
 
                 for i in 0..dest_len {
-                    let j1 = i.checked_mul(2).unwrap();
+                    let j1 = i.strict_mul(2);
                     let left1 = this.read_scalar(&this.project_index(&left, j1)?)?.to_u8()?;
                     let right1 = this.read_scalar(&this.project_index(&right, j1)?)?.to_i8()?;
 
-                    let j2 = j1.checked_add(1).unwrap();
+                    let j2 = j1.strict_add(1);
                     let left2 = this.read_scalar(&this.project_index(&left, j2)?)?.to_u8()?;
                     let right2 = this.read_scalar(&this.project_index(&right, j2)?)?.to_i8()?;
 
                     let dest = this.project_index(&dest, i)?;
 
                     // Multiplication of a u8 and an i8 into an i16 cannot overflow.
-                    let mul1 = i16::from(left1).checked_mul(right1.into()).unwrap();
-                    let mul2 = i16::from(left2).checked_mul(right2.into()).unwrap();
+                    let mul1 = i16::from(left1).strict_mul(right1.into());
+                    let mul2 = i16::from(left2).strict_mul(right2.into());
                     let res = mul1.saturating_add(mul2);
 
                     this.write_scalar(Scalar::from_i16(res), &dest)?;
@@ -190,8 +185,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // is one, it is loaded from `ptr.wrapping_add(i)`, otherwise zero is
             // loaded.
             "maskload.d" | "maskload.q" | "maskload.d.256" | "maskload.q.256" => {
-                let [ptr, mask] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [ptr, mask] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 mask_load(this, ptr, mask, dest)?;
             }
@@ -201,8 +195,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // is one, it is stored into `ptr.wapping_add(i)`.
             // Unlike SSE2's _mm_maskmoveu_si128, these are not non-temporal stores.
             "maskstore.d" | "maskstore.q" | "maskstore.d.256" | "maskstore.q.256" => {
-                let [ptr, mask, value] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [ptr, mask, value] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 mask_store(this, ptr, mask, value)?;
             }
@@ -213,8 +206,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // offsets specified in `imm`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_mpsadbw_epu8
             "mpsadbw" => {
-                let [left, right, imm] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, imm] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 mpsadbw(this, left, right, imm, dest)?;
             }
@@ -225,8 +217,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // 1 and then taking the bits `1..=16`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_mulhrs_epi16
             "pmul.hr.sw" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 pmulhrsw(this, left, right, dest)?;
             }
@@ -234,8 +225,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Converts two 16-bit integer vectors to a single 8-bit integer
             // vector with signed saturation.
             "packsswb" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 packsswb(this, left, right, dest)?;
             }
@@ -243,8 +233,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Converts two 32-bit integer vectors to a single 16-bit integer
             // vector with signed saturation.
             "packssdw" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 packssdw(this, left, right, dest)?;
             }
@@ -252,8 +241,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Converts two 16-bit signed integer vectors to a single 8-bit
             // unsigned integer vector with saturation.
             "packuswb" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 packuswb(this, left, right, dest)?;
             }
@@ -261,8 +249,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Concatenates two 32-bit signed integer vectors and converts
             // the result to a 16-bit unsigned integer vector with saturation.
             "packusdw" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 packusdw(this, left, right, dest)?;
             }
@@ -271,12 +258,11 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Shuffles `left` using the three low bits of each element of `right`
             // as indices.
             "permd" | "permps" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (right, right_len) = this.operand_to_simd(right)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (right, right_len) = this.project_to_simd(right)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 assert_eq!(dest_len, left_len);
                 assert_eq!(dest_len, right_len);
@@ -292,8 +278,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Used to implement the _mm256_permute2x128_si256 function.
             // Shuffles 128-bit blocks of `a` and `b` using `imm` as pattern.
             "vperm2i128" => {
-                let [left, right, imm] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, imm] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 assert_eq!(left.layout.size.bits(), 256);
                 assert_eq!(right.layout.size.bits(), 256);
@@ -311,7 +296,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
 
                 for i in 0..2 {
                     let dest = this.project_index(&dest, i)?;
-                    let src = match (imm >> i.checked_mul(4).unwrap()) & 0b11 {
+                    let src = match (imm >> i.strict_mul(4)) & 0b11 {
                         0 => this.project_index(&left, 0)?,
                         1 => this.project_index(&left, 1)?,
                         2 => this.project_index(&right, 0)?,
@@ -330,22 +315,21 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // in `dest`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_sad_epu8
             "psad.bw" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (right, right_len) = this.operand_to_simd(right)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (right, right_len) = this.project_to_simd(right)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 assert_eq!(left_len, right_len);
-                assert_eq!(left_len, dest_len.checked_mul(8).unwrap());
+                assert_eq!(left_len, dest_len.strict_mul(8));
 
                 for i in 0..dest_len {
                     let dest = this.project_index(&dest, i)?;
 
                     let mut acc: u16 = 0;
                     for j in 0..8 {
-                        let src_index = i.checked_mul(8).unwrap().checked_add(j).unwrap();
+                        let src_index = i.strict_mul(8).strict_add(j);
 
                         let left = this.project_index(&left, src_index)?;
                         let left = this.read_scalar(&left)?.to_u8()?;
@@ -353,7 +337,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                         let right = this.project_index(&right, src_index)?;
                         let right = this.read_scalar(&right)?.to_u8()?;
 
-                        acc = acc.checked_add(left.abs_diff(right).into()).unwrap();
+                        acc = acc.strict_add(left.abs_diff(right).into());
                     }
 
                     this.write_scalar(Scalar::from_u64(acc.into()), &dest)?;
@@ -363,12 +347,11 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Shuffles bytes from `left` using `right` as pattern.
             // Each 128-bit block is shuffled independently.
             "pshuf.b" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (right, right_len) = this.operand_to_simd(right)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (right, right_len) = this.project_to_simd(right)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 assert_eq!(dest_len, left_len);
                 assert_eq!(dest_len, right_len);
@@ -379,7 +362,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
 
                     let res = if right & 0x80 == 0 {
                         // Shuffle each 128-bit (16-byte) block independently.
-                        let j = u64::from(right % 16).checked_add(i & !15).unwrap();
+                        let j = u64::from(right % 16).strict_add(i & !15);
                         this.read_scalar(&this.project_index(&left, j)?)?
                     } else {
                         // If the highest bit in `right` is 1, write zero.
@@ -395,8 +378,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // is writen to the corresponding output element.
             // Basically, we multiply `left` with `right.signum()`.
             "psign.b" | "psign.w" | "psign.d" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 psign(this, left, right, dest)?;
             }
@@ -410,8 +392,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // is copied to remaining bits.
             "psll.w" | "psrl.w" | "psra.w" | "psll.d" | "psrl.d" | "psra.d" | "psll.q"
             | "psrl.q" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which = match unprefixed_name {
                     "psll.w" | "psll.d" | "psll.q" => ShiftOp::Left,
@@ -426,8 +407,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // (except _mm{,256}_srav_epi64, which are not available in AVX2).
             "psllv.d" | "psllv.d.256" | "psllv.q" | "psllv.q.256" | "psrlv.d" | "psrlv.d.256"
             | "psrlv.q" | "psrlv.q.256" | "psrav.d" | "psrav.d.256" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let which = match unprefixed_name {
                     "psllv.d" | "psllv.d.256" | "psllv.q" | "psllv.q.256" => ShiftOp::Left,
@@ -438,8 +418,8 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
 
                 shift_simd_by_simd(this, left, right, which, dest)?;
             }
-            _ => return Ok(EmulateItemResult::NotSupported),
+            _ => return interp_ok(EmulateItemResult::NotSupported),
         }
-        Ok(EmulateItemResult::NeedsJumping)
+        interp_ok(EmulateItemResult::NeedsReturn)
     }
 }

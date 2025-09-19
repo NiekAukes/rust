@@ -1,9 +1,9 @@
 //! Server-side traits.
 
-use super::*;
-
 use std::cell::Cell;
 use std::marker::PhantomData;
+
+use super::*;
 
 macro_rules! define_server_handles {
     (
@@ -82,7 +82,6 @@ with_api_handle_types!(define_server_handles);
 pub trait Types {
     type FreeFunctions: 'static;
     type TokenStream: 'static + Clone;
-    type SourceFile: 'static + Clone;
     type Span: 'static + Copy + Eq + Hash;
     type Symbol: 'static;
 }
@@ -350,7 +349,7 @@ where
 
 /// A message pipe used for communicating between server and client threads.
 pub trait MessagePipe<T>: Sized {
-    /// Create a new pair of endpoints for the message pipe.
+    /// Creates a new pair of endpoints for the message pipe.
     fn new() -> (Self, Self);
 
     /// Send a message to the other endpoint of this pipe.
@@ -400,10 +399,10 @@ impl client::Client<crate::TokenStream, crate::TokenStream> {
         S: Server,
         S::TokenStream: Default,
     {
-        let client::Client { get_handle_counters, run, _marker } = *self;
+        let client::Client { handle_counters, run, _marker } = *self;
         run_server(
             strategy,
-            get_handle_counters(),
+            handle_counters,
             server,
             <MarkedTypes<S> as Types>::TokenStream::mark(input),
             run,
@@ -426,10 +425,10 @@ impl client::Client<(crate::TokenStream, crate::TokenStream), crate::TokenStream
         S: Server,
         S::TokenStream: Default,
     {
-        let client::Client { get_handle_counters, run, _marker } = *self;
+        let client::Client { handle_counters, run, _marker } = *self;
         run_server(
             strategy,
-            get_handle_counters(),
+            handle_counters,
             server,
             (
                 <MarkedTypes<S> as Types>::TokenStream::mark(input),

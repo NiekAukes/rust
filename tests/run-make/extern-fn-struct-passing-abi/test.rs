@@ -90,8 +90,12 @@ extern "C" {
     fn byval_rect_with_many_huge(a: Huge, b: Huge, c: Huge, d: Huge, e: Huge, f: Huge, g: Rect);
 
     fn byval_rect_with_many_huge64(
-        a: Huge64, b: Huge64, c: Huge64,
-        d: Huge64, e: Huge64, f: Huge64,
+        a: Huge64,
+        b: Huge64,
+        c: Huge64,
+        d: Huge64,
+        e: Huge64,
+        f: Huge64,
         g: Rect,
     );
 
@@ -122,7 +126,7 @@ extern "C" {
 
 fn main() {
     let s = Rect { a: 553, b: 554, c: 555, d: 556 };
-    let t = BiggerRect { s: s, a: 27834, b: 7657 };
+    let t = BiggerRect { s, a: 27834, b: 7657 };
     let u = FloatRect { a: 3489, b: 3490, c: 8. };
     let v = Huge { a: 5647, b: 5648, c: 5649, d: 5650, e: 5651 };
     let w = Huge64 { a: 1234, b: 1335, c: 1436, d: 1537, e: 1638 };

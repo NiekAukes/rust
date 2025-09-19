@@ -1,13 +1,13 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
-use clippy_utils::macros::{find_format_arg_expr, find_format_args, is_format_macro, root_macro_call_first_node};
-use clippy_utils::{get_parent_as_impl, is_diag_trait_item, path_to_local, peel_ref_operators};
+use clippy_utils::macros::{FormatArgsStorage, find_format_arg_expr, is_format_macro, root_macro_call_first_node};
+use clippy_utils::{get_parent_as_impl, is_diag_trait_item, path_to_local, peel_ref_operators, sym};
 use rustc_ast::{FormatArgsPiece, FormatTrait};
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Impl, ImplItem, ImplItemKind, QPath};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::impl_lint_pass;
+use rustc_span::Symbol;
 use rustc_span::symbol::kw;
-use rustc_span::{sym, Symbol};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -97,15 +97,16 @@ struct FormatTraitNames {
     formatter_name: Option<Symbol>,
 }
 
-#[derive(Default)]
 pub struct FormatImpl {
+    format_args: FormatArgsStorage,
     // Whether we are inside Display or Debug trait impl - None for neither
     format_trait_impl: Option<FormatTraitNames>,
 }
 
 impl FormatImpl {
-    pub fn new() -> Self {
+    pub fn new(format_args: FormatArgsStorage) -> Self {
         Self {
+            format_args,
             format_trait_impl: None,
         }
     }
@@ -129,6 +130,7 @@ impl<'tcx> LateLintPass<'tcx> for FormatImpl {
         if let Some(format_trait_impl) = self.format_trait_impl {
             let linter = FormatImplExpr {
                 cx,
+                format_args: &self.format_args,
                 expr,
                 format_trait_impl,
             };
@@ -141,14 +143,15 @@ impl<'tcx> LateLintPass<'tcx> for FormatImpl {
 
 struct FormatImplExpr<'a, 'tcx> {
     cx: &'a LateContext<'tcx>,
+    format_args: &'a FormatArgsStorage,
     expr: &'tcx Expr<'tcx>,
     format_trait_impl: FormatTraitNames,
 }
 
-impl<'a, 'tcx> FormatImplExpr<'a, 'tcx> {
+impl FormatImplExpr<'_, '_> {
     fn check_to_string_in_display(&self) {
         if self.format_trait_impl.name == sym::Display
-            && let ExprKind::MethodCall(path, self_arg, ..) = self.expr.kind
+            && let ExprKind::MethodCall(path, self_arg, [], _) = self.expr.kind
             // Get the hir_id of the object we are calling the method on
             // Is the method to_string() ?
             && path.ident.name == sym::to_string
@@ -175,25 +178,25 @@ impl<'a, 'tcx> FormatImplExpr<'a, 'tcx> {
         if let Some(outer_macro) = root_macro_call_first_node(self.cx, self.expr)
             && let macro_def_id = outer_macro.def_id
             && is_format_macro(self.cx, macro_def_id)
-            && let Some(format_args) = find_format_args(self.cx, self.expr, outer_macro.expn)
+            && let Some(format_args) = self.format_args.get(self.cx, self.expr, outer_macro.expn)
         {
             for piece in &format_args.template {
                 if let FormatArgsPiece::Placeholder(placeholder) = piece
                     && let trait_name = match placeholder.format_trait {
                         FormatTrait::Display => sym::Display,
                         FormatTrait::Debug => sym::Debug,
-                        FormatTrait::LowerExp => sym!(LowerExp),
-                        FormatTrait::UpperExp => sym!(UpperExp),
-                        FormatTrait::Octal => sym!(Octal),
+                        FormatTrait::LowerExp => sym::LowerExp,
+                        FormatTrait::UpperExp => sym::UpperExp,
+                        FormatTrait::Octal => sym::Octal,
                         FormatTrait::Pointer => sym::Pointer,
-                        FormatTrait::Binary => sym!(Binary),
-                        FormatTrait::LowerHex => sym!(LowerHex),
-                        FormatTrait::UpperHex => sym!(UpperHex),
+                        FormatTrait::Binary => sym::Binary,
+                        FormatTrait::LowerHex => sym::LowerHex,
+                        FormatTrait::UpperHex => sym::UpperHex,
                     }
                     && trait_name == self.format_trait_impl.name
                     && let Ok(index) = placeholder.argument.index
                     && let Some(arg) = format_args.arguments.all_args().get(index)
-                    && let Ok(arg_expr) = find_format_arg_expr(self.expr, arg)
+                    && let Some(arg_expr) = find_format_arg_expr(self.expr, arg)
                 {
                     self.check_format_arg_self(arg_expr);
                 }
@@ -206,9 +209,8 @@ impl<'a, 'tcx> FormatImplExpr<'a, 'tcx> {
         // Handle dereference of &self -> self that is equivalent (i.e. via *self in fmt() impl)
         // Since the argument to fmt is itself a reference: &self
         let reference = peel_ref_operators(self.cx, arg);
-        let map = self.cx.tcx.hir();
         // Is the reference self?
-        if path_to_local(reference).map(|x| map.name(x)) == Some(kw::SelfLower) {
+        if path_to_local(reference).map(|x| self.cx.tcx.hir_name(x)) == Some(kw::SelfLower) {
             let FormatTraitNames { name, .. } = self.format_trait_impl;
             span_lint(
                 self.cx,
@@ -259,7 +261,7 @@ fn is_format_trait_impl(cx: &LateContext<'_>, impl_item: &ImplItem<'_>) -> Optio
         && let Some(name) = cx.tcx.get_diagnostic_name(did)
         && matches!(name, sym::Debug | sym::Display)
     {
-        let body = cx.tcx.hir().body(body_id);
+        let body = cx.tcx.hir_body(body_id);
         let formatter_name = body
             .params
             .get(1)

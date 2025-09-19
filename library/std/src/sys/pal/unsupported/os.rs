@@ -1,10 +1,9 @@
 use super::unsupported;
 use crate::error::Error as StdError;
 use crate::ffi::{OsStr, OsString};
-use crate::fmt;
-use crate::io;
 use crate::marker::PhantomData;
 use crate::path::{self, PathBuf};
+use crate::{fmt, io};
 
 pub fn errno() -> i32 {
     0
@@ -61,47 +60,6 @@ impl StdError for JoinPathsError {
 
 pub fn current_exe() -> io::Result<PathBuf> {
     unsupported()
-}
-
-pub struct Env(!);
-
-impl Env {
-    // FIXME(https://github.com/rust-lang/rust/issues/114583): Remove this when <OsStr as Debug>::fmt matches <str as Debug>::fmt.
-    pub fn str_debug(&self) -> impl fmt::Debug + '_ {
-        let Self(inner) = self;
-        match *inner {}
-    }
-}
-
-impl fmt::Debug for Env {
-    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self(inner) = self;
-        match *inner {}
-    }
-}
-
-impl Iterator for Env {
-    type Item = (OsString, OsString);
-    fn next(&mut self) -> Option<(OsString, OsString)> {
-        let Self(inner) = self;
-        match *inner {}
-    }
-}
-
-pub fn env() -> Env {
-    panic!("not supported on this platform")
-}
-
-pub fn getenv(_: &OsStr) -> Option<OsString> {
-    None
-}
-
-pub fn setenv(_: &OsStr, _: &OsStr) -> io::Result<()> {
-    Err(io::const_io_error!(io::ErrorKind::Unsupported, "cannot set env vars on this platform"))
-}
-
-pub fn unsetenv(_: &OsStr) -> io::Result<()> {
-    Err(io::const_io_error!(io::ErrorKind::Unsupported, "cannot unset env vars on this platform"))
 }
 
 pub fn temp_dir() -> PathBuf {

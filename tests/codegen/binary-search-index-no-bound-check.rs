@@ -1,4 +1,4 @@
-//@ compile-flags: -O
+//@ compile-flags: -Copt-level=3
 #![crate_type = "lib"]
 
 // Make sure no bounds checks are emitted when slicing or indexing
@@ -11,11 +11,7 @@ pub fn binary_search_index_no_bounds_check(s: &[u8]) -> u8 {
     // CHECK-NOT: slice_start_index_len_fail
     // CHECK-NOT: slice_end_index_len_fail
     // CHECK-NOT: panic_bounds_check
-    if let Ok(idx) = s.binary_search(&b'\\') {
-        s[idx]
-    } else {
-        42
-    }
+    if let Ok(idx) = s.binary_search(&b'\\') { s[idx] } else { 42 }
 }
 
 // Similarly, check that `partition_point` is known to return a valid fencepost.

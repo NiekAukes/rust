@@ -2,9 +2,8 @@
 //@ revisions: allow expect
 
 // this test checks that no matter if we put #[allow(dead_code)]
-// or #[expect(dead_code)], no warning is being emited
+// or #[expect(dead_code)], no warning is being emitted
 
-#![feature(lint_reasons)]
 #![warn(dead_code)] // to override compiletest
 
 fn f() {}

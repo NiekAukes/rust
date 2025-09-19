@@ -1,5 +1,5 @@
-use std::env;
-use std::thread;
+//@compile-flags: -Zmiri-deterministic-concurrency
+use std::{env, thread};
 
 fn main() {
     // Test that miri environment is isolated when communication is disabled.
@@ -26,6 +26,8 @@ fn main() {
     println!("{:#?}", env::vars().collect::<Vec<_>>());
 
     // Do things concurrently, to make sure there's no data race.
+    // We disable preemption to make sure the lock is not contended;
+    // that means we don't hit e.g. the futex codepath on Android (which we don't support).
     let t = thread::spawn(|| {
         env::set_var("MIRI_TEST", "42");
     });

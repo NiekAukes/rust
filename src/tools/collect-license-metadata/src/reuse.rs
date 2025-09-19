@@ -1,17 +1,19 @@
-use crate::licenses::{License, LicenseId, LicensesInterner};
-use anyhow::Error;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
+
+use anyhow::Error;
+
+use crate::licenses::{License, LicenseId, LicensesInterner};
 
 pub(crate) fn collect(
     reuse_exe: &Path,
     interner: &mut LicensesInterner,
 ) -> Result<Vec<(PathBuf, LicenseId)>, Error> {
-    eprintln!("gathering license information from REUSE");
+    println!("gathering license information from REUSE (this might take a minute...)");
     let start = Instant::now();
     let raw = &obtain_spdx_document(reuse_exe)?;
-    eprintln!("finished gathering the license information from REUSE in {:.2?}", start.elapsed());
+    println!("finished gathering the license information from REUSE in {:.2?}", start.elapsed());
 
     let document = spdx_rs::parsers::spdx_from_tag_value(&raw)?;
 

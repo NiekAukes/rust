@@ -13,78 +13,42 @@
 //! compiling for wasm. That way it's a compile time error for something that's
 //! guaranteed to be a runtime error!
 
-#![allow(missing_docs, nonstandard_style, unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(missing_docs, nonstandard_style)]
 
+use crate::io::ErrorKind;
+use crate::os::hermit::hermit_abi;
 use crate::os::raw::c_char;
+use crate::sys::env;
 
-pub mod alloc;
-pub mod args;
-pub mod env;
-pub mod fd;
-pub mod fs;
 pub mod futex;
-#[path = "../unsupported/io.rs"]
-pub mod io;
-pub mod net;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
-#[path = "../unsupported/process.rs"]
-pub mod process;
-pub mod stdio;
 pub mod thread;
-pub mod thread_local_dtor;
-#[path = "../unsupported/thread_local_key.rs"]
-pub mod thread_local_key;
 pub mod time;
-
-use crate::io::ErrorKind;
-use crate::os::hermit::abi;
 
 pub fn unsupported<T>() -> crate::io::Result<T> {
     Err(unsupported_err())
 }
 
 pub fn unsupported_err() -> crate::io::Error {
-    crate::io::const_io_error!(
+    crate::io::const_error!(
         crate::io::ErrorKind::Unsupported,
         "operation not supported on HermitCore yet",
     )
 }
 
 pub fn abort_internal() -> ! {
-    unsafe {
-        abi::abort();
-    }
-}
-
-pub fn hashmap_random_keys() -> (u64, u64) {
-    let mut buf = [0; 16];
-    let mut slice = &mut buf[..];
-    while !slice.is_empty() {
-        let res = cvt(unsafe { abi::read_entropy(slice.as_mut_ptr(), slice.len(), 0) })
-            .expect("failed to generate random hashmap keys");
-        slice = &mut slice[res as usize..];
-    }
-
-    let key1 = buf[..8].try_into().unwrap();
-    let key2 = buf[8..].try_into().unwrap();
-    (u64::from_ne_bytes(key1), u64::from_ne_bytes(key2))
-}
-
-// This function is needed by the panic runtime. The symbol is named in
-// pre-link args for the target specification, so keep that in sync.
-#[cfg(not(test))]
-#[no_mangle]
-// NB. used by both libunwind and libpanic_abort
-pub extern "C" fn __rust_abort() {
-    abort_internal();
+    unsafe { hermit_abi::abort() }
 }
 
 // SAFETY: must be called only once during runtime initialization.
 // NOTE: this is not guaranteed to run, for example when Rust code is called externally.
 pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
-    args::init(argc, argv);
+    unsafe {
+        crate::sys::args::init(argc, argv);
+    }
 }
 
 // SAFETY: must be called only once during runtime cleanup.
@@ -92,48 +56,53 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
 pub unsafe fn cleanup() {}
 
 #[cfg(not(test))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_entry(
     argc: i32,
     argv: *const *const c_char,
     env: *const *const c_char,
 ) -> ! {
-    use thread_local_dtor::run_dtors;
-    extern "C" {
+    unsafe extern "C" {
         fn main(argc: isize, argv: *const *const c_char) -> i32;
     }
 
     // initialize environment
-    os::init_environment(env as *const *const i8);
+    env::init(env);
 
-    let result = main(argc as isize, argv);
+    let result = unsafe { main(argc as isize, argv) };
 
-    run_dtors();
-    abi::exit(result);
+    unsafe {
+        crate::sys::thread_local::destructors::run();
+    }
+    crate::rt::thread_cleanup();
+
+    unsafe {
+        hermit_abi::exit(result);
+    }
 }
 
 #[inline]
 pub(crate) fn is_interrupted(errno: i32) -> bool {
-    errno == abi::errno::EINTR
+    errno == hermit_abi::errno::EINTR
 }
 
 pub fn decode_error_kind(errno: i32) -> ErrorKind {
     match errno {
-        abi::errno::EACCES => ErrorKind::PermissionDenied,
-        abi::errno::EADDRINUSE => ErrorKind::AddrInUse,
-        abi::errno::EADDRNOTAVAIL => ErrorKind::AddrNotAvailable,
-        abi::errno::EAGAIN => ErrorKind::WouldBlock,
-        abi::errno::ECONNABORTED => ErrorKind::ConnectionAborted,
-        abi::errno::ECONNREFUSED => ErrorKind::ConnectionRefused,
-        abi::errno::ECONNRESET => ErrorKind::ConnectionReset,
-        abi::errno::EEXIST => ErrorKind::AlreadyExists,
-        abi::errno::EINTR => ErrorKind::Interrupted,
-        abi::errno::EINVAL => ErrorKind::InvalidInput,
-        abi::errno::ENOENT => ErrorKind::NotFound,
-        abi::errno::ENOTCONN => ErrorKind::NotConnected,
-        abi::errno::EPERM => ErrorKind::PermissionDenied,
-        abi::errno::EPIPE => ErrorKind::BrokenPipe,
-        abi::errno::ETIMEDOUT => ErrorKind::TimedOut,
+        hermit_abi::errno::EACCES => ErrorKind::PermissionDenied,
+        hermit_abi::errno::EADDRINUSE => ErrorKind::AddrInUse,
+        hermit_abi::errno::EADDRNOTAVAIL => ErrorKind::AddrNotAvailable,
+        hermit_abi::errno::EAGAIN => ErrorKind::WouldBlock,
+        hermit_abi::errno::ECONNABORTED => ErrorKind::ConnectionAborted,
+        hermit_abi::errno::ECONNREFUSED => ErrorKind::ConnectionRefused,
+        hermit_abi::errno::ECONNRESET => ErrorKind::ConnectionReset,
+        hermit_abi::errno::EEXIST => ErrorKind::AlreadyExists,
+        hermit_abi::errno::EINTR => ErrorKind::Interrupted,
+        hermit_abi::errno::EINVAL => ErrorKind::InvalidInput,
+        hermit_abi::errno::ENOENT => ErrorKind::NotFound,
+        hermit_abi::errno::ENOTCONN => ErrorKind::NotConnected,
+        hermit_abi::errno::EPERM => ErrorKind::PermissionDenied,
+        hermit_abi::errno::EPIPE => ErrorKind::BrokenPipe,
+        hermit_abi::errno::ETIMEDOUT => ErrorKind::TimedOut,
         _ => ErrorKind::Uncategorized,
     }
 }

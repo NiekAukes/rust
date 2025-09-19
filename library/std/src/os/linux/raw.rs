@@ -231,6 +231,7 @@ mod arch {
 }
 
 #[cfg(any(
+    target_arch = "loongarch32",
     target_arch = "loongarch64",
     target_arch = "mips64",
     target_arch = "mips64r6",
@@ -244,7 +245,11 @@ mod arch {
     pub use libc::{blkcnt_t, blksize_t, ino_t, nlink_t, off_t, stat, time_t};
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(
+    target_arch = "aarch64",
+    // Arm64EC is Windows-only, but docs are always build as Linux, so re-use AArch64 for Arm64EC.
+    all(doc, target_arch = "arm64ec")
+))]
 mod arch {
     use crate::os::raw::{c_int, c_long};
 

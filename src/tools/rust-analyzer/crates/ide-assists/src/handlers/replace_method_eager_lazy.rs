@@ -1,7 +1,7 @@
-use ide_db::assists::{AssistId, AssistKind};
+use ide_db::assists::AssistId;
 use syntax::{
-    ast::{self, make, Expr, HasArgList},
     AstNode,
+    ast::{self, Expr, HasArgList, make},
 };
 
 use crate::{AssistContext, Assists};
@@ -47,7 +47,7 @@ pub(crate) fn replace_with_lazy_method(acc: &mut Assists, ctx: &AssistContext<'_
         None,
         None,
         |func| {
-            let valid = func.name(ctx.sema.db).as_str() == Some(&*method_name_lazy)
+            let valid = func.name(ctx.sema.db).as_str() == &*method_name_lazy
                 && func.num_params(ctx.sema.db) == n_params
                 && {
                     let params = func.params_without_self(ctx.sema.db);
@@ -60,7 +60,7 @@ pub(crate) fn replace_with_lazy_method(acc: &mut Assists, ctx: &AssistContext<'_
     )?;
 
     acc.add(
-        AssistId("replace_with_lazy_method", AssistKind::RefactorRewrite),
+        AssistId::refactor_rewrite("replace_with_lazy_method"),
         format!("Replace {method_name} with {method_name_lazy}"),
         call.syntax().text_range(),
         |builder| {
@@ -74,16 +74,12 @@ pub(crate) fn replace_with_lazy_method(acc: &mut Assists, ctx: &AssistContext<'_
 fn into_closure(param: &Expr) -> Expr {
     (|| {
         if let ast::Expr::CallExpr(call) = param {
-            if call.arg_list()?.args().count() == 0 {
-                Some(call.expr()?)
-            } else {
-                None
-            }
+            if call.arg_list()?.args().count() == 0 { Some(call.expr()?) } else { None }
         } else {
             None
         }
     })()
-    .unwrap_or_else(|| make::expr_closure(None, param.clone()))
+    .unwrap_or_else(|| make::expr_closure(None, param.clone()).into())
 }
 
 // Assist: replace_with_eager_method
@@ -114,10 +110,10 @@ pub(crate) fn replace_with_eager_method(acc: &mut Assists, ctx: &AssistContext<'
     let callable = ctx.sema.resolve_method_call_as_callable(&call)?;
     let (_, receiver_ty) = callable.receiver_param(ctx.sema.db)?;
     let n_params = callable.n_params() + 1;
-    let params = callable.params(ctx.sema.db);
+    let params = callable.params();
 
     // FIXME: Check that the arg is of the form `() -> T`
-    if !params.first()?.1.impls_fnonce(ctx.sema.db) {
+    if !params.first()?.ty().impls_fnonce(ctx.sema.db) {
         return None;
     }
 
@@ -133,14 +129,14 @@ pub(crate) fn replace_with_eager_method(acc: &mut Assists, ctx: &AssistContext<'
         None,
         None,
         |func| {
-            let valid = func.name(ctx.sema.db).as_str() == Some(method_name_eager)
+            let valid = func.name(ctx.sema.db).as_str() == method_name_eager
                 && func.num_params(ctx.sema.db) == n_params;
             valid.then_some(func)
         },
     )?;
 
     acc.add(
-        AssistId("replace_with_eager_method", AssistKind::RefactorRewrite),
+        AssistId::refactor_rewrite("replace_with_eager_method"),
         format!("Replace {method_name} with {method_name_eager}"),
         call.syntax().text_range(),
         |builder| {
@@ -154,16 +150,12 @@ pub(crate) fn replace_with_eager_method(acc: &mut Assists, ctx: &AssistContext<'
 fn into_call(param: &Expr) -> Expr {
     (|| {
         if let ast::Expr::ClosureExpr(closure) = param {
-            if closure.param_list()?.params().count() == 0 {
-                Some(closure.body()?)
-            } else {
-                None
-            }
+            if closure.param_list()?.params().count() == 0 { Some(closure.body()?) } else { None }
         } else {
             None
         }
     })()
-    .unwrap_or_else(|| make::expr_call(param.clone(), make::arg_list(Vec::new())))
+    .unwrap_or_else(|| make::expr_call(param.clone(), make::arg_list(Vec::new())).into())
 }
 
 #[cfg(test)]

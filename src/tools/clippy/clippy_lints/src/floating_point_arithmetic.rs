@@ -1,8 +1,9 @@
-use clippy_utils::consts::Constant::{Int, F32, F64};
-use clippy_utils::consts::{constant, constant_simple, Constant};
+use clippy_utils::consts::Constant::{F32, F64, Int};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::{
-    eq_expr_value, get_parent_expr, higher, in_constant, is_no_std_crate, numeric_literal, peel_blocks, sugg,
+    eq_expr_value, get_parent_expr, higher, is_in_const_context, is_inherent_method_call, is_no_std_crate,
+    numeric_literal, peel_blocks, sugg, sym,
 };
 use rustc_errors::Applicability;
 use rustc_hir::{BinOpKind, Expr, ExprKind, PathSegment, UnOp};
@@ -111,7 +112,7 @@ declare_lint_pass!(FloatingPointArithmetic => [
 // Returns the specialized log method for a given base if base is constant
 // and is one of 2, 10 and e
 fn get_specialized_log_method(cx: &LateContext<'_>, base: &Expr<'_>) -> Option<&'static str> {
-    if let Some(value) = constant(cx, cx.typeck_results(), base) {
+    if let Some(value) = ConstEvalCtxt::new(cx).eval(base) {
         if F32(2.0) == value || F64(2.0) == value {
             return Some("log2");
         } else if F32(10.0) == value || F64(10.0) == value {
@@ -153,7 +154,7 @@ fn prepare_receiver_sugg<'a>(cx: &LateContext<'_>, mut expr: &'a Expr<'a>) -> Su
         };
     }
 
-    suggestion.maybe_par()
+    suggestion.maybe_paren()
 }
 
 fn check_log_base(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>, args: &[Expr<'_>]) {
@@ -164,7 +165,7 @@ fn check_log_base(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>, ar
             expr.span,
             "logarithm for bases 2, 10 and e can be computed more accurately",
             "consider using",
-            format!("{}.{method}()", Sugg::hir(cx, receiver, "..").maybe_par()),
+            format!("{}.{method}()", Sugg::hir(cx, receiver, "..").maybe_paren()),
             Applicability::MachineApplicable,
         );
     }
@@ -181,10 +182,8 @@ fn check_ln1p(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>) {
         rhs,
     ) = receiver.kind
     {
-        let recv = match (
-            constant(cx, cx.typeck_results(), lhs),
-            constant(cx, cx.typeck_results(), rhs),
-        ) {
+        let ecx = ConstEvalCtxt::new(cx);
+        let recv = match (ecx.eval(lhs), ecx.eval(rhs)) {
             (Some(value), _) if F32(1.0) == value || F64(1.0) == value => rhs,
             (_, Some(value)) if F32(1.0) == value || F64(1.0) == value => lhs,
             _ => return,
@@ -229,39 +228,39 @@ fn get_integer_from_float_constant(value: &Constant<'_>) -> Option<i32> {
 
 fn check_powf(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>, args: &[Expr<'_>]) {
     // Check receiver
-    if let Some(value) = constant(cx, cx.typeck_results(), receiver) {
-        if let Some(method) = if F32(f32_consts::E) == value || F64(f64_consts::E) == value {
+    if let Some(value) = ConstEvalCtxt::new(cx).eval(receiver)
+        && let Some(method) = if F32(f32_consts::E) == value || F64(f64_consts::E) == value {
             Some("exp")
         } else if F32(2.0) == value || F64(2.0) == value {
             Some("exp2")
         } else {
             None
-        } {
-            span_lint_and_sugg(
-                cx,
-                SUBOPTIMAL_FLOPS,
-                expr.span,
-                "exponent for bases 2 and e can be computed more accurately",
-                "consider using",
-                format!("{}.{method}()", prepare_receiver_sugg(cx, &args[0])),
-                Applicability::MachineApplicable,
-            );
         }
+    {
+        span_lint_and_sugg(
+            cx,
+            SUBOPTIMAL_FLOPS,
+            expr.span,
+            "exponent for bases 2 and e can be computed more accurately",
+            "consider using",
+            format!("{}.{method}()", prepare_receiver_sugg(cx, &args[0])),
+            Applicability::MachineApplicable,
+        );
     }
 
     // Check argument
-    if let Some(value) = constant(cx, cx.typeck_results(), &args[0]) {
+    if let Some(value) = ConstEvalCtxt::new(cx).eval(&args[0]) {
         let (lint, help, suggestion) = if F32(1.0 / 2.0) == value || F64(1.0 / 2.0) == value {
             (
                 SUBOPTIMAL_FLOPS,
                 "square-root of a number can be computed more efficiently and accurately",
-                format!("{}.sqrt()", Sugg::hir(cx, receiver, "..").maybe_par()),
+                format!("{}.sqrt()", Sugg::hir(cx, receiver, "..").maybe_paren()),
             )
         } else if F32(1.0 / 3.0) == value || F64(1.0 / 3.0) == value {
             (
                 IMPRECISE_FLOPS,
                 "cube-root of a number can be computed more accurately",
-                format!("{}.cbrt()", Sugg::hir(cx, receiver, "..").maybe_par()),
+                format!("{}.cbrt()", Sugg::hir(cx, receiver, "..").maybe_paren()),
             )
         } else if let Some(exponent) = get_integer_from_float_constant(&value) {
             (
@@ -269,7 +268,7 @@ fn check_powf(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>, args: 
                 "exponentiation with integer powers can be computed more efficiently",
                 format!(
                     "{}.powi({})",
-                    Sugg::hir(cx, receiver, "..").maybe_par(),
+                    Sugg::hir(cx, receiver, "..").maybe_paren(),
                     numeric_literal::format(&exponent.to_string(), None, false)
                 ),
             )
@@ -290,55 +289,53 @@ fn check_powf(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>, args: 
 }
 
 fn check_powi(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>, args: &[Expr<'_>]) {
-    if let Some(value) = constant(cx, cx.typeck_results(), &args[0]) {
-        if value == Int(2) {
-            if let Some(parent) = get_parent_expr(cx, expr) {
-                if let Some(grandparent) = get_parent_expr(cx, parent) {
-                    if let ExprKind::MethodCall(PathSegment { ident: method_name, .. }, receiver, ..) = grandparent.kind
-                    {
-                        if method_name.as_str() == "sqrt" && detect_hypot(cx, receiver).is_some() {
-                            return;
-                        }
-                    }
+    if let Some(value) = ConstEvalCtxt::new(cx).eval(&args[0])
+        && value == Int(2)
+        && let Some(parent) = get_parent_expr(cx, expr)
+    {
+        if let Some(grandparent) = get_parent_expr(cx, parent)
+            && let ExprKind::MethodCall(PathSegment { ident: method, .. }, receiver, ..) = grandparent.kind
+            && method.name == sym::sqrt
+            && detect_hypot(cx, receiver).is_some()
+        {
+            return;
+        }
+
+        if let ExprKind::Binary(
+            Spanned {
+                node: op @ (BinOpKind::Add | BinOpKind::Sub),
+                ..
+            },
+            lhs,
+            rhs,
+        ) = parent.kind
+        {
+            let other_addend = if lhs.hir_id == expr.hir_id { rhs } else { lhs };
+
+            // Negate expr if original code has subtraction and expr is on the right side
+            let maybe_neg_sugg = |expr, hir_id| {
+                let sugg = Sugg::hir(cx, expr, "..");
+                if matches!(op, BinOpKind::Sub) && hir_id == rhs.hir_id {
+                    -sugg
+                } else {
+                    sugg
                 }
+            };
 
-                if let ExprKind::Binary(
-                    Spanned {
-                        node: op @ (BinOpKind::Add | BinOpKind::Sub),
-                        ..
-                    },
-                    lhs,
-                    rhs,
-                ) = parent.kind
-                {
-                    let other_addend = if lhs.hir_id == expr.hir_id { rhs } else { lhs };
-
-                    // Negate expr if original code has subtraction and expr is on the right side
-                    let maybe_neg_sugg = |expr, hir_id| {
-                        let sugg = Sugg::hir(cx, expr, "..");
-                        if matches!(op, BinOpKind::Sub) && hir_id == rhs.hir_id {
-                            -sugg
-                        } else {
-                            sugg
-                        }
-                    };
-
-                    span_lint_and_sugg(
-                        cx,
-                        SUBOPTIMAL_FLOPS,
-                        parent.span,
-                        "multiply and add expressions can be calculated more efficiently and accurately",
-                        "consider using",
-                        format!(
-                            "{}.mul_add({}, {})",
-                            Sugg::hir(cx, receiver, "..").maybe_par(),
-                            maybe_neg_sugg(receiver, expr.hir_id),
-                            maybe_neg_sugg(other_addend, other_addend.hir_id),
-                        ),
-                        Applicability::MachineApplicable,
-                    );
-                }
-            }
+            span_lint_and_sugg(
+                cx,
+                SUBOPTIMAL_FLOPS,
+                parent.span,
+                "multiply and add expressions can be calculated more efficiently and accurately",
+                "consider using",
+                format!(
+                    "{}.mul_add({}, {})",
+                    Sugg::hir(cx, receiver, "..").maybe_paren(),
+                    maybe_neg_sugg(receiver, expr.hir_id),
+                    maybe_neg_sugg(other_addend, other_addend.hir_id),
+                ),
+                Applicability::MachineApplicable,
+            );
         }
     }
 }
@@ -372,38 +369,25 @@ fn detect_hypot(cx: &LateContext<'_>, receiver: &Expr<'_>) -> Option<String> {
         {
             return Some(format!(
                 "{}.hypot({})",
-                Sugg::hir(cx, lmul_lhs, "..").maybe_par(),
+                Sugg::hir(cx, lmul_lhs, "..").maybe_paren(),
                 Sugg::hir(cx, rmul_lhs, "..")
             ));
         }
 
         // check if expression of the form x.powi(2) + y.powi(2)
-        if let ExprKind::MethodCall(
-            PathSegment {
-                ident: lmethod_name, ..
-            },
-            largs_0,
-            [largs_1, ..],
-            _,
-        ) = &add_lhs.kind
-            && let ExprKind::MethodCall(
-                PathSegment {
-                    ident: rmethod_name, ..
-                },
-                rargs_0,
-                [rargs_1, ..],
-                _,
-            ) = &add_rhs.kind
-            && lmethod_name.as_str() == "powi"
-            && rmethod_name.as_str() == "powi"
-            && let Some(lvalue) = constant(cx, cx.typeck_results(), largs_1)
-            && let Some(rvalue) = constant(cx, cx.typeck_results(), rargs_1)
+        if let ExprKind::MethodCall(PathSegment { ident: lmethod, .. }, largs_0, [largs_1, ..], _) = &add_lhs.kind
+            && let ExprKind::MethodCall(PathSegment { ident: rmethod, .. }, rargs_0, [rargs_1, ..], _) = &add_rhs.kind
+            && lmethod.name == sym::powi
+            && rmethod.name == sym::powi
+            && let ecx = ConstEvalCtxt::new(cx)
+            && let Some(lvalue) = ecx.eval(largs_1)
+            && let Some(rvalue) = ecx.eval(rargs_1)
             && Int(2) == lvalue
             && Int(2) == rvalue
         {
             return Some(format!(
                 "{}.hypot({})",
-                Sugg::hir(cx, largs_0, "..").maybe_par(),
+                Sugg::hir(cx, largs_0, "..").maybe_paren(),
                 Sugg::hir(cx, rargs_0, "..")
             ));
         }
@@ -436,12 +420,12 @@ fn check_expm1(cx: &LateContext<'_>, expr: &Expr<'_>) {
         lhs,
         rhs,
     ) = expr.kind
+        && let ExprKind::MethodCall(path, self_arg, [], _) = &lhs.kind
+        && path.ident.name == sym::exp
         && cx.typeck_results().expr_ty(lhs).is_floating_point()
-        && let Some(value) = constant(cx, cx.typeck_results(), rhs)
+        && let Some(value) = ConstEvalCtxt::new(cx).eval(rhs)
         && (F32(1.0) == value || F64(1.0) == value)
-        && let ExprKind::MethodCall(path, self_arg, ..) = &lhs.kind
         && cx.typeck_results().expr_ty(self_arg).is_floating_point()
-        && path.ident.name.as_str() == "exp"
     {
         span_lint_and_sugg(
             cx,
@@ -449,7 +433,7 @@ fn check_expm1(cx: &LateContext<'_>, expr: &Expr<'_>) {
             expr.span,
             "(e.pow(x) - 1) can be computed more accurately",
             "consider using",
-            format!("{}.exp_m1()", Sugg::hir(cx, self_arg, "..").maybe_par()),
+            format!("{}.exp_m1()", Sugg::hir(cx, self_arg, "..").maybe_paren()),
             Applicability::MachineApplicable,
         );
     }
@@ -483,12 +467,12 @@ fn check_mul_add(cx: &LateContext<'_>, expr: &Expr<'_>) {
         rhs,
     ) = &expr.kind
     {
-        if let Some(parent) = get_parent_expr(cx, expr) {
-            if let ExprKind::MethodCall(PathSegment { ident: method_name, .. }, receiver, ..) = parent.kind {
-                if method_name.as_str() == "sqrt" && detect_hypot(cx, receiver).is_some() {
-                    return;
-                }
-            }
+        if let Some(parent) = get_parent_expr(cx, expr)
+            && let ExprKind::MethodCall(PathSegment { ident: method, .. }, receiver, ..) = parent.kind
+            && method.name == sym::sqrt
+            && detect_hypot(cx, receiver).is_some()
+        {
+            return;
         }
 
         let maybe_neg_sugg = |expr| {
@@ -551,7 +535,7 @@ fn is_testing_negative(cx: &LateContext<'_>, expr: &Expr<'_>, test: &Expr<'_>) -
 
 /// Returns true iff expr is some zero literal
 fn is_zero(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    match constant_simple(cx, cx.typeck_results(), expr) {
+    match ConstEvalCtxt::new(cx).eval_simple(expr) {
         Some(Int(i)) => i == 0,
         Some(F32(f)) => f == 0.0,
         Some(F64(f)) => f == 0.0,
@@ -566,15 +550,15 @@ fn is_zero(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 /// If the two expressions are not negations of each other, then it
 /// returns None.
 fn are_negated<'a>(cx: &LateContext<'_>, expr1: &'a Expr<'a>, expr2: &'a Expr<'a>) -> Option<(bool, &'a Expr<'a>)> {
-    if let ExprKind::Unary(UnOp::Neg, expr1_negated) = &expr1.kind {
-        if eq_expr_value(cx, expr1_negated, expr2) {
-            return Some((false, expr2));
-        }
+    if let ExprKind::Unary(UnOp::Neg, expr1_negated) = &expr1.kind
+        && eq_expr_value(cx, expr1_negated, expr2)
+    {
+        return Some((false, expr2));
     }
-    if let ExprKind::Unary(UnOp::Neg, expr2_negated) = &expr2.kind {
-        if eq_expr_value(cx, expr1, expr2_negated) {
-            return Some((true, expr1));
-        }
+    if let ExprKind::Unary(UnOp::Neg, expr2_negated) = &expr2.kind
+        && eq_expr_value(cx, expr1, expr2_negated)
+    {
+        return Some((true, expr1));
     }
     None
 }
@@ -591,11 +575,11 @@ fn check_custom_abs(cx: &LateContext<'_>, expr: &Expr<'_>) {
     {
         let positive_abs_sugg = (
             "manual implementation of `abs` method",
-            format!("{}.abs()", Sugg::hir(cx, body, "..").maybe_par()),
+            format!("{}.abs()", Sugg::hir(cx, body, "..").maybe_paren()),
         );
         let negative_abs_sugg = (
             "manual implementation of negation of `abs` method",
-            format!("-{}.abs()", Sugg::hir(cx, body, "..").maybe_par()),
+            format!("-{}.abs()", Sugg::hir(cx, body, "..").maybe_paren()),
         );
         let sugg = if is_testing_positive(cx, cond, body) {
             if if_expr_positive {
@@ -625,27 +609,13 @@ fn check_custom_abs(cx: &LateContext<'_>, expr: &Expr<'_>) {
 }
 
 fn are_same_base_logs(cx: &LateContext<'_>, expr_a: &Expr<'_>, expr_b: &Expr<'_>) -> bool {
-    if let ExprKind::MethodCall(
-        PathSegment {
-            ident: method_name_a, ..
-        },
-        _,
-        args_a,
-        _,
-    ) = expr_a.kind
-        && let ExprKind::MethodCall(
-            PathSegment {
-                ident: method_name_b, ..
-            },
-            _,
-            args_b,
-            _,
-        ) = expr_b.kind
+    if let ExprKind::MethodCall(PathSegment { ident: method_a, .. }, _, args_a, _) = expr_a.kind
+        && let ExprKind::MethodCall(PathSegment { ident: method_b, .. }, _, args_b, _) = expr_b.kind
     {
-        return method_name_a.as_str() == method_name_b.as_str()
+        return method_a.name == method_b.name
             && args_a.len() == args_b.len()
-            && (["ln", "log2", "log10"].contains(&method_name_a.as_str())
-                || method_name_a.as_str() == "log" && args_a.len() == 1 && eq_expr_value(cx, &args_a[0], &args_b[0]));
+            && (matches!(method_a.name, sym::ln | sym::log2 | sym::log10)
+                || method_a.name == sym::log && args_a.len() == 1 && eq_expr_value(cx, &args_a[0], &args_b[0]));
     }
 
     false
@@ -672,7 +642,7 @@ fn check_log_division(cx: &LateContext<'_>, expr: &Expr<'_>) {
             "consider using",
             format!(
                 "{}.log({})",
-                Sugg::hir(cx, largs_self, "..").maybe_par(),
+                Sugg::hir(cx, largs_self, "..").maybe_paren(),
                 Sugg::hir(cx, rargs_self, ".."),
             ),
             Applicability::MachineApplicable,
@@ -695,14 +665,15 @@ fn check_radians(cx: &LateContext<'_>, expr: &Expr<'_>) {
             mul_lhs,
             mul_rhs,
         ) = &div_lhs.kind
-        && let Some(rvalue) = constant(cx, cx.typeck_results(), div_rhs)
-        && let Some(lvalue) = constant(cx, cx.typeck_results(), mul_rhs)
+        && let ecx = ConstEvalCtxt::new(cx)
+        && let Some(rvalue) = ecx.eval(div_rhs)
+        && let Some(lvalue) = ecx.eval(mul_rhs)
     {
         // TODO: also check for constant values near PI/180 or 180/PI
         if (F32(f32_consts::PI) == rvalue || F64(f64_consts::PI) == rvalue)
             && (F32(180_f32) == lvalue || F64(180_f64) == lvalue)
         {
-            let mut proposal = format!("{}.to_degrees()", Sugg::hir(cx, mul_lhs, "..").maybe_par());
+            let mut proposal = format!("{}.to_degrees()", Sugg::hir(cx, mul_lhs, "..").maybe_paren());
             if let ExprKind::Lit(literal) = mul_lhs.kind
                 && let ast::LitKind::Float(ref value, float_type) = literal.node
                 && float_type == ast::LitFloatType::Unsuffixed
@@ -725,7 +696,7 @@ fn check_radians(cx: &LateContext<'_>, expr: &Expr<'_>) {
         } else if (F32(180_f32) == rvalue || F64(180_f64) == rvalue)
             && (F32(f32_consts::PI) == lvalue || F64(f64_consts::PI) == lvalue)
         {
-            let mut proposal = format!("{}.to_radians()", Sugg::hir(cx, mul_lhs, "..").maybe_par());
+            let mut proposal = format!("{}.to_radians()", Sugg::hir(cx, mul_lhs, "..").maybe_paren());
             if let ExprKind::Lit(literal) = mul_lhs.kind
                 && let ast::LitKind::Float(ref value, float_type) = literal.node
                 && float_type == ast::LitFloatType::Unsuffixed
@@ -752,20 +723,20 @@ fn check_radians(cx: &LateContext<'_>, expr: &Expr<'_>) {
 impl<'tcx> LateLintPass<'tcx> for FloatingPointArithmetic {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         // All of these operations are currently not const and are in std.
-        if in_constant(cx, expr.hir_id) {
+        if is_in_const_context(cx) {
             return;
         }
 
         if let ExprKind::MethodCall(path, receiver, args, _) = &expr.kind {
             let recv_ty = cx.typeck_results().expr_ty(receiver);
 
-            if recv_ty.is_floating_point() && !is_no_std_crate(cx) {
-                match path.ident.name.as_str() {
-                    "ln" => check_ln1p(cx, expr, receiver),
-                    "log" => check_log_base(cx, expr, receiver, args),
-                    "powf" => check_powf(cx, expr, receiver, args),
-                    "powi" => check_powi(cx, expr, receiver, args),
-                    "sqrt" => check_hypot(cx, expr, receiver),
+            if recv_ty.is_floating_point() && !is_no_std_crate(cx) && is_inherent_method_call(cx, expr) {
+                match path.ident.name {
+                    sym::ln => check_ln1p(cx, expr, receiver),
+                    sym::log => check_log_base(cx, expr, receiver, args),
+                    sym::powf => check_powf(cx, expr, receiver, args),
+                    sym::powi => check_powi(cx, expr, receiver, args),
+                    sym::sqrt => check_hypot(cx, expr, receiver),
                     _ => {},
                 }
             }

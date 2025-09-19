@@ -1,8 +1,9 @@
-use crate::fmt_list;
-use crate::raw_emitter::RawEmitter;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
+
+use crate::fmt_list;
+use crate::raw_emitter::RawEmitter;
 
 impl RawEmitter {
     pub fn emit_cascading_map(&mut self, ranges: &[Range<u32>]) -> bool {
@@ -64,7 +65,7 @@ impl RawEmitter {
         self.bytes_used += 256;
 
         writeln!(&mut self.file, "#[inline]").unwrap();
-        writeln!(&mut self.file, "pub fn lookup(c: char) -> bool {{").unwrap();
+        writeln!(&mut self.file, "pub const fn lookup(c: char) -> bool {{").unwrap();
         writeln!(&mut self.file, "    match c as u32 >> 8 {{").unwrap();
         for arm in arms {
             writeln!(&mut self.file, "        {},", arm).unwrap();

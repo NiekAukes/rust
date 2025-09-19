@@ -1,4 +1,4 @@
-use std::io::{Result as IoResult, Read};
+use std::io::{self, Read};
 
 pub struct Aaaaaaa;
 
@@ -12,7 +12,7 @@ impl Aaaaaaa {
 }
 
 impl Read for Aaaaaaa {
-    fn read(&mut self, out: &mut [u8]) -> IoResult<usize> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         Ok(out.len())
     }
 }
@@ -29,7 +29,10 @@ impl<T: Read> Ddddddd<T> {
     pub fn ggggggg(self) -> u64 {
         1
     }
-    pub fn hhhhhhh() -> Self where T: Default {
+    pub fn hhhhhhh() -> Self
+    where
+        T: Default,
+    {
         Ddddddd(T::default())
     }
 }

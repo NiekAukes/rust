@@ -2,7 +2,6 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 
-//@ pretty-expanded FIXME #23616
 
 pub mod Foo {
     pub trait Trait {
@@ -11,7 +10,7 @@ pub mod Foo {
 }
 
 mod Bar {
-    impl<'a> dyn (::Foo::Trait) + 'a {
+    impl<'a> dyn (crate::Foo::Trait) + 'a {
         fn bar(&self) { self.foo() }
     }
 }

@@ -1,7 +1,7 @@
-use crate::ty::GenericArgsRef;
-use crate::ty::{self, Ty, TyCtxt};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_macros::{Decodable, Encodable, HashStable, TyDecodable, TyEncodable};
+
+use crate::ty::{self, GenericArgsRef, Ty, TyCtxt};
 
 /// The SymbolExportLevel of a symbols specifies from which kinds of crates
 /// the symbol will be exported. `C` symbols will be exported from any
@@ -44,6 +44,7 @@ pub enum ExportedSymbol<'tcx> {
     Generic(DefId, GenericArgsRef<'tcx>),
     DropGlue(Ty<'tcx>),
     AsyncDropGlueCtorShim(Ty<'tcx>),
+    AsyncDropGlue(DefId, Ty<'tcx>),
     ThreadLocalShim(DefId),
     NoDefId(ty::SymbolName<'tcx>),
 }
@@ -55,7 +56,7 @@ impl<'tcx> ExportedSymbol<'tcx> {
         match *self {
             ExportedSymbol::NonGeneric(def_id) => tcx.symbol_name(ty::Instance::mono(tcx, def_id)),
             ExportedSymbol::Generic(def_id, args) => {
-                tcx.symbol_name(ty::Instance::new(def_id, args))
+                tcx.symbol_name(ty::Instance::new_raw(def_id, args))
             }
             ExportedSymbol::DropGlue(ty) => {
                 tcx.symbol_name(ty::Instance::resolve_drop_in_place(tcx, ty))
@@ -63,8 +64,11 @@ impl<'tcx> ExportedSymbol<'tcx> {
             ExportedSymbol::AsyncDropGlueCtorShim(ty) => {
                 tcx.symbol_name(ty::Instance::resolve_async_drop_in_place(tcx, ty))
             }
+            ExportedSymbol::AsyncDropGlue(def_id, ty) => {
+                tcx.symbol_name(ty::Instance::resolve_async_drop_in_place_poll(tcx, def_id, ty))
+            }
             ExportedSymbol::ThreadLocalShim(def_id) => tcx.symbol_name(ty::Instance {
-                def: ty::InstanceDef::ThreadLocalShim(def_id),
+                def: ty::InstanceKind::ThreadLocalShim(def_id),
                 args: ty::GenericArgs::empty(),
             }),
             ExportedSymbol::NoDefId(symbol_name) => symbol_name,

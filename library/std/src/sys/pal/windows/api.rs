@@ -30,7 +30,6 @@
 //! should go in sys/pal/windows/mod.rs rather than here. See `IoResult` as an example.
 
 use core::ffi::c_void;
-use core::ptr::addr_of;
 
 use super::c;
 
@@ -138,7 +137,7 @@ pub const fn to_utf16<const UTF16_LEN: usize>(s: &str) -> [u16; UTF16_LEN] {
 /// use frequent `as` casts. This is risky because they are too powerful.
 /// For example, the following will compile today:
 ///
-/// `std::mem::size_of::<u64> as u32`
+/// `size_of::<u64> as u32`
 ///
 /// Note that `size_of` is never actually called, instead a function pointer is
 /// converted to a `u32`. Clippy would warn about this but, alas, it's not run
@@ -148,7 +147,7 @@ const fn win32_size_of<T: Sized>() -> u32 {
     // Uses a trait to workaround restriction on using generic types in inner items.
     trait Win32SizeOf: Sized {
         const WIN32_SIZE_OF: u32 = {
-            let size = core::mem::size_of::<Self>();
+            let size = size_of::<Self>();
             assert!(size <= u32::MAX as usize);
             size as u32
         };
@@ -186,7 +185,7 @@ unsafe trait SizedSetFileInformation: Sized {
 unsafe impl<T: SizedSetFileInformation> SetFileInformation for T {
     const CLASS: i32 = T::CLASS;
     fn as_ptr(&self) -> *const c_void {
-        addr_of!(*self).cast::<c_void>()
+        (&raw const *self).cast::<c_void>()
     }
     fn size(&self) -> u32 {
         win32_size_of::<Self>()
@@ -227,8 +226,10 @@ pub fn set_file_information_by_handle<T: SetFileInformation>(
         info: *const c_void,
         size: u32,
     ) -> Result<(), WinError> {
-        let result = c::SetFileInformationByHandle(handle, class, info, size);
-        (result != 0).then_some(()).ok_or_else(get_last_error)
+        unsafe {
+            let result = c::SetFileInformationByHandle(handle, class, info, size);
+            (result != 0).then_some(()).ok_or_else(get_last_error)
+        }
     }
     // SAFETY: The `SetFileInformation` trait ensures that this is safe.
     unsafe { set_info(handle, T::CLASS, info.as_ptr(), info.size()) }
@@ -250,4 +251,43 @@ pub fn get_last_error() -> WinError {
 #[repr(transparent)]
 pub struct WinError {
     pub code: u32,
+}
+impl WinError {
+    pub const fn new(code: u32) -> Self {
+        Self { code }
+    }
+}
+
+// Error code constants.
+// The constant names should be the same as the winapi constants except for the leading `ERROR_`.
+// Due to the sheer number of codes, error codes should only be added here on an as-needed basis.
+// However, they should never be removed as the assumption is they may be useful again in the future.
+#[allow(unused)]
+impl WinError {
+    /// Success is not an error.
+    /// Some Windows APIs do use this to distinguish between a zero return and an error return
+    /// but we should never return this to users as an error.
+    pub const SUCCESS: Self = Self::new(c::ERROR_SUCCESS);
+    // tidy-alphabetical-start
+    pub const ACCESS_DENIED: Self = Self::new(c::ERROR_ACCESS_DENIED);
+    pub const ALREADY_EXISTS: Self = Self::new(c::ERROR_ALREADY_EXISTS);
+    pub const BAD_NET_NAME: Self = Self::new(c::ERROR_BAD_NET_NAME);
+    pub const BAD_NETPATH: Self = Self::new(c::ERROR_BAD_NETPATH);
+    pub const CANT_ACCESS_FILE: Self = Self::new(c::ERROR_CANT_ACCESS_FILE);
+    pub const DELETE_PENDING: Self = Self::new(c::ERROR_DELETE_PENDING);
+    pub const DIR_NOT_EMPTY: Self = Self::new(c::ERROR_DIR_NOT_EMPTY);
+    pub const DIRECTORY: Self = Self::new(c::ERROR_DIRECTORY);
+    pub const FILE_NOT_FOUND: Self = Self::new(c::ERROR_FILE_NOT_FOUND);
+    pub const INSUFFICIENT_BUFFER: Self = Self::new(c::ERROR_INSUFFICIENT_BUFFER);
+    pub const INVALID_FUNCTION: Self = Self::new(c::ERROR_INVALID_FUNCTION);
+    pub const INVALID_HANDLE: Self = Self::new(c::ERROR_INVALID_HANDLE);
+    pub const INVALID_PARAMETER: Self = Self::new(c::ERROR_INVALID_PARAMETER);
+    pub const NO_MORE_FILES: Self = Self::new(c::ERROR_NO_MORE_FILES);
+    pub const NOT_FOUND: Self = Self::new(c::ERROR_NOT_FOUND);
+    pub const NOT_SUPPORTED: Self = Self::new(c::ERROR_NOT_SUPPORTED);
+    pub const OPERATION_ABORTED: Self = Self::new(c::ERROR_OPERATION_ABORTED);
+    pub const PATH_NOT_FOUND: Self = Self::new(c::ERROR_PATH_NOT_FOUND);
+    pub const SHARING_VIOLATION: Self = Self::new(c::ERROR_SHARING_VIOLATION);
+    pub const TIMEOUT: Self = Self::new(c::ERROR_TIMEOUT);
+    // tidy-alphabetical-end
 }

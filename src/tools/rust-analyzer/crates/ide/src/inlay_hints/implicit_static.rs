@@ -3,15 +3,18 @@
 //! static S: &/* 'static */str = "";
 //! ```
 use either::Either;
+use ide_db::famous_defs::FamousDefs;
+use ide_db::text_edit::TextEdit;
 use syntax::{
-    ast::{self, AstNode},
     SyntaxKind,
+    ast::{self, AstNode},
 };
 
 use crate::{InlayHint, InlayHintPosition, InlayHintsConfig, InlayKind, LifetimeElisionHints};
 
 pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
+    FamousDefs(_sema, _): &FamousDefs<'_, '_>,
     config: &InlayHintsConfig,
     statik_or_const: Either<ast::Static, ast::Const>,
 ) -> Option<()> {
@@ -34,10 +37,13 @@ pub(super) fn hints(
                 range: t.text_range(),
                 kind: InlayKind::Lifetime,
                 label: "'static".into(),
-                text_edit: None,
+                text_edit: Some(config.lazy_text_edit(|| {
+                    TextEdit::insert(t.text_range().start(), "'static ".into())
+                })),
                 position: InlayHintPosition::After,
                 pad_left: false,
                 pad_right: true,
+                resolve_parent: None,
             });
         }
     }
@@ -48,8 +54,8 @@ pub(super) fn hints(
 #[cfg(test)]
 mod tests {
     use crate::{
-        inlay_hints::tests::{check_with_config, TEST_CONFIG},
         InlayHintsConfig, LifetimeElisionHints,
+        inlay_hints::tests::{TEST_CONFIG, check_with_config},
     };
 
     #[test]

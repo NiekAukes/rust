@@ -1,7 +1,7 @@
 use expect_test::expect;
 use test_utils::{bench, bench_fixture, skip_slow_tests};
 
-use crate::tests::check_infer_with_mismatches;
+use crate::tests::{check_infer_with_mismatches, check_no_mismatches};
 
 use super::{check_infer, check_types};
 
@@ -64,7 +64,7 @@ fn infer_macros_expanded() {
         "#,
         expect![[r#"
             !0..17 '{Foo(v...,2,])}': Foo
-            !1..4 'Foo': extern "rust-call" Foo({unknown}) -> Foo
+            !1..4 'Foo': fn Foo({unknown}) -> Foo
             !1..16 'Foo(vec![1,2,])': Foo
             !5..15 'vec![1,2,]': {unknown}
             155..181 '{     ...,2); }': ()
@@ -97,7 +97,7 @@ fn infer_legacy_textual_scoped_macros_expanded() {
         "#,
         expect![[r#"
             !0..17 '{Foo(v...,2,])}': Foo
-            !1..4 'Foo': extern "rust-call" Foo({unknown}) -> Foo
+            !1..4 'Foo': fn Foo({unknown}) -> Foo
             !1..16 'Foo(vec![1,2,])': Foo
             !5..15 'vec![1,2,]': {unknown}
             194..250 '{     ...,2); }': ()
@@ -200,9 +200,10 @@ fn expr_macro_def_expanded_in_various_places() {
             100..119 'for _ ...!() {}': IntoIterator::IntoIter<isize>
             100..119 'for _ ...!() {}': !
             100..119 'for _ ...!() {}': IntoIterator::IntoIter<isize>
-            100..119 'for _ ...!() {}': &mut IntoIterator::IntoIter<isize>
-            100..119 'for _ ...!() {}': fn next<IntoIterator::IntoIter<isize>>(&mut IntoIterator::IntoIter<isize>) -> Option<<IntoIterator::IntoIter<isize> as Iterator>::Item>
+            100..119 'for _ ...!() {}': &'? mut IntoIterator::IntoIter<isize>
+            100..119 'for _ ...!() {}': fn next<IntoIterator::IntoIter<isize>>(&'? mut IntoIterator::IntoIter<isize>) -> Option<<IntoIterator::IntoIter<isize> as Iterator>::Item>
             100..119 'for _ ...!() {}': Option<IntoIterator::Item<isize>>
+            100..119 'for _ ...!() {}': ()
             100..119 'for _ ...!() {}': ()
             100..119 'for _ ...!() {}': ()
             100..119 'for _ ...!() {}': ()
@@ -221,7 +222,7 @@ fn expr_macro_def_expanded_in_various_places() {
             281..303 'Spam {...m!() }': {unknown}
             309..325 'spam!(...am!()]': {unknown}
             350..366 'spam!(... usize': usize
-            372..380 '&spam!()': &isize
+            372..380 '&spam!()': &'? isize
             386..394 '-spam!()': isize
             400..416 'spam!(...pam!()': {unknown}
             422..439 'spam!(...pam!()': isize
@@ -293,9 +294,10 @@ fn expr_macro_rules_expanded_in_various_places() {
             114..133 'for _ ...!() {}': IntoIterator::IntoIter<isize>
             114..133 'for _ ...!() {}': !
             114..133 'for _ ...!() {}': IntoIterator::IntoIter<isize>
-            114..133 'for _ ...!() {}': &mut IntoIterator::IntoIter<isize>
-            114..133 'for _ ...!() {}': fn next<IntoIterator::IntoIter<isize>>(&mut IntoIterator::IntoIter<isize>) -> Option<<IntoIterator::IntoIter<isize> as Iterator>::Item>
+            114..133 'for _ ...!() {}': &'? mut IntoIterator::IntoIter<isize>
+            114..133 'for _ ...!() {}': fn next<IntoIterator::IntoIter<isize>>(&'? mut IntoIterator::IntoIter<isize>) -> Option<<IntoIterator::IntoIter<isize> as Iterator>::Item>
             114..133 'for _ ...!() {}': Option<IntoIterator::Item<isize>>
+            114..133 'for _ ...!() {}': ()
             114..133 'for _ ...!() {}': ()
             114..133 'for _ ...!() {}': ()
             114..133 'for _ ...!() {}': ()
@@ -314,7 +316,7 @@ fn expr_macro_rules_expanded_in_various_places() {
             295..317 'Spam {...m!() }': {unknown}
             323..339 'spam!(...am!()]': {unknown}
             364..380 'spam!(... usize': usize
-            386..394 '&spam!()': &isize
+            386..394 '&spam!()': &'? isize
             400..408 '-spam!()': isize
             414..430 'spam!(...pam!()': {unknown}
             436..453 'spam!(...pam!()': isize
@@ -539,7 +541,7 @@ fn test() {
     let msg = foo::Message(foo::MessageRef);
     let r = msg.deref();
     r;
-  //^ &MessageRef
+  //^ &'? MessageRef
 }
 
 //- /lib.rs crate:foo
@@ -703,9 +705,9 @@ fn infer_builtin_macros_file() {
         }
         "#,
         expect![[r#"
-            !0..2 '""': &str
+            !0..6 '"file"': &'static str
             63..87 '{     ...!(); }': ()
-            73..74 'x': &str
+            73..74 'x': &'static str
         "#]],
     );
 }
@@ -741,9 +743,9 @@ fn infer_builtin_macros_concat() {
         }
         "#,
         expect![[r#"
-            !0..13 '"helloworld!"': &str
+            !0..13 '"helloworld!"': &'static str
             65..121 '{     ...")); }': ()
-            75..76 'x': &str
+            75..76 'x': &'static str
         "#]],
     );
 }
@@ -820,7 +822,7 @@ macro_rules! include_str {() => {}}
 fn main() {
     let a = include_str!("foo.rs");
     a;
-} //^ &str
+} //^ &'static str
 
 //- /foo.rs
 hello
@@ -847,7 +849,7 @@ macro_rules! m {
 fn main() {
     let a = include_str!(m!(".rs"));
     a;
-} //^ &str
+} //^ &'static str
 
 //- /foo.rs
 hello
@@ -960,9 +962,9 @@ fn infer_builtin_macros_concat_with_lazy() {
         }
         "#,
         expect![[r#"
-            !0..13 '"helloworld!"': &str
+            !0..13 '"helloworld!"': &'static str
             103..160 '{     ...")); }': ()
-            113..114 'x': &str
+            113..114 'x': &'static str
         "#]],
     );
 }
@@ -977,7 +979,7 @@ fn infer_builtin_macros_env() {
 
         fn main() {
             let x = env!("foo");
-              //^ &str
+              //^ &'static str
         }
         "#,
     );
@@ -991,7 +993,7 @@ fn infer_builtin_macros_option_env() {
 //- /main.rs env:foo=bar
 fn main() {
     let x = option_env!("foo");
-      //^ Option<&str>
+      //^ Option<&'static str>
 }
         "#,
     );
@@ -1403,4 +1405,110 @@ fn foo(t: Tensor) {
 }
 "#,
     );
+}
+
+#[test]
+fn asm_unit() {
+    check_no_mismatches(
+        r#"
+//- minicore: asm
+fn unit() {
+    core::arch::asm!("")
+}
+"#,
+    );
+}
+
+#[test]
+fn asm_no_return() {
+    check_no_mismatches(
+        r#"
+//- minicore: asm
+fn unit() -> ! {
+    core::arch::asm!("", options(noreturn))
+}
+"#,
+    );
+}
+
+#[test]
+fn asm_things() {
+    check_infer(
+        r#"
+//- minicore: asm, concat
+fn main() {
+    unsafe {
+        let foo = 1;
+        let mut o = 0;
+        core::arch::asm!(
+            "%input = OpLoad _ {0}",
+            concat!("%result = ", bar, " _ %input"),
+            "OpStore {1} %result",
+            in(reg) &foo,
+            in(reg) &mut o,
+        );
+        o
+
+        let thread_id: usize;
+        core::arch::asm!("
+            mov {0}, gs:[0x30]
+            mov {0}, [{0}+0x48]
+        ", out(reg) thread_id, options(pure, readonly, nostack));
+
+        static UNMAP_BASE: usize;
+        const MEM_RELEASE: usize;
+        static VirtualFree: usize;
+        const OffPtr: usize;
+        const OffFn: usize;
+        core::arch::asm!("
+            push {free_type}
+            push {free_size}
+            push {base}
+
+            mov eax, fs:[30h]
+            mov eax, [eax+8h]
+            add eax, {off_fn}
+            mov [eax-{off_fn}+{off_ptr}], eax
+
+            push eax
+
+            jmp {virtual_free}
+            ",
+            off_ptr = const OffPtr,
+            off_fn  = const OffFn,
+
+            free_size = const 0,
+            free_type = const MEM_RELEASE,
+
+            virtual_free = sym VirtualFree,
+
+            base = sym UNMAP_BASE,
+            options(noreturn),
+        );
+    }
+}
+"#,
+        expect![[r#"
+            !0..122 'builti...muto,)': ()
+            !0..136 'builti...tack))': ()
+            !0..449 'builti...urn),)': !
+            10..1236 '{     ...   } }': ()
+            16..1234 'unsafe...     }': ()
+            37..40 'foo': i32
+            43..44 '1': i32
+            58..63 'mut o': i32
+            66..67 '0': i32
+            !95..104 'thread_id': usize
+            !103..107 '&foo': &'? i32
+            !104..107 'foo': i32
+            !115..120 '&muto': &'? mut i32
+            !119..120 'o': i32
+            293..294 'o': i32
+            308..317 'thread_id': usize
+            !314..320 'OffPtr': usize
+            !333..338 'OffFn': usize
+            !354..355 '0': i32
+            !371..382 'MEM_RELEASE': usize
+        "#]],
+    )
 }

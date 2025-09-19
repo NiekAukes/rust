@@ -4,25 +4,25 @@
 //@ ignore-stage1
 //@ ignore-cross-compile
 //@ ignore-remote
-//@ ignore-windows-gnu mingw has troubles with linking https://github.com/rust-lang/rust/pull/116837
 //@ edition: 2021
 
 #![feature(rustc_private)]
 #![feature(assert_matches)]
-#![feature(control_flow_enum)]
 
+extern crate rustc_middle;
 #[macro_use]
 extern crate rustc_smir;
 extern crate rustc_driver;
 extern crate rustc_interface;
 extern crate stable_mir;
 
-use mir::{mono::Instance, TerminatorKind::*};
-use rustc_smir::rustc_internal;
-use stable_mir::ty::{RigidTy, TyKind};
-use stable_mir::*;
 use std::io::Write;
 use std::ops::ControlFlow;
+
+use mir::mono::Instance;
+use mir::TerminatorKind::*;
+use stable_mir::ty::{RigidTy, TyKind};
+use stable_mir::*;
 
 const CRATE_NAME: &str = "input";
 
@@ -33,7 +33,7 @@ fn test_stable_mir() -> ControlFlow<()> {
     // Get all items and split generic vs monomorphic items.
     let (generic, mono): (Vec<_>, Vec<_>) =
         items.into_iter().partition(|item| item.requires_monomorphization());
-    assert_eq!(mono.len(), 3, "Expected 2 mono functions and one constant");
+    assert_eq!(mono.len(), 3, "Expected 3 mono functions");
     assert_eq!(generic.len(), 2, "Expected 2 generic functions");
 
     // For all monomorphic items, get the correspondent instances.
@@ -57,8 +57,9 @@ fn test_body(body: mir::Body) {
     for term in body.blocks.iter().map(|bb| &bb.terminator) {
         match &term.kind {
             Call { func, .. } => {
-                let TyKind::RigidTy(ty) = func.ty(body.locals()).unwrap().kind() else { unreachable!
-                () };
+                let TyKind::RigidTy(ty) = func.ty(body.locals()).unwrap().kind() else {
+                    unreachable!()
+                };
                 let RigidTy::FnDef(def, args) = ty else { unreachable!() };
                 let instance = Instance::resolve(def, &args).unwrap();
                 let mangled_name = instance.mangled_name();
@@ -86,7 +87,7 @@ fn test_body(body: mir::Body) {
 fn main() {
     let path = "instance_input.rs";
     generate_input(&path).unwrap();
-    let args = vec![
+    let args = &[
         "rustc".to_string(),
         "-Cpanic=abort".to_string(),
         "--crate-type=lib".to_string(),
@@ -102,6 +103,9 @@ fn generate_input(path: &str) -> std::io::Result<()> {
     write!(
         file,
         r#"
+
+    struct Foo(());
+
     pub fn ty_param<T>(t: &T) -> T where T: Clone {{
         t.clone()
     }}
@@ -116,6 +120,7 @@ fn generate_input(path: &str) -> std::io::Result<()> {
     }}
 
     pub fn monomorphic() {{
+        Foo(());
         let v = vec![10];
         let dup = ty_param(&v);
         assert_eq!(v, dup);

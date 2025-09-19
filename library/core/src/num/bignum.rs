@@ -145,8 +145,7 @@ macro_rules! define_bignum {
 
             /// Adds `other` to itself and returns its own mutable reference.
             pub fn add<'a>(&'a mut self, other: &$name) -> &'a mut $name {
-                use crate::cmp;
-                use crate::iter;
+                use crate::{cmp, iter};
 
                 let mut sz = cmp::max(self.size, other.size);
                 let mut carry = false;
@@ -181,8 +180,7 @@ macro_rules! define_bignum {
 
             /// Subtracts `other` from itself and returns its own mutable reference.
             pub fn sub<'a>(&'a mut self, other: &$name) -> &'a mut $name {
-                use crate::cmp;
-                use crate::iter;
+                use crate::{cmp, iter};
 
                 let sz = cmp::max(self.size, other.size);
                 let mut noborrow = true;
@@ -255,12 +253,11 @@ macro_rules! define_bignum {
 
             /// Multiplies itself by `5^e` and returns its own mutable reference.
             pub fn mul_pow5(&mut self, mut e: usize) -> &mut $name {
-                use crate::mem;
                 use crate::num::bignum::SMALL_POW5;
 
                 // There are exactly n trailing zeros on 2^n, and the only relevant digit sizes
                 // are consecutive powers of two, so this is well suited index for the table.
-                let table_index = mem::size_of::<$ty>().trailing_zeros() as usize;
+                let table_index = size_of::<$ty>().trailing_zeros() as usize;
                 let (small_power, small_e) = SMALL_POW5[table_index];
                 let small_power = small_power as $ty;
 
@@ -406,6 +403,8 @@ macro_rules! define_bignum {
                 Self { size: self.size, base: self.base }
             }
         }
+
+        impl crate::clone::UseCloned for $name {}
 
         impl crate::fmt::Debug for $name {
             fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {

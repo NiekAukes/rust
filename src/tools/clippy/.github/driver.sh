@@ -2,15 +2,18 @@
 
 set -ex
 
-# Check sysroot handling
-sysroot=$(./target/debug/clippy-driver --print sysroot)
-test "$sysroot" = "$(rustc --print sysroot)"
+sysroot="$(rustc --print sysroot)"
+case $OS in
+    Linux) export LD_LIBRARY_PATH="$sysroot/lib" ;;
+    macOS) export DYLD_FALLBACK_LIBRARY_PATH="$sysroot/lib" ;;
+    Windows) export PATH="$(cygpath "$sysroot")/bin:$PATH" ;;
+    *) exit 1
+esac
 
-if [[ ${OS} == "Windows" ]]; then
-	desired_sysroot=C:/tmp
-else
-	desired_sysroot=/tmp
-fi
+# Check sysroot handling
+test "$(./target/debug/clippy-driver --print sysroot)" = "$sysroot"
+
+desired_sysroot="target/sysroot"
 # Set --sysroot in command line
 sysroot=$(./target/debug/clippy-driver --sysroot $desired_sysroot --print sysroot)
 test "$sysroot" = $desired_sysroot
@@ -44,9 +47,9 @@ unset CARGO_MANIFEST_DIR
 
 # Run a lint and make sure it produces the expected output. It's also expected to exit with code 1
 # FIXME: How to match the clippy invocation in compile-test.rs?
-./target/debug/clippy-driver -Dwarnings -Aunused -Zui-testing --emit metadata --crate-type bin tests/ui/double_neg.rs 2>double_neg.stderr && exit 1
-sed -e "/= help: for/d" double_neg.stderr > normalized.stderr
-diff -u normalized.stderr tests/ui/double_neg.stderr
+./target/debug/clippy-driver -Dwarnings -Aunused -Zui-testing --emit metadata --crate-type bin tests/ui/string_to_string.rs 2>string_to_string.stderr && exit 1
+sed -e "/= help: for/d" string_to_string.stderr > normalized.stderr
+diff -u normalized.stderr tests/ui/string_to_string.stderr
 
 # make sure "clippy-driver --rustc --arg" and "rustc --arg" behave the same
 SYSROOT=$(rustc --print sysroot)

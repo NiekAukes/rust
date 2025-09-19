@@ -2,10 +2,13 @@
 
 use std::{env, path::PathBuf, str};
 
-use anyhow::{bail, format_err, Context};
-use xshell::{cmd, Shell};
+use anyhow::{Context, bail, format_err};
+use xshell::{Shell, cmd};
 
-use crate::flags::{self, Malloc};
+use crate::{
+    flags::{self, Malloc, PgoTrainingCrate},
+    util::detect_target,
+};
 
 impl flags::Install {
     pub(crate) fn run(self, sh: &Shell) -> anyhow::Result<()> {
@@ -14,6 +17,9 @@ impl flags::Install {
         }
         if let Some(server) = self.server() {
             install_server(sh, server).context("install server")?;
+        }
+        if let Some(server) = self.proc_macro_server() {
+            install_proc_macro_server(sh, server).context("install proc-macro server")?;
         }
         if let Some(client) = self.client() {
             install_client(sh, client).context("install client")?;
@@ -31,6 +37,11 @@ const VS_CODES: &[&str] = &["code", "code-exploration", "code-insiders", "codium
 
 pub(crate) struct ServerOpt {
     pub(crate) malloc: Malloc,
+    pub(crate) dev_rel: bool,
+    pub(crate) pgo: Option<PgoTrainingCrate>,
+}
+
+pub(crate) struct ProcMacroServerOpt {
     pub(crate) dev_rel: bool,
 }
 
@@ -128,7 +139,33 @@ fn install_server(sh: &Shell, opts: ServerOpt) -> anyhow::Result<()> {
     let features = opts.malloc.to_features();
     let profile = if opts.dev_rel { "dev-rel" } else { "release" };
 
-    let cmd = cmd!(sh, "cargo install --path crates/rust-analyzer --profile={profile} --locked --force --features force-always-assert {features...}");
-    cmd.run()?;
+    let mut install_cmd = cmd!(
+        sh,
+        "cargo install --path crates/rust-analyzer --profile={profile} --locked --force --features force-always-assert {features...}"
+    );
+
+    if let Some(train_crate) = opts.pgo {
+        let build_cmd = cmd!(
+            sh,
+            "cargo build --manifest-path ./crates/rust-analyzer/Cargo.toml --bin rust-analyzer --profile={profile} --locked --features force-always-assert {features...}"
+        );
+
+        let target = detect_target(sh);
+        let profile = crate::pgo::gather_pgo_profile(sh, build_cmd, &target, train_crate)?;
+        install_cmd = crate::pgo::apply_pgo_to_cmd(install_cmd, &profile);
+    }
+
+    install_cmd.run()?;
+    Ok(())
+}
+
+fn install_proc_macro_server(sh: &Shell, opts: ProcMacroServerOpt) -> anyhow::Result<()> {
+    let profile = if opts.dev_rel { "dev-rel" } else { "release" };
+
+    cmd!(
+        sh,
+        "cargo +nightly install --path crates/proc-macro-srv-cli --profile={profile} --locked --force --features sysroot-abi"
+    ).run()?;
+
     Ok(())
 }

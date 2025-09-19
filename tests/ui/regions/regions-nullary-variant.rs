@@ -2,13 +2,12 @@
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
 
-//@ pretty-expanded FIXME #23616
 
 enum roption<'a> {
     a, b(&'a usize)
 }
 
-fn mk(cond: bool, ptr: &usize) -> roption {
+fn mk(cond: bool, ptr: &usize) -> roption<'_> {
     if cond {roption::a} else {roption::b(ptr)}
 }
 

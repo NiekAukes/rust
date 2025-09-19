@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-
 use llvm_bitcode_linker::{Optimization, Session, Target};
 
 #[derive(Debug, Parser)]
@@ -28,6 +27,10 @@ pub struct Args {
     #[arg(long)]
     target_cpu: Option<String>,
 
+    /// The target features
+    #[arg(long)]
+    target_feature: Option<String>,
+
     /// Write output to the filename
     #[arg(short, long)]
     output: PathBuf,
@@ -50,7 +53,7 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let mut linker = Session::new(args.target, args.target_cpu, args.output);
+    let mut linker = Session::new(args.target, args.target_cpu, args.target_feature, args.output);
 
     linker.add_exported_symbols(args.export_symbol);
 

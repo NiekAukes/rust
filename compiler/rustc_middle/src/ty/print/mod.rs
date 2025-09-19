@@ -1,15 +1,19 @@
-use crate::ty::GenericArg;
-use crate::ty::{self, Ty, TyCtxt};
+use std::path::PathBuf;
 
+use hir::def::Namespace;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::sso::SsoHashSet;
 use rustc_hir as hir;
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId};
 use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
+use tracing::{debug, instrument, trace};
+
+use crate::ty::{self, GenericArg, ShortInstance, Ty, TyCtxt};
 
 // `pretty` is a separate module only for organization.
 mod pretty;
 pub use self::pretty::*;
+use super::Lift;
 
 pub type PrintError = std::fmt::Error;
 
@@ -41,10 +45,25 @@ pub trait Printer<'tcx>: Sized {
         &mut self,
         impl_def_id: DefId,
         args: &'tcx [GenericArg<'tcx>],
-        self_ty: Ty<'tcx>,
-        trait_ref: Option<ty::TraitRef<'tcx>>,
     ) -> Result<(), PrintError> {
-        self.default_print_impl_path(impl_def_id, args, self_ty, trait_ref)
+        let tcx = self.tcx();
+        let self_ty = tcx.type_of(impl_def_id);
+        let impl_trait_ref = tcx.impl_trait_ref(impl_def_id);
+        let (self_ty, impl_trait_ref) = if tcx.generics_of(impl_def_id).count() <= args.len() {
+            (
+                self_ty.instantiate(tcx, args),
+                impl_trait_ref.map(|impl_trait_ref| impl_trait_ref.instantiate(tcx, args)),
+            )
+        } else {
+            // We are probably printing a nested item inside of an impl.
+            // Use the identity substitutions for the impl.
+            (
+                self_ty.instantiate_identity(),
+                impl_trait_ref.map(|impl_trait_ref| impl_trait_ref.instantiate_identity()),
+            )
+        };
+
+        self.default_print_impl_path(impl_def_id, self_ty, impl_trait_ref)
     }
 
     fn print_region(&mut self, region: ty::Region<'tcx>) -> Result<(), PrintError>;
@@ -86,6 +105,10 @@ pub trait Printer<'tcx>: Sized {
         args: &[GenericArg<'tcx>],
     ) -> Result<(), PrintError>;
 
+    fn should_truncate(&mut self) -> bool {
+        false
+    }
+
     // Defaults (should not be overridden):
 
     #[instrument(skip(self), level = "debug")]
@@ -103,23 +126,7 @@ pub trait Printer<'tcx>: Sized {
                 self.path_crate(def_id.krate)
             }
 
-            DefPathData::Impl => {
-                let generics = self.tcx().generics_of(def_id);
-                let self_ty = self.tcx().type_of(def_id);
-                let impl_trait_ref = self.tcx().impl_trait_ref(def_id);
-                let (self_ty, impl_trait_ref) = if args.len() >= generics.count() {
-                    (
-                        self_ty.instantiate(self.tcx(), args),
-                        impl_trait_ref.map(|i| i.instantiate(self.tcx(), args)),
-                    )
-                } else {
-                    (
-                        self_ty.instantiate_identity(),
-                        impl_trait_ref.map(|i| i.instantiate_identity()),
-                    )
-                };
-                self.print_impl_path(def_id, args, self_ty, impl_trait_ref)
-            }
+            DefPathData::Impl => self.print_impl_path(def_id, args),
 
             _ => {
                 let parent_def_id = DefId { index: key.parent.unwrap(), ..def_id };
@@ -132,8 +139,7 @@ pub trait Printer<'tcx>: Sized {
 
                     match key.disambiguated_data.data {
                         DefPathData::Closure => {
-                            // FIXME(async_closures): This is somewhat ugly.
-                            // We need to additionally print the `kind` field of a closure if
+                            // We need to additionally print the `kind` field of a coroutine if
                             // it is desugared from a coroutine-closure.
                             if let Some(hir::CoroutineKind::Desugared(
                                 _,
@@ -149,6 +155,10 @@ pub trait Printer<'tcx>: Sized {
                                 // Closures' own generics are only captures, don't print them.
                             }
                         }
+                        DefPathData::SyntheticCoroutineBody => {
+                            // Synthetic coroutine bodies have no distinct generics, since like
+                            // closures they're all just internal state of the coroutine.
+                        }
                         // This covers both `DefKind::AnonConst` and `DefKind::InlineConst`.
                         // Anon consts doesn't have their own generics, and inline consts' own
                         // generics are their inferred types, so don't print them.
@@ -157,7 +167,7 @@ pub trait Printer<'tcx>: Sized {
                         // If we have any generic arguments to print, we do that
                         // on top of the same path, but without its own generics.
                         _ => {
-                            if !generics.params.is_empty() && args.len() >= generics.count() {
+                            if !generics.is_own_empty() && args.len() >= generics.count() {
                                 let args = generics.own_args_no_defaults(self.tcx(), args);
                                 return self.path_generic_args(
                                     |cx| cx.print_def_path(def_id, parent_args),
@@ -197,7 +207,6 @@ pub trait Printer<'tcx>: Sized {
     fn default_print_impl_path(
         &mut self,
         impl_def_id: DefId,
-        _args: &'tcx [GenericArg<'tcx>],
         self_ty: Ty<'tcx>,
         impl_trait_ref: Option<ty::TraitRef<'tcx>>,
     ) -> Result<(), PrintError> {
@@ -286,7 +295,8 @@ fn characteristic_def_id_of_type_cached<'a>(
         | ty::Int(_)
         | ty::Uint(_)
         | ty::Str
-        | ty::FnPtr(_)
+        | ty::FnPtr(..)
+        | ty::UnsafeBinder(_)
         | ty::Alias(..)
         | ty::Placeholder(..)
         | ty::Param(_)
@@ -332,5 +342,51 @@ pub fn describe_as_module(def_id: impl Into<LocalDefId>, tcx: TyCtxt<'_>) -> Str
         "top-level module".to_string()
     } else {
         format!("module `{}`", tcx.def_path_str(def_id))
+    }
+}
+
+impl<T> rustc_type_ir::ir_print::IrPrint<T> for TyCtxt<'_>
+where
+    T: Copy + for<'a, 'tcx> Lift<TyCtxt<'tcx>, Lifted: Print<'tcx, FmtPrinter<'a, 'tcx>>>,
+{
+    fn print(t: &T, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        ty::tls::with(|tcx| {
+            let mut cx = FmtPrinter::new(tcx, Namespace::TypeNS);
+            tcx.lift(*t).expect("could not lift for printing").print(&mut cx)?;
+            fmt.write_str(&cx.into_buffer())?;
+            Ok(())
+        })
+    }
+
+    fn print_debug(t: &T, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        with_no_trimmed_paths!(Self::print(t, fmt))
+    }
+}
+
+/// Format instance name that is already known to be too long for rustc.
+/// Show only the first 2 types if it is longer than 32 characters to avoid blasting
+/// the user's terminal with thousands of lines of type-name.
+///
+/// If the type name is longer than before+after, it will be written to a file.
+pub fn shrunk_instance_name<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: ty::Instance<'tcx>,
+) -> (String, Option<PathBuf>) {
+    let s = instance.to_string();
+
+    // Only use the shrunk version if it's really shorter.
+    // This also avoids the case where before and after slices overlap.
+    if s.chars().nth(33).is_some() {
+        let shrunk = format!("{}", ShortInstance(instance, 4));
+        if shrunk == s {
+            return (s, None);
+        }
+
+        let path = tcx.output_filenames(()).temp_path_for_diagnostic("long-type.txt");
+        let written_to_path = std::fs::write(&path, s).ok().map(|_| path);
+
+        (shrunk, written_to_path)
+    } else {
+        (s, None)
     }
 }

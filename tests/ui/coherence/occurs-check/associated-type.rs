@@ -1,7 +1,8 @@
 //@ revisions: old next
+//@ ignore-compare-mode-next-solver (explicit revisions)
 //@[next] compile-flags: -Znext-solver
 
-// A regression test for #105787
+// A (partial) regression test for #105787
 
 // Using the higher ranked projection hack to prevent us from replacing the projection
 // with an inference variable.
@@ -42,5 +43,5 @@ fn foo<T: Overlap<U>, U>(x: T::Assoc) -> T::Assoc {
 
 fn main() {
     foo::<for<'a> fn(&'a (), ()), for<'a> fn(&'a (), ())>(3usize);
-    //[next]~^ ERROR: cannot satisfy
+    //[next]~^ ERROR: cannot normalize
 }

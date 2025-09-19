@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use rustc_ast::ast;
 use rustc_span::Span;
+use tracing::debug;
 
 use self::newline_style::apply_newline_style;
 use crate::comment::{CharClasses, FullCodeCharKind};
@@ -16,7 +17,7 @@ use crate::parse::parser::{DirectoryOwnership, Parser, ParserError};
 use crate::parse::session::ParseSess;
 use crate::utils::{contains_skip, count_newlines};
 use crate::visitor::FmtVisitor;
-use crate::{modules, source_file, ErrorKind, FormatReport, Input, Session};
+use crate::{ErrorKind, FormatReport, Input, Session, modules, source_file};
 
 mod generated;
 mod newline_style;
@@ -82,7 +83,7 @@ fn should_skip_module<T: FormatHandler>(
         let source_file = context.psess.span_to_file_contents(module.span);
         let src = source_file.src.as_ref().expect("SourceFile without src");
 
-        if is_generated_file(src) {
+        if is_generated_file(src, config) {
             return true;
         }
     }

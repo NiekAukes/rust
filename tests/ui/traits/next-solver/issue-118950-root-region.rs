@@ -12,12 +12,13 @@ trait ToUnit<'a> {
 trait Overlap<T> {}
 
 type Assoc<'a, T> = <*const T as ToUnit<'a>>::Unit;
-//~^ ERROR: not well-formed
+//~^ ERROR the trait bound `*const T: ToUnit<'a>` is not satisfied
 
 impl<T> Overlap<T> for T {}
 
 impl<T> Overlap<for<'a> fn(Assoc<'a, T>)> for T where Missing: Overlap<T> {}
-//~^ ERROR conflicting implementations of trait `Overlap<fn(_)>` for type `fn(_)`
-//~| ERROR cannot find type `Missing` in this scope
+//~^ ERROR cannot find type `Missing` in this scope
+//~| ERROR the trait bound `T: Overlap<for<'a> fn(Assoc<'a, T>)>` is not satisfied
+//~| ERROR the trait bound `for<'a> *const T: ToUnit<'a>` is not satisfied
 
 fn main() {}

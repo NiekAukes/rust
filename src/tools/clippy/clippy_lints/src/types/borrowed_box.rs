@@ -25,7 +25,7 @@ pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, lt: &Lifetime, m
                     _ => None,
                 })
             {
-                if is_any_trait(cx, inner) {
+                if is_any_trait(cx, inner.as_unambig_ty()) {
                     // Ignore `Box<Any>` types; see issue #1884 for details.
                     return false;
                 }
@@ -33,7 +33,7 @@ pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, lt: &Lifetime, m
                 let ltopt = if lt.is_anonymous() {
                     String::new()
                 } else {
-                    format!("{} ", lt.ident.as_str())
+                    format!("{} ", lt.ident)
                 };
 
                 if mut_ty.mutbl == Mutability::Mut {
@@ -47,16 +47,15 @@ pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, lt: &Lifetime, m
                 // Originally reported as the issue #3128.
                 let inner_snippet = snippet(cx, inner.span, "..");
                 let suggestion = match &inner.kind {
-                    TyKind::TraitObject(bounds, lt_bound, _) if bounds.len() > 1 || !lt_bound.is_elided() => {
-                        format!("&{ltopt}({})", &inner_snippet)
+                    TyKind::TraitObject(bounds, lt_bound) if bounds.len() > 1 || !lt_bound.is_elided() => {
+                        format!("&{ltopt}({inner_snippet})")
                     },
                     TyKind::Path(qpath)
-                        if get_bounds_if_impl_trait(cx, qpath, inner.hir_id)
-                            .map_or(false, |bounds| bounds.len() > 1) =>
+                        if get_bounds_if_impl_trait(cx, qpath, inner.hir_id).is_some_and(|bounds| bounds.len() > 1) =>
                     {
-                        format!("&{ltopt}({})", &inner_snippet)
+                        format!("&{ltopt}({inner_snippet})")
                     },
-                    _ => format!("&{ltopt}{}", &inner_snippet),
+                    _ => format!("&{ltopt}{inner_snippet}"),
                 };
                 span_lint_and_sugg(
                     cx,
@@ -72,7 +71,7 @@ pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, lt: &Lifetime, m
                     Applicability::Unspecified,
                 );
                 return true;
-            };
+            }
             false
         },
         _ => false,
@@ -81,14 +80,15 @@ pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, lt: &Lifetime, m
 
 // Returns true if given type is `Any` trait.
 fn is_any_trait(cx: &LateContext<'_>, t: &hir::Ty<'_>) -> bool {
-    if let TyKind::TraitObject(traits, ..) = t.kind
-        && !traits.is_empty()
-        && let Some(trait_did) = traits[0].trait_ref.trait_def_id()
-        // Only Send/Sync can be used as additional traits, so it is enough to
-        // check only the first trait.
-        && cx.tcx.is_diagnostic_item(sym::Any, trait_did)
-    {
-        return true;
+    if let TyKind::TraitObject(traits, ..) = t.kind {
+        return traits.iter().any(|bound| {
+            if let Some(trait_did) = bound.trait_ref.trait_def_id()
+                && cx.tcx.is_diagnostic_item(sym::Any, trait_did)
+            {
+                return true;
+            }
+            false
+        });
     }
 
     false
@@ -96,10 +96,10 @@ fn is_any_trait(cx: &LateContext<'_>, t: &hir::Ty<'_>) -> bool {
 
 fn get_bounds_if_impl_trait<'tcx>(cx: &LateContext<'tcx>, qpath: &QPath<'_>, id: HirId) -> Option<GenericBounds<'tcx>> {
     if let Some(did) = cx.qpath_res(qpath, id).opt_def_id()
-        && let Some(Node::GenericParam(generic_param)) = cx.tcx.hir().get_if_local(did)
+        && let Some(Node::GenericParam(generic_param)) = cx.tcx.hir_get_if_local(did)
         && let GenericParamKind::Type { synthetic, .. } = generic_param.kind
         && synthetic
-        && let Some(generics) = cx.tcx.hir().get_generics(id.owner.def_id)
+        && let Some(generics) = cx.tcx.hir_get_generics(id.owner.def_id)
         && let Some(pred) = generics.bounds_for_param(did.expect_local()).next()
     {
         Some(pred.bounds)

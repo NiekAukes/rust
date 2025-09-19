@@ -20,27 +20,24 @@ struct Y(usize);
 #[derive(Debug, Default)]
 #[repr(packed)]
 struct X(Y);
-//~^ ERROR cannot move out of `self` which is behind a shared reference
+//~^ ERROR cannot move out of a shared reference [E0507]
 
-// This is currently allowed, but will be phased out at some point. From
-// `zerovec` within icu4x-0.9.0.
 #[derive(Debug)]
 #[repr(packed)]
 struct FlexZeroSlice {
     width: u8,
     data: [u8],
-    //~^ WARNING byte slice in a packed struct that derives a built-in trait
-    //~^^ this was previously accepted
+    //~^ ERROR cannot move
+    //~| ERROR cannot move
 }
 
-// Again, currently allowed, but will be phased out.
 #[derive(Debug)]
 #[repr(packed)]
 struct WithStr {
     width: u8,
     data: str,
-    //~^ WARNING string slice in a packed struct that derives a built-in trait
-    //~^^ this was previously accepted
+    //~^ ERROR cannot move
+    //~| ERROR cannot move
 }
 
 fn main() {}

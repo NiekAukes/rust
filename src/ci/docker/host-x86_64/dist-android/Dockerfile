@@ -1,4 +1,4 @@
-FROM ubuntu:23.04
+FROM ubuntu:24.04
 
 COPY scripts/android-base-apt-get.sh /scripts/
 RUN sh /scripts/android-base-apt-get.sh
@@ -6,7 +6,7 @@ RUN sh /scripts/android-base-apt-get.sh
 # ndk
 COPY scripts/android-ndk.sh /scripts/
 RUN . /scripts/android-ndk.sh && \
-    download_ndk android-ndk-r25b-linux.zip
+    download_ndk android-ndk-r26d-linux.zip
 
 # env
 ENV TARGETS=arm-linux-androideabi
@@ -21,6 +21,8 @@ ENV RUST_CONFIGURE_ARGS \
       --enable-profiler \
       --android-ndk=/android/ndk/ \
       --disable-docs
+
+ENV PATH=$PATH:/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
 
 ENV SCRIPT python3 ../x.py dist --host='' --target $TARGETS
 

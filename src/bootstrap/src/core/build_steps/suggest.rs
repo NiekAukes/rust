@@ -1,10 +1,9 @@
 //! Attempt to magically identify good tests to run
 
-#![cfg_attr(feature = "build-metrics", allow(unused))]
-
-use clap::Parser;
 use std::path::PathBuf;
 use std::str::FromStr;
+
+use clap::Parser;
 
 use crate::core::build_steps::tool::Tool;
 use crate::core::builder::Builder;
@@ -14,22 +13,11 @@ pub fn suggest(builder: &Builder<'_>, run: bool) {
     let git_config = builder.config.git_config();
     let suggestions = builder
         .tool_cmd(Tool::SuggestTests)
-        .env("SUGGEST_TESTS_GIT_REPOSITORY", git_config.git_repository)
         .env("SUGGEST_TESTS_NIGHTLY_BRANCH", git_config.nightly_branch)
-        .output()
-        .expect("failed to run `suggest-tests` tool");
+        .env("SUGGEST_TESTS_MERGE_COMMIT_EMAIL", git_config.git_merge_commit_email)
+        .run_capture_stdout(builder)
+        .stdout();
 
-    if !suggestions.status.success() {
-        println!("failed to run `suggest-tests` tool ({})", suggestions.status);
-        println!(
-            "`suggest_tests` stdout:\n{}`suggest_tests` stderr:\n{}",
-            String::from_utf8(suggestions.stdout).unwrap(),
-            String::from_utf8(suggestions.stderr).unwrap()
-        );
-        panic!("failed to run `suggest-tests`");
-    }
-
-    let suggestions = String::from_utf8(suggestions.stdout).unwrap();
     let suggestions = suggestions
         .lines()
         .map(|line| {

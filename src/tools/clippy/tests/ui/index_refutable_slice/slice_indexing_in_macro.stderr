@@ -9,14 +9,13 @@ note: the lint level is defined here
    |
 LL | #![deny(clippy::index_refutable_slice)]
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-help: try using a slice pattern here
+help: replace the binding and indexed access with a slice pattern
    |
-LL |         if let Some([slice_0, ..]) = slice;
-   |                     ~~~~~~~~~~~~~
-help: and replace the index expressions here
+LL ~         if let Some([slice_0, ..]) = slice;
+LL |
+LL |         then {
+LL ~             println!("{}", slice_0);
    |
-LL |             println!("{}", slice_0);
-   |                            ~~~~~~~
 
 error: aborting due to 1 previous error
 

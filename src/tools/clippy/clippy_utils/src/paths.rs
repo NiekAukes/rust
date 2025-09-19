@@ -4,111 +4,338 @@
 //! Whenever possible, please consider diagnostic items over hardcoded paths.
 //! See <https://github.com/rust-lang/rust-clippy/issues/5393> for more information.
 
-pub const APPLICABILITY: [&str; 2] = ["rustc_lint_defs", "Applicability"];
-pub const APPLICABILITY_VALUES: [[&str; 3]; 4] = [
-    ["rustc_lint_defs", "Applicability", "Unspecified"],
-    ["rustc_lint_defs", "Applicability", "HasPlaceholders"],
-    ["rustc_lint_defs", "Applicability", "MaybeIncorrect"],
-    ["rustc_lint_defs", "Applicability", "MachineApplicable"],
+use crate::{MaybePath, path_def_id, sym};
+use rustc_ast::Mutability;
+use rustc_data_structures::fx::FxHashMap;
+use rustc_hir::def::Namespace::{MacroNS, TypeNS, ValueNS};
+use rustc_hir::def::{DefKind, Namespace, Res};
+use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
+use rustc_hir::{ImplItemRef, ItemKind, Node, OwnerId, TraitItemRef, UseKind};
+use rustc_lint::LateContext;
+use rustc_middle::ty::fast_reject::SimplifiedType;
+use rustc_middle::ty::{FloatTy, IntTy, Ty, TyCtxt, UintTy};
+use rustc_span::{Ident, STDLIB_STABLE_CRATES, Symbol};
+use std::sync::OnceLock;
+
+/// Specifies whether to resolve a path in the [`TypeNS`], [`ValueNS`], [`MacroNS`] or in an
+/// arbitrary namespace
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PathNS {
+    Type,
+    Value,
+    Macro,
+
+    /// Resolves to the name in the first available namespace, e.g. for `std::vec` this would return
+    /// either the macro or the module but **not** both
+    ///
+    /// Must only be used when the specific resolution is unimportant such as in
+    /// `missing_enforced_import_renames`
+    Arbitrary,
+}
+
+impl PathNS {
+    fn matches(self, ns: Option<Namespace>) -> bool {
+        let required = match self {
+            PathNS::Type => TypeNS,
+            PathNS::Value => ValueNS,
+            PathNS::Macro => MacroNS,
+            PathNS::Arbitrary => return true,
+        };
+
+        ns == Some(required)
+    }
+}
+
+/// Lazily resolves a path into a list of [`DefId`]s using [`lookup_path`].
+///
+/// Typically it will contain one [`DefId`] or none, but in some situations there can be multiple:
+/// - `memchr::memchr` could return the functions from both memchr 1.0 and memchr 2.0
+/// - `alloc::boxed::Box::downcast` would return a function for each of the different inherent impls
+///   ([1], [2], [3])
+///
+/// [1]: https://doc.rust-lang.org/std/boxed/struct.Box.html#method.downcast
+/// [2]: https://doc.rust-lang.org/std/boxed/struct.Box.html#method.downcast-1
+/// [3]: https://doc.rust-lang.org/std/boxed/struct.Box.html#method.downcast-2
+pub struct PathLookup {
+    ns: PathNS,
+    path: &'static [Symbol],
+    once: OnceLock<Vec<DefId>>,
+}
+
+impl PathLookup {
+    /// Only exported for tests and `clippy_lints_internal`
+    #[doc(hidden)]
+    pub const fn new(ns: PathNS, path: &'static [Symbol]) -> Self {
+        Self {
+            ns,
+            path,
+            once: OnceLock::new(),
+        }
+    }
+
+    /// Returns the list of [`DefId`]s that the path resolves to
+    pub fn get(&self, cx: &LateContext<'_>) -> &[DefId] {
+        self.once.get_or_init(|| lookup_path(cx.tcx, self.ns, self.path))
+    }
+
+    /// Returns the single [`DefId`] that the path resolves to, this can only be used for paths into
+    /// stdlib crates to avoid the issue of multiple [`DefId`]s being returned
+    ///
+    /// May return [`None`] in `no_std`/`no_core` environments
+    pub fn only(&self, cx: &LateContext<'_>) -> Option<DefId> {
+        let ids = self.get(cx);
+        debug_assert!(STDLIB_STABLE_CRATES.contains(&self.path[0]));
+        debug_assert!(ids.len() <= 1, "{ids:?}");
+        ids.first().copied()
+    }
+
+    /// Checks if the path resolves to the given `def_id`
+    pub fn matches(&self, cx: &LateContext<'_>, def_id: DefId) -> bool {
+        self.get(cx).contains(&def_id)
+    }
+
+    /// Resolves `maybe_path` to a [`DefId`] and checks if the [`PathLookup`] matches it
+    pub fn matches_path<'tcx>(&self, cx: &LateContext<'_>, maybe_path: &impl MaybePath<'tcx>) -> bool {
+        path_def_id(cx, maybe_path).is_some_and(|def_id| self.matches(cx, def_id))
+    }
+
+    /// Checks if the path resolves to `ty`'s definition, must be an `Adt`
+    pub fn matches_ty(&self, cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
+        ty.ty_adt_def().is_some_and(|adt| self.matches(cx, adt.did()))
+    }
+}
+
+macro_rules! path_macros {
+    ($($name:ident: $ns:expr,)*) => {
+        $(
+            /// Only exported for tests and `clippy_lints_internal`
+            #[doc(hidden)]
+            #[macro_export]
+            macro_rules! $name {
+                ($$($$seg:ident $$(::)?)*) => {
+                    PathLookup::new($ns, &[$$(sym::$$seg,)*])
+                };
+            }
+        )*
+    };
+}
+
+path_macros! {
+    type_path: PathNS::Type,
+    value_path: PathNS::Value,
+    macro_path: PathNS::Macro,
+}
+
+// Paths in external crates
+pub static FUTURES_IO_ASYNCREADEXT: PathLookup = type_path!(futures_util::AsyncReadExt);
+pub static FUTURES_IO_ASYNCWRITEEXT: PathLookup = type_path!(futures_util::AsyncWriteExt);
+pub static ITERTOOLS_NEXT_TUPLE: PathLookup = value_path!(itertools::Itertools::next_tuple);
+pub static PARKING_LOT_GUARDS: [PathLookup; 3] = [
+    type_path!(lock_api::mutex::MutexGuard),
+    type_path!(lock_api::rwlock::RwLockReadGuard),
+    type_path!(lock_api::rwlock::RwLockWriteGuard),
 ];
-pub const DIAG: [&str; 2] = ["rustc_errors", "Diag"];
-pub const BINARYHEAP_ITER: [&str; 5] = ["alloc", "collections", "binary_heap", "BinaryHeap", "iter"];
-pub const BTREEMAP_CONTAINS_KEY: [&str; 6] = ["alloc", "collections", "btree", "map", "BTreeMap", "contains_key"];
-pub const BTREEMAP_INSERT: [&str; 6] = ["alloc", "collections", "btree", "map", "BTreeMap", "insert"];
-pub const BTREESET_ITER: [&str; 6] = ["alloc", "collections", "btree", "set", "BTreeSet", "iter"];
-pub const CLONE_TRAIT_METHOD: [&str; 4] = ["core", "clone", "Clone", "clone"];
-pub const CORE_ITER_CLONED: [&str; 6] = ["core", "iter", "traits", "iterator", "Iterator", "cloned"];
-pub const CORE_ITER_COPIED: [&str; 6] = ["core", "iter", "traits", "iterator", "Iterator", "copied"];
-pub const CORE_ITER_FILTER: [&str; 6] = ["core", "iter", "traits", "iterator", "Iterator", "filter"];
-pub const CORE_RESULT_OK_METHOD: [&str; 4] = ["core", "result", "Result", "ok"];
-pub const CSTRING_AS_C_STR: [&str; 5] = ["alloc", "ffi", "c_str", "CString", "as_c_str"];
-pub const EARLY_CONTEXT: [&str; 2] = ["rustc_lint", "EarlyContext"];
-pub const EARLY_LINT_PASS: [&str; 3] = ["rustc_lint", "passes", "EarlyLintPass"];
-pub const F32_EPSILON: [&str; 4] = ["core", "f32", "<impl f32>", "EPSILON"];
-pub const F64_EPSILON: [&str; 4] = ["core", "f64", "<impl f64>", "EPSILON"];
-pub const FILE_OPTIONS: [&str; 4] = ["std", "fs", "File", "options"];
-#[expect(clippy::invalid_paths)] // internal lints do not know about all external crates
-pub const FUTURES_IO_ASYNCREADEXT: [&str; 3] = ["futures_util", "io", "AsyncReadExt"];
-#[expect(clippy::invalid_paths)] // internal lints do not know about all external crates
-pub const FUTURES_IO_ASYNCWRITEEXT: [&str; 3] = ["futures_util", "io", "AsyncWriteExt"];
-pub const HASHMAP_CONTAINS_KEY: [&str; 6] = ["std", "collections", "hash", "map", "HashMap", "contains_key"];
-pub const HASHMAP_INSERT: [&str; 6] = ["std", "collections", "hash", "map", "HashMap", "insert"];
-pub const HASHMAP_ITER: [&str; 5] = ["std", "collections", "hash", "map", "Iter"];
-pub const HASHMAP_ITER_MUT: [&str; 5] = ["std", "collections", "hash", "map", "IterMut"];
-pub const HASHMAP_KEYS: [&str; 5] = ["std", "collections", "hash", "map", "Keys"];
-pub const HASHMAP_VALUES: [&str; 5] = ["std", "collections", "hash", "map", "Values"];
-pub const HASHMAP_DRAIN: [&str; 5] = ["std", "collections", "hash", "map", "Drain"];
-pub const HASHMAP_VALUES_MUT: [&str; 5] = ["std", "collections", "hash", "map", "ValuesMut"];
-pub const HASHSET_ITER_TY: [&str; 5] = ["std", "collections", "hash", "set", "Iter"];
-pub const HASHSET_ITER: [&str; 6] = ["std", "collections", "hash", "set", "HashSet", "iter"];
-pub const HASHSET_DRAIN: [&str; 5] = ["std", "collections", "hash", "set", "Drain"];
-pub const IDENT: [&str; 3] = ["rustc_span", "symbol", "Ident"];
-pub const IDENT_AS_STR: [&str; 4] = ["rustc_span", "symbol", "Ident", "as_str"];
-pub const INSERT_STR: [&str; 4] = ["alloc", "string", "String", "insert_str"];
-pub const ITERTOOLS_NEXT_TUPLE: [&str; 3] = ["itertools", "Itertools", "next_tuple"];
-pub const KW_MODULE: [&str; 3] = ["rustc_span", "symbol", "kw"];
-pub const LATE_CONTEXT: [&str; 2] = ["rustc_lint", "LateContext"];
-pub const LATE_LINT_PASS: [&str; 3] = ["rustc_lint", "passes", "LateLintPass"];
-pub const LINT: [&str; 2] = ["rustc_lint_defs", "Lint"];
-pub const MSRV: [&str; 3] = ["clippy_config", "msrvs", "Msrv"];
-pub const OPEN_OPTIONS_NEW: [&str; 4] = ["std", "fs", "OpenOptions", "new"];
-pub const OS_STRING_AS_OS_STR: [&str; 5] = ["std", "ffi", "os_str", "OsString", "as_os_str"];
-pub const OS_STR_TO_OS_STRING: [&str; 5] = ["std", "ffi", "os_str", "OsStr", "to_os_string"];
-pub const PARKING_LOT_MUTEX_GUARD: [&str; 3] = ["lock_api", "mutex", "MutexGuard"];
-pub const PARKING_LOT_RWLOCK_READ_GUARD: [&str; 3] = ["lock_api", "rwlock", "RwLockReadGuard"];
-pub const PARKING_LOT_RWLOCK_WRITE_GUARD: [&str; 3] = ["lock_api", "rwlock", "RwLockWriteGuard"];
-pub const PATH_BUF_AS_PATH: [&str; 4] = ["std", "path", "PathBuf", "as_path"];
-pub const PATH_MAIN_SEPARATOR: [&str; 3] = ["std", "path", "MAIN_SEPARATOR"];
-pub const PATH_TO_PATH_BUF: [&str; 4] = ["std", "path", "Path", "to_path_buf"];
-#[cfg_attr(not(unix), allow(clippy::invalid_paths))]
-pub const PERMISSIONS_FROM_MODE: [&str; 6] = ["std", "os", "unix", "fs", "PermissionsExt", "from_mode"];
-pub const PUSH_STR: [&str; 4] = ["alloc", "string", "String", "push_str"];
-pub const REGEX_BUILDER_NEW: [&str; 3] = ["regex", "RegexBuilder", "new"];
-pub const REGEX_BYTES_BUILDER_NEW: [&str; 4] = ["regex", "bytes", "RegexBuilder", "new"];
-pub const REGEX_BYTES_NEW: [&str; 4] = ["regex", "bytes", "Regex", "new"];
-pub const REGEX_BYTES_SET_NEW: [&str; 4] = ["regex", "bytes", "RegexSet", "new"];
-pub const REGEX_NEW: [&str; 3] = ["regex", "Regex", "new"];
-pub const REGEX_SET_NEW: [&str; 3] = ["regex", "RegexSet", "new"];
-pub const SERDE_DESERIALIZE: [&str; 3] = ["serde", "de", "Deserialize"];
-pub const SERDE_DE_VISITOR: [&str; 3] = ["serde", "de", "Visitor"];
-pub const SLICE_INTO_VEC: [&str; 4] = ["alloc", "slice", "<impl [T]>", "into_vec"];
-pub const SLICE_INTO: [&str; 4] = ["core", "slice", "<impl [T]>", "iter"];
-pub const STD_IO_SEEK_FROM_CURRENT: [&str; 4] = ["std", "io", "SeekFrom", "Current"];
-pub const STD_IO_SEEKFROM_START: [&str; 4] = ["std", "io", "SeekFrom", "Start"];
-pub const STRING_AS_MUT_STR: [&str; 4] = ["alloc", "string", "String", "as_mut_str"];
-pub const STRING_AS_STR: [&str; 4] = ["alloc", "string", "String", "as_str"];
-pub const STRING_NEW: [&str; 4] = ["alloc", "string", "String", "new"];
-pub const STR_CHARS: [&str; 4] = ["core", "str", "<impl str>", "chars"];
-pub const STR_ENDS_WITH: [&str; 4] = ["core", "str", "<impl str>", "ends_with"];
-pub const STR_LEN: [&str; 4] = ["core", "str", "<impl str>", "len"];
-pub const STR_STARTS_WITH: [&str; 4] = ["core", "str", "<impl str>", "starts_with"];
-pub const SYMBOL: [&str; 3] = ["rustc_span", "symbol", "Symbol"];
-pub const SYMBOL_AS_STR: [&str; 4] = ["rustc_span", "symbol", "Symbol", "as_str"];
-pub const SYMBOL_INTERN: [&str; 4] = ["rustc_span", "symbol", "Symbol", "intern"];
-pub const SYMBOL_TO_IDENT_STRING: [&str; 4] = ["rustc_span", "symbol", "Symbol", "to_ident_string"];
-pub const SYM_MODULE: [&str; 3] = ["rustc_span", "symbol", "sym"];
-pub const SYNTAX_CONTEXT: [&str; 3] = ["rustc_span", "hygiene", "SyntaxContext"];
-#[expect(clippy::invalid_paths)] // internal lints do not know about all external crates
-pub const TOKIO_FILE_OPTIONS: [&str; 5] = ["tokio", "fs", "file", "File", "options"];
-#[expect(clippy::invalid_paths)] // internal lints do not know about all external crates
-pub const TOKIO_IO_ASYNCREADEXT: [&str; 5] = ["tokio", "io", "util", "async_read_ext", "AsyncReadExt"];
-#[expect(clippy::invalid_paths)] // internal lints do not know about all external crates
-pub const TOKIO_IO_ASYNCWRITEEXT: [&str; 5] = ["tokio", "io", "util", "async_write_ext", "AsyncWriteExt"];
-#[expect(clippy::invalid_paths)] // internal lints do not know about all external crates
-pub const TOKIO_IO_OPEN_OPTIONS: [&str; 4] = ["tokio", "fs", "open_options", "OpenOptions"];
-#[expect(clippy::invalid_paths)] // internal lints do not know about all external crates
-pub const TOKIO_IO_OPEN_OPTIONS_NEW: [&str; 5] = ["tokio", "fs", "open_options", "OpenOptions", "new"];
-pub const VEC_AS_MUT_SLICE: [&str; 4] = ["alloc", "vec", "Vec", "as_mut_slice"];
-pub const VEC_AS_SLICE: [&str; 4] = ["alloc", "vec", "Vec", "as_slice"];
-pub const VEC_DEQUE_ITER: [&str; 5] = ["alloc", "collections", "vec_deque", "VecDeque", "iter"];
-pub const VEC_FROM_ELEM: [&str; 3] = ["alloc", "vec", "from_elem"];
-pub const VEC_NEW: [&str; 4] = ["alloc", "vec", "Vec", "new"];
-pub const VEC_WITH_CAPACITY: [&str; 4] = ["alloc", "vec", "Vec", "with_capacity"];
-pub const INSTANT_NOW: [&str; 4] = ["std", "time", "Instant", "now"];
-pub const VEC_IS_EMPTY: [&str; 4] = ["alloc", "vec", "Vec", "is_empty"];
-pub const VEC_POP: [&str; 4] = ["alloc", "vec", "Vec", "pop"];
-pub const WAKER: [&str; 4] = ["core", "task", "wake", "Waker"];
-pub const OPTION_UNWRAP: [&str; 4] = ["core", "option", "Option", "unwrap"];
-pub const OPTION_EXPECT: [&str; 4] = ["core", "option", "Option", "expect"];
-#[expect(clippy::invalid_paths)] // not sure why it thinks this, it works so
-pub const BOOL_THEN: [&str; 4] = ["core", "bool", "<impl bool>", "then"];
+pub static REGEX_BUILDER_NEW: PathLookup = value_path!(regex::RegexBuilder::new);
+pub static REGEX_BYTES_BUILDER_NEW: PathLookup = value_path!(regex::bytes::RegexBuilder::new);
+pub static REGEX_BYTES_NEW: PathLookup = value_path!(regex::bytes::Regex::new);
+pub static REGEX_BYTES_SET_NEW: PathLookup = value_path!(regex::bytes::RegexSet::new);
+pub static REGEX_NEW: PathLookup = value_path!(regex::Regex::new);
+pub static REGEX_SET_NEW: PathLookup = value_path!(regex::RegexSet::new);
+pub static SERDE_DESERIALIZE: PathLookup = type_path!(serde::de::Deserialize);
+pub static SERDE_DE_VISITOR: PathLookup = type_path!(serde::de::Visitor);
+pub static TOKIO_FILE_OPTIONS: PathLookup = value_path!(tokio::fs::File::options);
+pub static TOKIO_IO_ASYNCREADEXT: PathLookup = type_path!(tokio::io::AsyncReadExt);
+pub static TOKIO_IO_ASYNCWRITEEXT: PathLookup = type_path!(tokio::io::AsyncWriteExt);
+pub static TOKIO_IO_OPEN_OPTIONS: PathLookup = type_path!(tokio::fs::OpenOptions);
+pub static TOKIO_IO_OPEN_OPTIONS_NEW: PathLookup = value_path!(tokio::fs::OpenOptions::new);
+pub static LAZY_STATIC: PathLookup = macro_path!(lazy_static::lazy_static);
+pub static ONCE_CELL_SYNC_LAZY: PathLookup = type_path!(once_cell::sync::Lazy);
+pub static ONCE_CELL_SYNC_LAZY_NEW: PathLookup = value_path!(once_cell::sync::Lazy::new);
+
+// Paths for internal lints go in `clippy_lints_internal/src/internal_paths.rs`
+
+/// Equivalent to a [`lookup_path`] after splitting the input string on `::`
+///
+/// This function is expensive and should be used sparingly.
+pub fn lookup_path_str(tcx: TyCtxt<'_>, ns: PathNS, path: &str) -> Vec<DefId> {
+    let path: Vec<Symbol> = path.split("::").map(Symbol::intern).collect();
+    lookup_path(tcx, ns, &path)
+}
+
+/// Resolves a def path like `std::vec::Vec`.
+///
+/// Typically it will return one [`DefId`] or none, but in some situations there can be multiple:
+/// - `memchr::memchr` could return the functions from both memchr 1.0 and memchr 2.0
+/// - `alloc::boxed::Box::downcast` would return a function for each of the different inherent impls
+///   ([1], [2], [3])
+///
+/// This function is expensive and should be used sparingly.
+///
+/// [1]: https://doc.rust-lang.org/std/boxed/struct.Box.html#method.downcast
+/// [2]: https://doc.rust-lang.org/std/boxed/struct.Box.html#method.downcast-1
+/// [3]: https://doc.rust-lang.org/std/boxed/struct.Box.html#method.downcast-2
+pub fn lookup_path(tcx: TyCtxt<'_>, ns: PathNS, path: &[Symbol]) -> Vec<DefId> {
+    let (root, rest) = match *path {
+        [] | [_] => return Vec::new(),
+        [root, ref rest @ ..] => (root, rest),
+    };
+
+    let mut out = Vec::new();
+    for &base in find_crates(tcx, root).iter().chain(find_primitive_impls(tcx, root)) {
+        lookup_with_base(tcx, base, ns, rest, &mut out);
+    }
+    out
+}
+
+/// Finds the crates called `name`, may be multiple due to multiple major versions.
+pub fn find_crates(tcx: TyCtxt<'_>, name: Symbol) -> &'static [DefId] {
+    static BY_NAME: OnceLock<FxHashMap<Symbol, Vec<DefId>>> = OnceLock::new();
+    let map = BY_NAME.get_or_init(|| {
+        let mut map = FxHashMap::default();
+        map.insert(tcx.crate_name(LOCAL_CRATE), vec![LOCAL_CRATE.as_def_id()]);
+        for &num in tcx.crates(()) {
+            map.entry(tcx.crate_name(num)).or_default().push(num.as_def_id());
+        }
+        map
+    });
+    match map.get(&name) {
+        Some(def_ids) => def_ids,
+        None => &[],
+    }
+}
+
+fn find_primitive_impls(tcx: TyCtxt<'_>, name: Symbol) -> &[DefId] {
+    let ty = match name {
+        sym::bool => SimplifiedType::Bool,
+        sym::char => SimplifiedType::Char,
+        sym::str => SimplifiedType::Str,
+        sym::array => SimplifiedType::Array,
+        sym::slice => SimplifiedType::Slice,
+        // FIXME: rustdoc documents these two using just `pointer`.
+        //
+        // Maybe this is something we should do here too.
+        sym::const_ptr => SimplifiedType::Ptr(Mutability::Not),
+        sym::mut_ptr => SimplifiedType::Ptr(Mutability::Mut),
+        sym::isize => SimplifiedType::Int(IntTy::Isize),
+        sym::i8 => SimplifiedType::Int(IntTy::I8),
+        sym::i16 => SimplifiedType::Int(IntTy::I16),
+        sym::i32 => SimplifiedType::Int(IntTy::I32),
+        sym::i64 => SimplifiedType::Int(IntTy::I64),
+        sym::i128 => SimplifiedType::Int(IntTy::I128),
+        sym::usize => SimplifiedType::Uint(UintTy::Usize),
+        sym::u8 => SimplifiedType::Uint(UintTy::U8),
+        sym::u16 => SimplifiedType::Uint(UintTy::U16),
+        sym::u32 => SimplifiedType::Uint(UintTy::U32),
+        sym::u64 => SimplifiedType::Uint(UintTy::U64),
+        sym::u128 => SimplifiedType::Uint(UintTy::U128),
+        sym::f32 => SimplifiedType::Float(FloatTy::F32),
+        sym::f64 => SimplifiedType::Float(FloatTy::F64),
+        _ => return &[],
+    };
+
+    tcx.incoherent_impls(ty)
+}
+
+/// Resolves a def path like `vec::Vec` with the base `std`.
+fn lookup_with_base(tcx: TyCtxt<'_>, mut base: DefId, ns: PathNS, mut path: &[Symbol], out: &mut Vec<DefId>) {
+    loop {
+        match *path {
+            [segment] => {
+                out.extend(item_child_by_name(tcx, base, ns, segment));
+
+                // When the current def_id is e.g. `struct S`, check the impl items in
+                // `impl S { ... }`
+                let inherent_impl_children = tcx
+                    .inherent_impls(base)
+                    .iter()
+                    .filter_map(|&impl_def_id| item_child_by_name(tcx, impl_def_id, ns, segment));
+                out.extend(inherent_impl_children);
+
+                return;
+            },
+            [segment, ref rest @ ..] => {
+                path = rest;
+                let Some(child) = item_child_by_name(tcx, base, PathNS::Type, segment) else {
+                    return;
+                };
+                base = child;
+            },
+            [] => unreachable!(),
+        }
+    }
+}
+
+fn item_child_by_name(tcx: TyCtxt<'_>, def_id: DefId, ns: PathNS, name: Symbol) -> Option<DefId> {
+    if let Some(local_id) = def_id.as_local() {
+        local_item_child_by_name(tcx, local_id, ns, name)
+    } else {
+        non_local_item_child_by_name(tcx, def_id, ns, name)
+    }
+}
+
+fn local_item_child_by_name(tcx: TyCtxt<'_>, local_id: LocalDefId, ns: PathNS, name: Symbol) -> Option<DefId> {
+    let root_mod;
+    let item_kind = match tcx.hir_node_by_def_id(local_id) {
+        Node::Crate(r#mod) => {
+            root_mod = ItemKind::Mod(Ident::dummy(), r#mod);
+            &root_mod
+        },
+        Node::Item(item) => &item.kind,
+        _ => return None,
+    };
+
+    let res = |ident: Ident, owner_id: OwnerId| {
+        if ident.name == name && ns.matches(tcx.def_kind(owner_id).ns()) {
+            Some(owner_id.to_def_id())
+        } else {
+            None
+        }
+    };
+
+    match item_kind {
+        ItemKind::Mod(_, r#mod) => r#mod.item_ids.iter().find_map(|&item_id| {
+            let item = tcx.hir_item(item_id);
+            if let ItemKind::Use(path, UseKind::Single(ident)) = item.kind {
+                if ident.name == name {
+                    let opt_def_id = |ns: Option<Res>| ns.and_then(|res| res.opt_def_id());
+                    match ns {
+                        PathNS::Type => opt_def_id(path.res.type_ns),
+                        PathNS::Value => opt_def_id(path.res.value_ns),
+                        PathNS::Macro => opt_def_id(path.res.macro_ns),
+                        PathNS::Arbitrary => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            } else {
+                res(item.kind.ident()?, item_id.owner_id)
+            }
+        }),
+        ItemKind::Impl(r#impl) => r#impl
+            .items
+            .iter()
+            .find_map(|&ImplItemRef { ident, id, .. }| res(ident, id.owner_id)),
+        ItemKind::Trait(.., trait_item_refs) => trait_item_refs
+            .iter()
+            .find_map(|&TraitItemRef { ident, id, .. }| res(ident, id.owner_id)),
+        _ => None,
+    }
+}
+
+fn non_local_item_child_by_name(tcx: TyCtxt<'_>, def_id: DefId, ns: PathNS, name: Symbol) -> Option<DefId> {
+    match tcx.def_kind(def_id) {
+        DefKind::Mod | DefKind::Enum | DefKind::Trait => tcx.module_children(def_id).iter().find_map(|child| {
+            if child.ident.name == name && ns.matches(child.res.ns()) {
+                child.res.opt_def_id()
+            } else {
+                None
+            }
+        }),
+        DefKind::Impl { .. } => tcx
+            .associated_item_def_ids(def_id)
+            .iter()
+            .copied()
+            .find(|assoc_def_id| tcx.item_name(*assoc_def_id) == name && ns.matches(tcx.def_kind(assoc_def_id).ns())),
+        _ => None,
+    }
+}

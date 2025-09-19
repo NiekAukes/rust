@@ -1,35 +1,65 @@
-use crate::FnCtxt;
+use std::ops::ControlFlow;
+
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitor};
-use rustc_span::{symbol::kw, Span};
+use rustc_span::{Span, kw};
 use rustc_trait_selection::traits;
 
-use std::ops::ControlFlow;
+use crate::FnCtxt;
+
+enum ClauseFlavor {
+    /// Predicate comes from `predicates_of`.
+    Where,
+    /// Predicate comes from `const_conditions`.
+    Const,
+}
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
-    pub fn adjust_fulfillment_error_for_expr_obligation(
+    pub(crate) fn adjust_fulfillment_error_for_expr_obligation(
         &self,
         error: &mut traits::FulfillmentError<'tcx>,
     ) -> bool {
-        let (traits::ExprItemObligation(def_id, hir_id, idx)
-        | traits::ExprBindingObligation(def_id, _, hir_id, idx)) =
-            *error.obligation.cause.code().peel_derives()
-        else {
-            return false;
+        let (def_id, hir_id, idx, flavor) = match *error.obligation.cause.code().peel_derives() {
+            ObligationCauseCode::WhereClauseInExpr(def_id, _, hir_id, idx) => {
+                (def_id, hir_id, idx, ClauseFlavor::Where)
+            }
+            ObligationCauseCode::HostEffectInExpr(def_id, _, hir_id, idx) => {
+                (def_id, hir_id, idx, ClauseFlavor::Const)
+            }
+            _ => return false,
         };
 
-        let Some(uninstantiated_pred) = self
-            .tcx
-            .predicates_of(def_id)
-            .instantiate_identity(self.tcx)
-            .predicates
-            .into_iter()
-            .nth(idx)
-        else {
-            return false;
+        let uninstantiated_pred = match flavor {
+            ClauseFlavor::Where => {
+                if let Some(pred) = self
+                    .tcx
+                    .predicates_of(def_id)
+                    .instantiate_identity(self.tcx)
+                    .predicates
+                    .into_iter()
+                    .nth(idx)
+                {
+                    pred
+                } else {
+                    return false;
+                }
+            }
+            ClauseFlavor::Const => {
+                if let Some((pred, _)) = self
+                    .tcx
+                    .const_conditions(def_id)
+                    .instantiate_identity(self.tcx)
+                    .into_iter()
+                    .nth(idx)
+                {
+                    pred.to_host_effect_clause(self.tcx, ty::BoundConstness::Maybe)
+                } else {
+                    return false;
+                }
+            }
         };
 
         let generics = self.tcx.generics_of(def_id);
@@ -38,7 +68,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 ty::ClauseKind::Trait(pred) => {
                     (pred.trait_ref.args.to_vec(), Some(pred.self_ty().into()))
                 }
-                ty::ClauseKind::Projection(pred) => (pred.projection_ty.args.to_vec(), None),
+                ty::ClauseKind::HostEffect(pred) => {
+                    (pred.trait_ref.args.to_vec(), Some(pred.self_ty().into()))
+                }
+                ty::ClauseKind::Projection(pred) => (pred.projection_term.args.to_vec(), None),
                 ty::ClauseKind::ConstArgHasType(arg, ty) => (vec![ty.into(), arg.into()], None),
                 ty::ClauseKind::ConstEvaluatable(e) => (vec![e.into()], None),
                 _ => return false,
@@ -47,12 +80,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let find_param_matching = |matches: &dyn Fn(ty::ParamTerm) -> bool| {
             predicate_args.iter().find_map(|arg| {
                 arg.walk().find_map(|arg| {
-                    if let ty::GenericArgKind::Type(ty) = arg.unpack()
+                    if let ty::GenericArgKind::Type(ty) = arg.kind()
                         && let ty::Param(param_ty) = *ty.kind()
                         && matches(ty::ParamTerm::Ty(param_ty))
                     {
                         Some(arg)
-                    } else if let ty::GenericArgKind::Const(ct) = arg.unpack()
+                    } else if let ty::GenericArgKind::Const(ct) = arg.kind()
                         && let ty::ConstKind::Param(param_ct) = ct.kind()
                         && matches(ty::ParamTerm::Const(param_ct))
                     {
@@ -93,39 +126,62 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 self.find_ambiguous_parameter_in(def_id, error.root_obligation.predicate);
         }
 
-        let (expr, qpath) = match self.tcx.hir_node(hir_id) {
-            hir::Node::Expr(expr) => {
-                if self.closure_span_overlaps_error(error, expr.span) {
-                    return false;
+        match self.tcx.hir_node(hir_id) {
+            hir::Node::Expr(expr) => self.point_at_expr_if_possible(
+                error,
+                def_id,
+                expr,
+                predicate_self_type_to_point_at,
+                param_to_point_at,
+                fallback_param_to_point_at,
+                self_param_to_point_at,
+            ),
+
+            hir::Node::Ty(hir::Ty { kind: hir::TyKind::Path(qpath), .. }) => {
+                for param in [
+                    predicate_self_type_to_point_at,
+                    param_to_point_at,
+                    fallback_param_to_point_at,
+                    self_param_to_point_at,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if self.point_at_path_if_possible(error, def_id, param, &qpath) {
+                        return true;
+                    }
                 }
-                let qpath =
-                    if let hir::ExprKind::Path(qpath) = expr.kind { Some(qpath) } else { None };
 
-                (Some(&expr.kind), qpath)
-            }
-            hir::Node::Ty(hir::Ty { kind: hir::TyKind::Path(qpath), .. }) => (None, Some(*qpath)),
-            _ => return false,
-        };
-
-        if let Some(qpath) = qpath {
-            // Prefer pointing at the turbofished arg that corresponds to the
-            // self type of the failing predicate over anything else.
-            if let Some(param) = predicate_self_type_to_point_at
-                && self.point_at_path_if_possible(error, def_id, param, &qpath)
-            {
-                return true;
+                false
             }
 
-            if let hir::Node::Expr(hir::Expr {
-                kind: hir::ExprKind::Call(callee, args),
-                hir_id: call_hir_id,
-                span: call_span,
-                ..
-            }) = self.tcx.parent_hir_node(hir_id)
-                && callee.hir_id == hir_id
-            {
-                if self.closure_span_overlaps_error(error, *call_span) {
-                    return false;
+            _ => false,
+        }
+    }
+
+    fn point_at_expr_if_possible(
+        &self,
+        error: &mut traits::FulfillmentError<'tcx>,
+        callee_def_id: DefId,
+        expr: &'tcx hir::Expr<'tcx>,
+        predicate_self_type_to_point_at: Option<ty::GenericArg<'tcx>>,
+        param_to_point_at: Option<ty::GenericArg<'tcx>>,
+        fallback_param_to_point_at: Option<ty::GenericArg<'tcx>>,
+        self_param_to_point_at: Option<ty::GenericArg<'tcx>>,
+    ) -> bool {
+        if self.closure_span_overlaps_error(error, expr.span) {
+            return false;
+        }
+
+        match expr.kind {
+            hir::ExprKind::Call(
+                hir::Expr { kind: hir::ExprKind::Path(qpath), span: callee_span, .. },
+                args,
+            ) => {
+                if let Some(param) = predicate_self_type_to_point_at
+                    && self.point_at_path_if_possible(error, callee_def_id, param, &qpath)
+                {
+                    return true;
                 }
 
                 for param in [param_to_point_at, fallback_param_to_point_at, self_param_to_point_at]
@@ -134,32 +190,68 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 {
                     if self.blame_specific_arg_if_possible(
                         error,
-                        def_id,
+                        callee_def_id,
                         param,
-                        *call_hir_id,
-                        callee.span,
+                        expr.hir_id,
+                        *callee_span,
                         None,
                         args,
                     ) {
                         return true;
                     }
                 }
-            }
 
-            for param in [param_to_point_at, fallback_param_to_point_at, self_param_to_point_at]
-                .into_iter()
-                .flatten()
-            {
-                if self.point_at_path_if_possible(error, def_id, param, &qpath) {
-                    return true;
+                for param in [param_to_point_at, fallback_param_to_point_at, self_param_to_point_at]
+                    .into_iter()
+                    .flatten()
+                {
+                    if self.point_at_path_if_possible(error, callee_def_id, param, &qpath) {
+                        return true;
+                    }
                 }
             }
-        }
+            hir::ExprKind::Path(qpath) => {
+                // If the parent is an call, then process this as a call.
+                //
+                // This is because the `WhereClauseInExpr` obligations come from
+                // the well-formedness of the *path* expression, but we care to
+                // point at the call expression (namely, its args).
+                if let hir::Node::Expr(
+                    call_expr @ hir::Expr { kind: hir::ExprKind::Call(callee, ..), .. },
+                ) = self.tcx.parent_hir_node(expr.hir_id)
+                    && callee.hir_id == expr.hir_id
+                {
+                    return self.point_at_expr_if_possible(
+                        error,
+                        callee_def_id,
+                        call_expr,
+                        predicate_self_type_to_point_at,
+                        param_to_point_at,
+                        fallback_param_to_point_at,
+                        self_param_to_point_at,
+                    );
+                }
 
-        match expr {
-            Some(hir::ExprKind::MethodCall(segment, receiver, args, ..)) => {
+                // Otherwise, just try to point at path components.
+
                 if let Some(param) = predicate_self_type_to_point_at
-                    && self.point_at_generic_if_possible(error, def_id, param, segment)
+                    && self.point_at_path_if_possible(error, callee_def_id, param, &qpath)
+                {
+                    return true;
+                }
+
+                for param in [param_to_point_at, fallback_param_to_point_at, self_param_to_point_at]
+                    .into_iter()
+                    .flatten()
+                {
+                    if self.point_at_path_if_possible(error, callee_def_id, param, &qpath) {
+                        return true;
+                    }
+                }
+            }
+            hir::ExprKind::MethodCall(segment, receiver, args, ..) => {
+                if let Some(param) = predicate_self_type_to_point_at
+                    && self.point_at_generic_if_possible(error, callee_def_id, param, segment)
                 {
                     // HACK: This is not correct, since `predicate_self_type_to_point_at` might
                     // not actually correspond to the receiver of the method call. But we
@@ -167,9 +259,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // the method's turbofish segments but still use `FunctionArgumentObligation`
                     // elsewhere. Hopefully this doesn't break something.
                     error.obligation.cause.map_code(|parent_code| {
-                        ObligationCauseCode::FunctionArgumentObligation {
+                        ObligationCauseCode::FunctionArg {
                             arg_hir_id: receiver.hir_id,
-                            call_hir_id: hir_id,
+                            call_hir_id: expr.hir_id,
                             parent_code,
                         }
                     });
@@ -182,9 +274,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 {
                     if self.blame_specific_arg_if_possible(
                         error,
-                        def_id,
+                        callee_def_id,
                         param,
-                        hir_id,
+                        expr.hir_id,
                         segment.ident.span,
                         Some(receiver),
                         args,
@@ -193,7 +285,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 }
                 if let Some(param_to_point_at) = param_to_point_at
-                    && self.point_at_generic_if_possible(error, def_id, param_to_point_at, segment)
+                    && self.point_at_generic_if_possible(
+                        error,
+                        callee_def_id,
+                        param_to_point_at,
+                        segment,
+                    )
                 {
                     return true;
                 }
@@ -207,17 +304,21 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     return true;
                 }
             }
-            Some(hir::ExprKind::Struct(qpath, fields, ..)) => {
+            hir::ExprKind::Struct(qpath, fields, ..) => {
                 if let Res::Def(DefKind::Struct | DefKind::Variant, variant_def_id) =
-                    self.typeck_results.borrow().qpath_res(qpath, hir_id)
+                    self.typeck_results.borrow().qpath_res(qpath, expr.hir_id)
                 {
                     for param in
                         [param_to_point_at, fallback_param_to_point_at, self_param_to_point_at]
                             .into_iter()
                             .flatten()
                     {
-                        let refined_expr =
-                            self.point_at_field_if_possible(def_id, param, variant_def_id, fields);
+                        let refined_expr = self.point_at_field_if_possible(
+                            callee_def_id,
+                            param,
+                            variant_def_id,
+                            fields,
+                        );
 
                         match refined_expr {
                             None => {}
@@ -241,7 +342,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .into_iter()
                 .flatten()
                 {
-                    if self.point_at_path_if_possible(error, def_id, param, qpath) {
+                    if self.point_at_path_if_possible(error, callee_def_id, param, qpath) {
                         return true;
                     }
                 }
@@ -256,7 +357,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         error: &mut traits::FulfillmentError<'tcx>,
         def_id: DefId,
-        param: ty::GenericArg<'tcx>,
+        arg: ty::GenericArg<'tcx>,
         qpath: &hir::QPath<'tcx>,
     ) -> bool {
         match qpath {
@@ -264,7 +365,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 for segment in path.segments.iter().rev() {
                     if let Res::Def(kind, def_id) = segment.res
                         && !matches!(kind, DefKind::Mod | DefKind::ForeignMod)
-                        && self.point_at_generic_if_possible(error, def_id, param, segment)
+                        && self.point_at_generic_if_possible(error, def_id, arg, segment)
                     {
                         return true;
                     }
@@ -272,7 +373,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // Handle `Self` param specifically, since it's separated in
                 // the path representation
                 if let Some(self_ty) = self_ty
-                    && let ty::GenericArgKind::Type(ty) = param.unpack()
+                    && let ty::GenericArgKind::Type(ty) = arg.kind()
                     && ty == self.tcx.types.self_param
                 {
                     error.obligation.cause.span = self_ty
@@ -283,12 +384,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             }
             hir::QPath::TypeRelative(self_ty, segment) => {
-                if self.point_at_generic_if_possible(error, def_id, param, segment) {
+                if self.point_at_generic_if_possible(error, def_id, arg, segment) {
                     return true;
                 }
                 // Handle `Self` param specifically, since it's separated in
                 // the path representation
-                if let ty::GenericArgKind::Type(ty) = param.unpack()
+                if let ty::GenericArgKind::Type(ty) = arg.kind()
                     && ty == self.tcx.types.self_param
                 {
                     error.obligation.cause.span = self_ty
@@ -315,12 +416,24 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .tcx
             .generics_of(def_id)
             .own_args(ty::GenericArgs::identity_for_item(self.tcx, def_id));
-        let Some((index, _)) =
-            own_args.iter().enumerate().find(|(_, arg)| **arg == param_to_point_at)
-        else {
+        let Some(mut index) = own_args.iter().position(|arg| *arg == param_to_point_at) else {
             return false;
         };
-        let Some(arg) = segment.args().args.get(index) else {
+        // SUBTLE: We may or may not turbofish lifetime arguments, which will
+        // otherwise be elided. if our "own args" starts with a lifetime, but
+        // the args list does not, then we should chop off all of the lifetimes,
+        // since they're all elided.
+        let segment_args = segment.args().args;
+        if matches!(own_args[0].kind(), ty::GenericArgKind::Lifetime(_))
+            && segment_args.first().is_some_and(|arg| arg.is_ty_or_const())
+            && let Some(offset) = own_args.iter().position(|arg| {
+                matches!(arg.kind(), ty::GenericArgKind::Type(_) | ty::GenericArgKind::Const(_))
+            })
+            && let Some(new_index) = index.checked_sub(offset)
+        {
+            index = new_index;
+        }
+        let Some(arg) = segment_args.get(index) else {
             return false;
         };
         error.obligation.cause.span = arg
@@ -339,8 +452,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for FindAmbiguousParameter<'_, 'tcx> {
             type Result = ControlFlow<ty::GenericArg<'tcx>>;
             fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
-                if let Some(origin) = self.0.type_var_origin(ty)
-                    && let Some(def_id) = origin.param_def_id
+                if let ty::Infer(ty::TyVar(vid)) = *ty.kind()
+                    && let Some(def_id) = self.0.type_var_origin(vid).param_def_id
                     && let generics = self.0.tcx.generics_of(self.1)
                     && let Some(index) = generics.param_def_id_to_index(self.0.tcx, def_id)
                     && let Some(arg) =
@@ -360,12 +473,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         error: &traits::FulfillmentError<'tcx>,
         span: Span,
     ) -> bool {
-        if let traits::FulfillmentErrorCode::SelectionError(
-            traits::SelectionError::SignatureMismatch(box traits::SignatureMismatchData {
-                expected_trait_ref,
-                ..
-            }),
-        ) = error.code
+        if let traits::FulfillmentErrorCode::Select(traits::SelectionError::SignatureMismatch(
+            box traits::SignatureMismatchData { expected_trait_ref, .. },
+        )) = error.code
             && let ty::Closure(def_id, _) | ty::Coroutine(def_id, ..) =
                 expected_trait_ref.self_ty().kind()
             && span.overlaps(self.tcx.def_span(*def_id))
@@ -459,12 +569,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 self.blame_specific_expr_if_possible(error, arg_expr)
             }
 
-            error.obligation.cause.map_code(|parent_code| {
-                ObligationCauseCode::FunctionArgumentObligation {
-                    arg_hir_id: arg.hir_id,
-                    call_hir_id,
-                    parent_code,
-                }
+            error.obligation.cause.map_code(|parent_code| ObligationCauseCode::FunctionArg {
+                arg_hir_id: arg.hir_id,
+                call_hir_id,
+                parent_code,
             });
             return true;
         } else if args_referencing_param.len() > 0 {
@@ -487,7 +595,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
      *
      * This function only updates the error span.
      */
-    pub fn blame_specific_expr_if_possible(
+    pub(crate) fn blame_specific_expr_if_possible(
         &self,
         error: &mut traits::FulfillmentError<'tcx>,
         expr: &'tcx hir::Expr<'tcx>,
@@ -517,12 +625,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expr: &'tcx hir::Expr<'tcx>,
     ) -> Result<&'tcx hir::Expr<'tcx>, &'tcx hir::Expr<'tcx>> {
         match obligation_cause_code {
-            traits::ObligationCauseCode::ExprBindingObligation(_, _, _, _) => {
+            traits::ObligationCauseCode::WhereClauseInExpr(_, _, _, _)
+            | ObligationCauseCode::HostEffectInExpr(..) => {
                 // This is the "root"; we assume that the `expr` is already pointing here.
                 // Therefore, we return `Ok` so that this `expr` can be refined further.
                 Ok(expr)
             }
-            traits::ObligationCauseCode::ImplDerivedObligation(impl_derived) => self
+            traits::ObligationCauseCode::ImplDerived(impl_derived) => self
                 .blame_specific_expr_if_possible_for_derived_predicate_obligation(
                     impl_derived,
                     expr,
@@ -560,7 +669,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// only a partial success - but it cannot be refined even further.
     fn blame_specific_expr_if_possible_for_derived_predicate_obligation(
         &self,
-        obligation: &traits::ImplDerivedObligationCause<'tcx>,
+        obligation: &traits::ImplDerivedCause<'tcx>,
         expr: &'tcx hir::Expr<'tcx>,
     ) -> Result<&'tcx hir::Expr<'tcx>, &'tcx hir::Expr<'tcx>> {
         // First, we attempt to refine the `expr` for our span using the parent obligation.
@@ -575,7 +684,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // For the purposes of this function, we hope that it is a `struct` type, and that our current `expr` is a literal of
         // that struct type.
         let impl_trait_self_ref = if self.tcx.is_trait_alias(obligation.impl_or_alias_def_id) {
-            ty::TraitRef::new(
+            ty::TraitRef::new_from_args(
                 self.tcx,
                 obligation.impl_or_alias_def_id,
                 ty::GenericArgs::identity_for_item(self.tcx, obligation.impl_or_alias_def_id),
@@ -641,7 +750,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return Ok(expr);
         }
 
-        let ty::GenericArgKind::Type(in_ty) = in_ty.unpack() else {
+        let ty::GenericArgKind::Type(in_ty) = in_ty.kind() else {
             return Err(expr);
         };
 
@@ -729,7 +838,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             };
 
             let struct_generic_parameters: &ty::Generics = self.tcx.generics_of(in_ty_adt.did());
-            if drill_generic_index >= struct_generic_parameters.params.len() {
+            if drill_generic_index >= struct_generic_parameters.own_params.len() {
                 return Err(expr);
             }
 
@@ -852,7 +961,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             };
 
             let struct_generic_parameters: &ty::Generics = self.tcx.generics_of(in_ty_adt.did());
-            if drill_generic_index >= struct_generic_parameters.params.len() {
+            if drill_generic_index >= struct_generic_parameters.own_params.len() {
                 return Err(expr);
             }
 
@@ -936,7 +1045,7 @@ fn find_param_in_ty<'tcx>(
         if arg == param_to_point_at {
             return true;
         }
-        if let ty::GenericArgKind::Type(ty) = arg.unpack()
+        if let ty::GenericArgKind::Type(ty) = arg.kind()
             && let ty::Alias(ty::Projection | ty::Inherent, ..) = ty.kind()
         {
             // This logic may seem a bit strange, but typically when

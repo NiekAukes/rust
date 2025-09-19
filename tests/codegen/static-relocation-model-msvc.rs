@@ -1,6 +1,6 @@
 // Verify linkage of external symbols in the static relocation model on MSVC.
 //
-//@ compile-flags: -O -C relocation-model=static
+//@ compile-flags: -Copt-level=3 -C relocation-model=static
 //@ aux-build: extern_decl.rs
 //@ only-x86_64-pc-windows-msvc
 
@@ -20,7 +20,5 @@ extern crate extern_decl;
 
 #[no_mangle]
 pub fn access_extern() -> u8 {
-    unsafe {
-        extern_decl::extern_fn() + extern_decl::extern_static
-    }
+    unsafe { extern_decl::extern_fn() + extern_decl::extern_static }
 }

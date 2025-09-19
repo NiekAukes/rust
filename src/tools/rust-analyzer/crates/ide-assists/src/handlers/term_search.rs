@@ -1,12 +1,12 @@
 //! Term search assist
-use hir::term_search::TermSearchCtx;
+use hir::term_search::{TermSearchConfig, TermSearchCtx};
 use ide_db::{
-    assists::{AssistId, AssistKind, GroupLabel},
+    assists::{AssistId, GroupLabel},
     famous_defs::FamousDefs,
 };
 
 use itertools::Itertools;
-use syntax::{ast, AstNode};
+use syntax::{AstNode, ast};
 
 use crate::assist_context::{AssistContext, Assists};
 
@@ -34,7 +34,11 @@ pub(crate) fn term_search(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<
         sema: &ctx.sema,
         scope: &scope,
         goal: target_ty,
-        config: Default::default(),
+        config: TermSearchConfig {
+            fuel: ctx.config.term_search_fuel,
+            enable_borrowcheck: ctx.config.term_search_borrowck,
+            ..Default::default()
+        },
     };
     let paths = hir::term_search::term_search(&term_search_ctx);
 
@@ -44,26 +48,27 @@ pub(crate) fn term_search(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<
 
     let mut formatter = |_: &hir::Type| String::from("todo!()");
 
+    let edition = scope.krate().edition(ctx.db());
     let paths = paths
         .into_iter()
         .filter_map(|path| {
             path.gen_source_code(
                 &scope,
                 &mut formatter,
-                ctx.config.prefer_no_std,
-                ctx.config.prefer_prelude,
+                ctx.config.import_path_config(),
+                scope.krate().to_display_target(ctx.db()),
             )
             .ok()
         })
         .unique();
 
     let macro_name = macro_call.name(ctx.sema.db);
-    let macro_name = macro_name.display(ctx.sema.db);
+    let macro_name = macro_name.display(ctx.sema.db, edition);
 
     for code in paths {
         acc.add_group(
             &GroupLabel(String::from("Term search")),
-            AssistId("term_search", AssistKind::Generate),
+            AssistId::generate("term_search"),
             format!("Replace {macro_name}!() with {code}"),
             goal_range,
             |builder| {
@@ -151,7 +156,7 @@ fn f() { let a: i32 = 1; let b: Option<i32> = todo$0!(); }"#,
 enum Option<T> { None, Some(T) }
 fn f() { let a: i32 = 1; let b: Option<i32> = todo$0!(); }"#,
             r#"enum Option<T> { None, Some(T) }
-fn f() { let a: i32 = 1; let b: Option<i32> = Option::Some(a); }"#,
+fn f() { let a: i32 = 1; let b: Option<i32> = Option::None; }"#,
         )
     }
 
@@ -163,7 +168,7 @@ fn f() { let a: i32 = 1; let b: Option<i32> = Option::Some(a); }"#,
 enum Option<T> { None, Some(T) }
 fn f() { let a: Option<i32> = Option::None; let b: Option<Option<i32>> = todo$0!(); }"#,
             r#"enum Option<T> { None, Some(T) }
-fn f() { let a: Option<i32> = Option::None; let b: Option<Option<i32>> = Option::Some(a); }"#,
+fn f() { let a: Option<i32> = Option::None; let b: Option<Option<i32>> = Option::None; }"#,
         )
     }
 
@@ -216,7 +221,7 @@ fn f() { let a: i32 = 1; let b: i32 = 2; let a: u32 = 0; let c: i32 = todo$0!();
             term_search,
             r#"//- minicore: todo, unimplemented
 fn f() { let a: bool = todo$0!(); }"#,
-            r#"fn f() { let a: bool = false; }"#,
+            r#"fn f() { let a: bool = true; }"#,
         )
     }
 
@@ -271,6 +276,48 @@ fn f() { let a = 1; let b = 0.0; let c: (i32, f64) = todo$0!(); }"#,
             r#"//- minicore: todo, unimplemented
 fn f() { let a = 1; let b = 0.0; let c: (i32, (i32, f64)) = todo$0!(); }"#,
             r#"fn f() { let a = 1; let b = 0.0; let c: (i32, (i32, f64)) = (a, (a, b)); }"#,
+        )
+    }
+
+    #[test]
+    fn test_tuple_struct_with_generics() {
+        check_assist(
+            term_search,
+            r#"//- minicore: todo, unimplemented
+struct Foo<T>(T);
+fn f() { let a = 1; let b: Foo<i32> = todo$0!(); }"#,
+            r#"struct Foo<T>(T);
+fn f() { let a = 1; let b: Foo<i32> = Foo(a); }"#,
+        )
+    }
+
+    #[test]
+    fn test_struct_assoc_item() {
+        check_assist(
+            term_search,
+            r#"//- minicore: todo, unimplemented
+struct Foo;
+impl Foo { const FOO: i32 = 0; }
+fn f() { let a: i32 = todo$0!(); }"#,
+            r#"struct Foo;
+impl Foo { const FOO: i32 = 0; }
+fn f() { let a: i32 = Foo::FOO; }"#,
+        )
+    }
+
+    #[test]
+    fn test_trait_assoc_item() {
+        check_assist(
+            term_search,
+            r#"//- minicore: todo, unimplemented
+struct Foo;
+trait Bar { const BAR: i32; }
+impl Bar for Foo { const BAR: i32 = 0; }
+fn f() { let a: i32 = todo$0!(); }"#,
+            r#"struct Foo;
+trait Bar { const BAR: i32; }
+impl Bar for Foo { const BAR: i32 = 0; }
+fn f() { let a: i32 = Foo::BAR; }"#,
         )
     }
 }

@@ -1,10 +1,10 @@
-//@ compile-flags: -O -Z mutable-noalias=yes
+//@ compile-flags: -Copt-level=3 -Z mutable-noalias=yes
 
 #![crate_type = "lib"]
 
 pub struct SelfRef {
     self_ref: *mut SelfRef,
-    _pin: std::marker::PhantomPinned
+    _pin: std::marker::PhantomPinned,
 }
 
 // CHECK-LABEL: @test_self_ref(

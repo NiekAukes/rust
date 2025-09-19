@@ -1,9 +1,10 @@
-use crate::ptr::P;
-use crate::Expr;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_macros::{Decodable, Encodable};
-use rustc_span::symbol::{Ident, Symbol};
-use rustc_span::Span;
+use rustc_span::{Ident, Span, Symbol};
+
+use crate::Expr;
+use crate::ptr::P;
+use crate::token::LitKind;
 
 // Definitions:
 //
@@ -45,6 +46,18 @@ pub struct FormatArgs {
     pub span: Span,
     pub template: Vec<FormatArgsPiece>,
     pub arguments: FormatArguments,
+    /// The raw, un-split format string literal, with no escaping or processing.
+    ///
+    /// Generally only useful for lints that care about the raw bytes the user wrote.
+    pub uncooked_fmt_str: (LitKind, Symbol),
+    /// Was the format literal written in the source?
+    /// - `format!("boo")` => true,
+    /// - `format!(concat!("b", "o", "o"))` => false,
+    /// - `format!(include_str!("boo.txt"))` => false,
+    ///
+    /// If it wasn't written in the source then we have to be careful with spans pointing into it
+    /// and suggestions about rewriting it.
+    pub is_source_literal: bool,
 }
 
 /// A piece of a format template string.
@@ -261,7 +274,7 @@ pub enum FormatAlignment {
 #[derive(Clone, Encodable, Decodable, Debug, PartialEq, Eq)]
 pub enum FormatCount {
     /// `{:5}` or `{:.5}`
-    Literal(usize),
+    Literal(u16),
     /// `{:.*}`, `{:.5$}`, or `{:a$}`, etc.
     Argument(FormatArgPosition),
 }

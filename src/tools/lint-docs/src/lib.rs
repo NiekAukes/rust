@@ -3,6 +3,8 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use rustc_literal_escaper::{Mode, unescape_unicode};
 use walkdir::WalkDir;
 
 mod groups;
@@ -55,6 +57,8 @@ pub struct LintExtractor<'a> {
     pub rustc_path: &'a Path,
     /// The target arch to build the docs for.
     pub rustc_target: &'a str,
+    /// The target linker overriding `rustc`'s default
+    pub rustc_linker: Option<&'a str>,
     /// Verbose output.
     pub verbose: bool,
     /// Validate the style and the code example.
@@ -84,8 +88,8 @@ impl Lint {
         for &expected in &["### Example", "### Explanation", "{{produces}}"] {
             if expected == "{{produces}}" && self.is_ignored() {
                 if self.doc_contains("{{produces}}") {
-                    return Err(format!(
-                        "the lint example has `ignore`, but also contains the {{{{produces}}}} marker\n\
+                    return Err(
+                        "the lint example has `ignore`, but also contains the {{produces}} marker\n\
                         \n\
                         The documentation generator cannot generate the example output when the \
                         example is ignored.\n\
@@ -111,7 +115,7 @@ impl Lint {
                         Replacing the output with the text of the example you \
                         compiled manually yourself.\n\
                         "
-                    ).into());
+                    .into());
                 }
                 continue;
             }
@@ -211,6 +215,16 @@ impl<'a> LintExtractor<'a> {
                         let line = line.trim();
                         if let Some(text) = line.strip_prefix("/// ") {
                             doc_lines.push(text.to_string());
+                        } else if let Some(text) = line.strip_prefix("#[doc = \"") {
+                            let escaped = text.strip_suffix("\"]").unwrap();
+                            let mut buf = String::new();
+                            unescape_unicode(escaped, Mode::Str, &mut |_, c| match c {
+                                Ok(c) => buf.push(c),
+                                Err(err) => {
+                                    assert!(!err.is_fatal(), "failed to unescape string literal")
+                                }
+                            });
+                            doc_lines.push(buf);
                         } else if line == "///" {
                             doc_lines.push("".to_string());
                         } else if line.starts_with("// ") {
@@ -309,6 +323,7 @@ impl<'a> LintExtractor<'a> {
         if matches!(
             lint.name.as_str(),
             "unused_features" // broken lint
+            | "soft_unstable" // cannot have a stable example
         ) {
             return Ok(());
         }
@@ -441,13 +456,20 @@ impl<'a> LintExtractor<'a> {
         fs::write(&tempfile, source)
             .map_err(|e| format!("failed to write {}: {}", tempfile.display(), e))?;
         let mut cmd = Command::new(self.rustc_path);
-        if options.contains(&"edition2015") {
-            cmd.arg("--edition=2015");
-        } else {
-            cmd.arg("--edition=2018");
-        }
+        let edition = options
+            .iter()
+            .filter_map(|opt| opt.strip_prefix("edition"))
+            .next()
+            // defaults to latest edition
+            .unwrap_or("2024");
+        cmd.arg(format!("--edition={edition}"));
+        // Just in case this is an unstable edition.
+        cmd.arg("-Zunstable-options");
         cmd.arg("--error-format=json");
         cmd.arg("--target").arg(self.rustc_target);
+        if let Some(target_linker) = self.rustc_linker {
+            cmd.arg(format!("-Clinker={target_linker}"));
+        }
         if options.contains(&"test") {
             cmd.arg("--test");
         }
@@ -463,37 +485,64 @@ impl<'a> LintExtractor<'a> {
             .filter(|line| line.starts_with('{'))
             .map(serde_json::from_str)
             .collect::<Result<Vec<serde_json::Value>, _>>()?;
+
         // First try to find the messages with the `code` field set to our lint.
         let matches: Vec<_> = msgs
             .iter()
             .filter(|msg| matches!(&msg["code"]["code"], serde_json::Value::String(s) if s==name))
             .map(|msg| msg["rendered"].as_str().expect("rendered field should exist").to_string())
             .collect();
-        if matches.is_empty() {
-            // Some lints override their code to something else (E0566).
-            // Try to find something that looks like it could be our lint.
-            let matches: Vec<_> = msgs.iter().filter(|msg|
-                matches!(&msg["rendered"], serde_json::Value::String(s) if s.contains(name)))
-                .map(|msg| msg["rendered"].as_str().expect("rendered field should exist").to_string())
-                .collect();
-            if matches.is_empty() {
-                let rendered: Vec<&str> =
-                    msgs.iter().filter_map(|msg| msg["rendered"].as_str()).collect();
-                let non_json: Vec<&str> =
-                    stderr.lines().filter(|line| !line.starts_with('{')).collect();
-                Err(format!(
-                    "did not find lint `{}` in output of example, got:\n{}\n{}",
-                    name,
-                    non_json.join("\n"),
-                    rendered.join("\n")
-                )
-                .into())
-            } else {
-                Ok(matches.join("\n"))
-            }
-        } else {
-            Ok(matches.join("\n"))
+        if !matches.is_empty() {
+            return Ok(matches.join("\n"));
         }
+
+        // Try to detect if an unstable lint forgot to enable a `#![feature(..)]`.
+        // Specifically exclude `test_unstable_lint` which exercises this on purpose.
+        if name != "test_unstable_lint"
+            && msgs.iter().any(|msg| {
+                matches!(&msg["code"]["code"], serde_json::Value::String(s) if s=="unknown_lints")
+                    && matches!(&msg["message"], serde_json::Value::String(s) if s.contains(name))
+            })
+        {
+            let rendered: Vec<&str> =
+                msgs.iter().filter_map(|msg| msg["rendered"].as_str()).collect();
+            let non_json: Vec<&str> =
+                stderr.lines().filter(|line| !line.starts_with('{')).collect();
+            return Err(format!(
+                "did not find lint `{}` in output of example (got unknown_lints)\n\
+                Is the lint possibly misspelled, or does it need a `#![feature(...)]`?\n\
+                Output was:\n\
+                {}\n{}",
+                name,
+                rendered.join("\n"),
+                non_json.join("\n"),
+            )
+            .into());
+        }
+
+        // Some lints override their code to something else (E0566).
+        // Try to find something that looks like it could be our lint.
+        let matches: Vec<_> = msgs
+            .iter()
+            .filter(
+                |msg| matches!(&msg["rendered"], serde_json::Value::String(s) if s.contains(name)),
+            )
+            .map(|msg| msg["rendered"].as_str().expect("rendered field should exist").to_string())
+            .collect();
+        if !matches.is_empty() {
+            return Ok(matches.join("\n"));
+        }
+
+        // Otherwise, give a descriptive error.
+        let rendered: Vec<&str> = msgs.iter().filter_map(|msg| msg["rendered"].as_str()).collect();
+        let non_json: Vec<&str> = stderr.lines().filter(|line| !line.starts_with('{')).collect();
+        Err(format!(
+            "did not find lint `{}` in output of example, got:\n{}\n{}",
+            name,
+            non_json.join("\n"),
+            rendered.join("\n")
+        )
+        .into())
     }
 
     /// Saves the mdbook lint chapters at the given path.
@@ -510,11 +559,11 @@ impl<'a> LintExtractor<'a> {
         let mut these_lints: Vec<_> = lints.iter().filter(|lint| lint.level == level).collect();
         these_lints.sort_unstable_by_key(|lint| &lint.name);
         for lint in &these_lints {
-            write!(result, "* [`{}`](#{})\n", lint.name, lint.name.replace("_", "-")).unwrap();
+            writeln!(result, "* [`{}`](#{})", lint.name, lint.name.replace('_', "-")).unwrap();
         }
         result.push('\n');
         for lint in &these_lints {
-            write!(result, "## {}\n\n", lint.name.replace("_", "-")).unwrap();
+            write!(result, "## {}\n\n", lint.name.replace('_', "-")).unwrap();
             for line in &lint.doc {
                 result.push_str(line);
                 result.push('\n');
@@ -523,7 +572,7 @@ impl<'a> LintExtractor<'a> {
         }
         add_rename_redirect(level, &mut result);
         let out_path = self.out_path.join("listing").join(level.doc_filename());
-        // Delete the output because rustbuild uses hard links in its copies.
+        // Delete the output because bootstrap uses hard links in its copies.
         let _ = fs::remove_file(&out_path);
         fs::write(&out_path, result)
             .map_err(|e| format!("could not write to {}: {}", out_path.display(), e))?;
@@ -574,7 +623,7 @@ fn add_rename_redirect(level: Level, output: &mut String) {
             let filename = level.doc_filename().replace(".md", ".html");
             output.push_str(RENAME_START);
             for (from, to) in *names {
-                write!(output, "        \"#{from}\": \"{filename}#{to}\",\n").unwrap();
+                writeln!(output, "        \"#{from}\": \"{filename}#{to}\",").unwrap();
             }
             output.push_str(RENAME_END);
         }

@@ -1,3 +1,5 @@
+#![allow(unpredictable_function_pointer_comparisons)]
+
 type BuiltIn = for<'a> fn(&str);
 
 struct Function {
@@ -10,6 +12,7 @@ impl Function {
     }
 }
 
+#[inline(never)]
 fn dummy(_: &str) {}
 
 fn main() {

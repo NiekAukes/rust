@@ -1,10 +1,10 @@
 //! Unwind info generation (`.eh_frame`)
 
 use cranelift_codegen::ir::Endianness;
-use cranelift_codegen::isa::{unwind::UnwindInfo, TargetIsa};
+use cranelift_codegen::isa::unwind::UnwindInfo;
 use cranelift_object::ObjectProduct;
-use gimli::write::{CieId, EhFrame, FrameTable, Section};
 use gimli::RunTimeEndian;
+use gimli::write::{CieId, EhFrame, FrameTable, Section};
 
 use super::emit::address_for_func;
 use super::object::WriteDebugInfo;
@@ -17,14 +17,14 @@ pub(crate) struct UnwindContext {
 }
 
 impl UnwindContext {
-    pub(crate) fn new(isa: &dyn TargetIsa, pic_eh_frame: bool) -> Self {
-        let endian = match isa.endianness() {
+    pub(crate) fn new(module: &mut dyn Module, pic_eh_frame: bool) -> Self {
+        let endian = match module.isa().endianness() {
             Endianness::Little => RunTimeEndian::Little,
             Endianness::Big => RunTimeEndian::Big,
         };
         let mut frame_table = FrameTable::default();
 
-        let cie_id = if let Some(mut cie) = isa.create_systemv_cie() {
+        let cie_id = if let Some(mut cie) = module.isa().create_systemv_cie() {
             if pic_eh_frame {
                 cie.fde_address_encoding =
                     gimli::DwEhPe(gimli::DW_EH_PE_pcrel.0 | gimli::DW_EH_PE_sdata4.0);
@@ -37,8 +37,15 @@ impl UnwindContext {
         UnwindContext { endian, frame_table, cie_id }
     }
 
-    pub(crate) fn add_function(&mut self, func_id: FuncId, context: &Context, isa: &dyn TargetIsa) {
-        if let target_lexicon::OperatingSystem::MacOSX { .. } = isa.triple().operating_system {
+    pub(crate) fn add_function(
+        &mut self,
+        module: &mut dyn Module,
+        func_id: FuncId,
+        context: &Context,
+    ) {
+        if let target_lexicon::OperatingSystem::MacOSX { .. } =
+            module.isa().triple().operating_system
+        {
             // The object crate doesn't currently support DW_GNU_EH_PE_absptr, which macOS
             // requires for unwinding tables. In addition on arm64 it currently doesn't
             // support 32bit relocations as we currently use for the unwinding table.
@@ -47,7 +54,7 @@ impl UnwindContext {
         }
 
         let unwind_info = if let Some(unwind_info) =
-            context.compiled_code().unwrap().create_unwind_info(isa).unwrap()
+            context.compiled_code().unwrap().create_unwind_info(module.isa()).unwrap()
         {
             unwind_info
         } else {
@@ -59,8 +66,8 @@ impl UnwindContext {
                 self.frame_table
                     .add_fde(self.cie_id.unwrap(), unwind_info.to_fde(address_for_func(func_id)));
             }
-            UnwindInfo::WindowsX64(_) => {
-                // FIXME implement this
+            UnwindInfo::WindowsX64(_) | UnwindInfo::WindowsArm64(_) => {
+                // Windows does not have debug info for its unwind info.
             }
             unwind_info => unimplemented!("{:?}", unwind_info),
         }

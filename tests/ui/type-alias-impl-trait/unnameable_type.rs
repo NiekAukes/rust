@@ -15,10 +15,12 @@ use private::Trait;
 
 // downstream
 type MyPrivate = impl Sized;
-//~^ ERROR: unconstrained opaque type
 impl Trait for u32 {
-    fn dont_define_this(_private: MyPrivate) {}
-    //~^ ERROR: incompatible type for trait
+    #[define_opaque(MyPrivate)]
+    fn dont_define_this(private: MyPrivate) {
+        //~^ ERROR: incompatible type for trait
+        let _: () = private;
+    }
 }
 
 fn main() {}

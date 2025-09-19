@@ -20,26 +20,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Instant;
 
-use dylib_util::{dylib_path, dylib_path_var, exe};
+use shared_helpers::{
+    dylib_path, dylib_path_var, exe, maybe_dump, parse_rustc_stage, parse_rustc_verbose,
+    parse_value_from_args,
+};
 
-#[path = "../utils/bin_helpers.rs"]
-mod bin_helpers;
+#[path = "../utils/shared_helpers.rs"]
+mod shared_helpers;
 
-#[path = "../utils/dylib.rs"]
-mod dylib_util;
+#[path = "../utils/proc_macro_deps.rs"]
+mod proc_macro_deps;
 
 fn main() {
     let orig_args = env::args_os().skip(1).collect::<Vec<_>>();
     let mut args = orig_args.clone();
-    let arg =
-        |name| orig_args.windows(2).find(|args| args[0] == name).and_then(|args| args[1].to_str());
 
-    let stage = bin_helpers::parse_rustc_stage();
-    let verbose = bin_helpers::parse_rustc_verbose();
+    let stage = parse_rustc_stage();
+    let verbose = parse_rustc_verbose();
 
     // Detect whether or not we're a build script depending on whether --target
     // is passed (a bit janky...)
-    let target = arg("--target");
+    let target = parse_value_from_args(&orig_args, "--target");
     let version = args.iter().find(|w| &**w == "-vV");
 
     // Use a different compiler for build scripts, since there may not yet be a
@@ -57,8 +58,8 @@ fn main() {
     let sysroot = env::var_os("RUSTC_SYSROOT").expect("RUSTC_SYSROOT was not set");
     let on_fail = env::var_os("RUSTC_ON_FAIL").map(Command::new);
 
-    let rustc_real = env::var_os(rustc).unwrap_or_else(|| panic!("{:?} was not set", rustc));
-    let libdir = env::var_os(libdir).unwrap_or_else(|| panic!("{:?} was not set", libdir));
+    let rustc_real = env::var_os(rustc).unwrap_or_else(|| panic!("{rustc:?} was not set"));
+    let libdir = env::var_os(libdir).unwrap_or_else(|| panic!("{libdir:?} was not set"));
     let mut dylib_path = dylib_path();
     dylib_path.insert(0, PathBuf::from(&libdir));
 
@@ -91,26 +92,40 @@ fn main() {
         rustc_real
     };
 
-    let mut cmd = if let Some(wrapper) = env::var_os("RUSTC_WRAPPER_REAL") {
-        let mut cmd = Command::new(wrapper);
-        cmd.arg(rustc_driver);
-        cmd
-    } else {
-        Command::new(rustc_driver)
+    // Get the name of the crate we're compiling, if any.
+    let crate_name = parse_value_from_args(&orig_args, "--crate-name");
+
+    // When statically linking `std` into `rustc_driver`, remove `-C prefer-dynamic`
+    if env::var("RUSTC_LINK_STD_INTO_RUSTC_DRIVER").unwrap() == "1"
+        && crate_name == Some("rustc_driver")
+    {
+        if let Some(pos) = args.iter().enumerate().position(|(i, a)| {
+            a == "-C" && args.get(i + 1).map(|a| a == "prefer-dynamic").unwrap_or(false)
+        }) {
+            args.remove(pos);
+            args.remove(pos);
+        }
+        if let Some(pos) = args.iter().position(|a| a == "-Cprefer-dynamic") {
+            args.remove(pos);
+        }
+    }
+
+    let mut cmd = match env::var_os("RUSTC_WRAPPER_REAL") {
+        Some(wrapper) if !wrapper.is_empty() => {
+            let mut cmd = Command::new(wrapper);
+            cmd.arg(rustc_driver);
+            cmd
+        }
+        _ => Command::new(rustc_driver),
     };
     cmd.args(&args).env(dylib_path_var(), env::join_paths(&dylib_path).unwrap());
 
-    // Get the name of the crate we're compiling, if any.
-    let crate_name = arg("--crate-name");
-
-    if let Some(crate_name) = crate_name {
-        if let Some(target) = env::var_os("RUSTC_TIME") {
-            if target == "all"
-                || target.into_string().unwrap().split(',').any(|c| c.trim() == crate_name)
-            {
-                cmd.arg("-Ztime-passes");
-            }
-        }
+    if let Some(crate_name) = crate_name
+        && let Some(target) = env::var_os("RUSTC_TIME")
+        && (target == "all"
+            || target.into_string().unwrap().split(',').any(|c| c.trim() == crate_name))
+    {
+        cmd.arg("-Ztime-passes");
     }
 
     // Print backtrace in case of ICE
@@ -122,6 +137,12 @@ fn main() {
         cmd.args(lint_flags.split_whitespace());
     }
 
+    // Conditionally pass `-Zon-broken-pipe=kill` to underlying rustc. Not all binaries want
+    // `-Zon-broken-pipe=kill`, which includes cargo itself.
+    if env::var_os("FORCE_ON_BROKEN_PIPE_KILL").is_some() {
+        cmd.arg("-Z").arg("on-broken-pipe=kill");
+    }
+
     if target.is_some() {
         // The stage0 compiler has a special sysroot distinct from what we
         // actually downloaded, so we just always pass the `--sysroot` option,
@@ -130,23 +151,12 @@ fn main() {
             cmd.arg("--sysroot").arg(&sysroot);
         }
 
-        // If we're compiling specifically the `panic_abort` crate then we pass
-        // the `-C panic=abort` option. Note that we do not do this for any
-        // other crate intentionally as this is the only crate for now that we
-        // ship with panic=abort.
-        //
-        // This... is a bit of a hack how we detect this. Ideally this
-        // information should be encoded in the crate I guess? Would likely
-        // require an RFC amendment to RFC 1513, however.
-        if crate_name == Some("panic_abort") {
-            cmd.arg("-C").arg("panic=abort");
-        }
-
+        let crate_type = parse_value_from_args(&orig_args, "--crate-type");
         // `-Ztls-model=initial-exec` must not be applied to proc-macros, see
         // issue https://github.com/rust-lang/rust/issues/100530
         if env::var("RUSTC_TLS_MODEL_INITIAL_EXEC").is_ok()
-            && arg("--crate-type") != Some("proc-macro")
-            && !matches!(crate_name, Some("proc_macro2" | "quote" | "syn" | "synstructure"))
+            && crate_type != Some("proc-macro")
+            && proc_macro_deps::CRATES.binary_search(&crate_name.unwrap_or_default()).is_err()
         {
             cmd.arg("-Ztls-model=initial-exec");
         }
@@ -154,9 +164,7 @@ fn main() {
         // Find any host flags that were passed by bootstrap.
         // The flags are stored in a RUSTC_HOST_FLAGS variable, separated by spaces.
         if let Ok(flags) = std::env::var("RUSTC_HOST_FLAGS") {
-            for flag in flags.split(' ') {
-                cmd.arg(flag);
-            }
+            cmd.args(flags.split(' '));
         }
     }
 
@@ -220,10 +228,10 @@ fn main() {
         }
     }
 
-    if env::var_os("RUSTC_BOLT_LINK_FLAGS").is_some() {
-        if let Some("rustc_driver") = crate_name {
-            cmd.arg("-Clink-args=-Wl,-q");
-        }
+    if env::var_os("RUSTC_BOLT_LINK_FLAGS").is_some()
+        && let Some("rustc_driver") = crate_name
+    {
+        cmd.arg("-Clink-args=-Wl,-q");
     }
 
     let is_test = args.iter().any(|a| a == "--test");
@@ -250,7 +258,7 @@ fn main() {
         eprintln!("{prefix} libdir: {libdir:?}");
     }
 
-    bin_helpers::maybe_dump(format!("stage{stage}-rustc"), &cmd);
+    maybe_dump(format!("stage{stage}-rustc"), &cmd);
 
     let start = Instant::now();
     let (child, status) = {
@@ -260,25 +268,24 @@ fn main() {
         (child, status)
     };
 
-    if env::var_os("RUSTC_PRINT_STEP_TIMINGS").is_some()
-        || env::var_os("RUSTC_PRINT_STEP_RUSAGE").is_some()
+    if (env::var_os("RUSTC_PRINT_STEP_TIMINGS").is_some()
+        || env::var_os("RUSTC_PRINT_STEP_RUSAGE").is_some())
+        && let Some(crate_name) = crate_name
     {
-        if let Some(crate_name) = crate_name {
-            let dur = start.elapsed();
-            // If the user requested resource usage data, then
-            // include that in addition to the timing output.
-            let rusage_data =
-                env::var_os("RUSTC_PRINT_STEP_RUSAGE").and_then(|_| format_rusage_data(child));
-            eprintln!(
-                "[RUSTC-TIMING] {} test:{} {}.{:03}{}{}",
-                crate_name,
-                is_test,
-                dur.as_secs(),
-                dur.subsec_millis(),
-                if rusage_data.is_some() { " " } else { "" },
-                rusage_data.unwrap_or_default(),
-            );
-        }
+        let dur = start.elapsed();
+        // If the user requested resource usage data, then
+        // include that in addition to the timing output.
+        let rusage_data =
+            env::var_os("RUSTC_PRINT_STEP_RUSAGE").and_then(|_| format_rusage_data(child));
+        eprintln!(
+            "[RUSTC-TIMING] {} test:{} {}.{:03}{}{}",
+            crate_name,
+            is_test,
+            dur.as_secs(),
+            dur.subsec_millis(),
+            if rusage_data.is_some() { " " } else { "" },
+            rusage_data.unwrap_or_default(),
+        );
     }
 
     if status.success() {
@@ -315,22 +322,19 @@ fn format_rusage_data(_child: Child) -> Option<String> {
 fn format_rusage_data(child: Child) -> Option<String> {
     use std::os::windows::io::AsRawHandle;
 
-    use windows::{
-        Win32::Foundation::HANDLE,
-        Win32::System::ProcessStatus::{
-            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
-        },
-        Win32::System::Threading::GetProcessTimes,
-        Win32::System::Time::FileTimeToSystemTime,
-    };
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetProcessTimes;
+    use windows::Win32::System::Time::FileTimeToSystemTime;
 
-    let handle = HANDLE(child.as_raw_handle() as isize);
+    let handle = HANDLE(child.as_raw_handle());
 
     let mut user_filetime = Default::default();
     let mut user_time = Default::default();
     let mut kernel_filetime = Default::default();
     let mut kernel_time = Default::default();
     let mut memory_counters = PROCESS_MEMORY_COUNTERS::default();
+    let memory_counters_size = size_of_val(&memory_counters);
 
     unsafe {
         GetProcessTimes(
@@ -347,15 +351,9 @@ fn format_rusage_data(child: Child) -> Option<String> {
 
     // Unlike on Linux with RUSAGE_CHILDREN, this will only return memory information for the process
     // with the given handle and none of that process's children.
-    unsafe {
-        K32GetProcessMemoryInfo(
-            handle,
-            &mut memory_counters,
-            std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-        )
-    }
-    .ok()
-    .ok()?;
+    unsafe { K32GetProcessMemoryInfo(handle, &mut memory_counters, memory_counters_size as u32) }
+        .ok()
+        .ok()?;
 
     // Guide on interpreting these numbers:
     // https://docs.microsoft.com/en-us/windows/win32/psapi/process-memory-usage-information

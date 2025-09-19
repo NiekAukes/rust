@@ -4,17 +4,33 @@
 use project_model::{CargoConfig, RustLibSource};
 use rustc_hash::FxHashSet;
 
-use hir::{db::HirDatabase, Crate, HirFileIdExt, Module};
-use ide::{AnalysisHost, AssistResolveStrategy, DiagnosticsConfig, Severity};
-use ide_db::base_db::SourceDatabaseExt;
-use load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
+use hir::{Crate, Module, db::HirDatabase, sym};
+use ide::{AnalysisHost, AssistResolveStrategy, Diagnostic, DiagnosticsConfig, Severity};
+use ide_db::{LineIndexDatabase, base_db::SourceDatabase};
+use load_cargo::{LoadCargoConfig, ProcMacroServerChoice, load_workspace_at};
 
 use crate::cli::flags;
 
 impl flags::Diagnostics {
     pub fn run(self) -> anyhow::Result<()> {
-        let cargo_config =
-            CargoConfig { sysroot: Some(RustLibSource::Discover), ..Default::default() };
+        const STACK_SIZE: usize = 1024 * 1024 * 8;
+
+        let handle = stdx::thread::Builder::new(
+            stdx::thread::ThreadIntent::LatencySensitive,
+            "BIG_STACK_THREAD",
+        )
+        .stack_size(STACK_SIZE)
+        .spawn(|| self.run_())
+        .unwrap();
+
+        handle.join()
+    }
+    fn run_(self) -> anyhow::Result<()> {
+        let cargo_config = CargoConfig {
+            sysroot: Some(RustLibSource::Discover),
+            all_targets: true,
+            ..Default::default()
+        };
         let with_proc_macro_server = if let Some(p) = &self.proc_macro_srv {
             let path = vfs::AbsPathBuf::assert_utf8(std::env::current_dir()?.join(p));
             ProcMacroServerChoice::Explicit(path)
@@ -37,8 +53,8 @@ impl flags::Diagnostics {
 
         let work = all_modules(db).into_iter().filter(|module| {
             let file_id = module.definition_source_file_id(db).original_file(db);
-            let source_root = db.file_source_root(file_id);
-            let source_root = db.source_root(source_root);
+            let source_root = db.file_source_root(file_id.file_id(db)).source_root_id(db);
+            let source_root = db.source_root(source_root).source_root(db);
             !source_root.is_library
         });
 
@@ -46,13 +62,16 @@ impl flags::Diagnostics {
             let file_id = module.definition_source_file_id(db).original_file(db);
             if !visited_files.contains(&file_id) {
                 let crate_name =
-                    module.krate().display_name(db).as_deref().unwrap_or("unknown").to_owned();
-                println!("processing crate: {crate_name}, module: {}", _vfs.file_path(file_id));
+                    module.krate().display_name(db).as_deref().unwrap_or(&sym::unknown).to_owned();
+                println!(
+                    "processing crate: {crate_name}, module: {}",
+                    _vfs.file_path(file_id.file_id(db))
+                );
                 for diagnostic in analysis
-                    .diagnostics(
+                    .full_diagnostics(
                         &DiagnosticsConfig::test_sample(),
                         AssistResolveStrategy::None,
-                        file_id,
+                        file_id.file_id(db),
                     )
                     .unwrap()
                 {
@@ -60,7 +79,11 @@ impl flags::Diagnostics {
                         found_error = true;
                     }
 
-                    println!("{diagnostic:?}");
+                    let Diagnostic { code, message, range, severity, .. } = diagnostic;
+                    let line_index = db.line_index(range.file_id);
+                    let start = line_index.line_col(range.range.start());
+                    let end = line_index.line_col(range.range.end());
+                    println!("{severity:?} {code:?} from {start:?} to {end:?}: {message}");
                 }
 
                 visited_files.insert(file_id);

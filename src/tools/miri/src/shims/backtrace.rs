@@ -1,21 +1,22 @@
-use crate::*;
-use rustc_ast::ast::Mutability;
+use rustc_abi::{CanonAbi, FieldIdx, Size};
 use rustc_middle::ty::layout::LayoutOf as _;
 use rustc_middle::ty::{self, Instance, Ty};
-use rustc_span::{hygiene, BytePos, Loc, Symbol};
-use rustc_target::{abi::Size, spec::abi::Abi};
+use rustc_span::{BytePos, Loc, Symbol, hygiene};
+use rustc_target::callconv::FnAbi;
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+use crate::*;
+
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn handle_miri_backtrace_size(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let [flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
+        let [flags] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
 
         let flags = this.read_scalar(flags)?.to_u64()?;
         if flags != 0 {
@@ -24,30 +25,29 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         let frame_count = this.active_thread_stack().len();
 
-        this.write_scalar(Scalar::from_target_usize(frame_count.try_into().unwrap(), this), dest)
+        this.write_scalar(Scalar::from_target_usize(frame_count.to_u64(), this), dest)
     }
 
     fn handle_miri_get_backtrace(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let tcx = this.tcx;
+        let ptr_ty = this.machine.layouts.mut_raw_ptr.ty;
+        let ptr_layout = this.layout_of(ptr_ty)?;
 
-        let flags = if let Some(flags_op) = args.first() {
-            this.read_scalar(flags_op)?.to_u64()?
-        } else {
-            throw_ub_format!("expected at least 1 argument")
-        };
+        let [flags, buf] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
+
+        let flags = this.read_scalar(flags)?.to_u64()?;
+        let buf_place = this.deref_pointer_as(buf, ptr_layout)?;
 
         let mut data = Vec::new();
         for frame in this.active_thread_stack().iter().rev() {
             // Match behavior of debuginfo (`FunctionCx::adjusted_span_and_dbg_scope`).
-            let span = hygiene::walk_chain_collapsed(frame.current_span(), frame.body.span);
-            data.push((frame.instance, span.lo()));
+            let span = hygiene::walk_chain_collapsed(frame.current_span(), frame.body().span);
+            data.push((frame.instance(), span.lo()));
         }
 
         let ptrs: Vec<_> = data
@@ -64,62 +64,36 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             })
             .collect();
 
-        let len: u64 = ptrs.len().try_into().unwrap();
-
-        let ptr_ty = this.machine.layouts.mut_raw_ptr.ty;
-        let array_layout = this.layout_of(Ty::new_array(tcx.tcx, ptr_ty, len)).unwrap();
-
         match flags {
-            // storage for pointers is allocated by miri
-            // deallocating the slice is undefined behavior with a custom global allocator
             0 => {
-                let [_flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
-
-                let alloc = this.allocate(array_layout, MiriMemoryKind::Rust.into())?;
-
-                // Write pointers into array
-                for (i, ptr) in ptrs.into_iter().enumerate() {
-                    let place = this.project_index(&alloc, i as u64)?;
-
-                    this.write_pointer(ptr, &place)?;
-                }
-
-                this.write_immediate(Immediate::new_slice(alloc.ptr(), len, this), dest)?;
+                throw_unsup_format!("miri_get_backtrace: v0 is not supported any more");
             }
-            // storage for pointers is allocated by the caller
-            1 => {
-                let [_flags, buf] = this.check_shim(abi, Abi::Rust, link_name, args)?;
-
-                let buf_place = this.deref_pointer(buf)?;
-
-                let ptr_layout = this.layout_of(ptr_ty)?;
-
+            1 =>
                 for (i, ptr) in ptrs.into_iter().enumerate() {
-                    let offset = ptr_layout.size.checked_mul(i.try_into().unwrap(), this).unwrap();
+                    let offset = ptr_layout.size.checked_mul(i.to_u64(), this).unwrap();
 
                     let op_place = buf_place.offset(offset, ptr_layout, this)?;
 
                     this.write_pointer(ptr, &op_place)?;
-                }
-            }
+                },
             _ => throw_unsup_format!("unknown `miri_get_backtrace` flags {}", flags),
         };
 
-        Ok(())
+        interp_ok(())
     }
 
     fn resolve_frame_pointer(
         &mut self,
-        ptr: &OpTy<'tcx, Provenance>,
+        ptr: &OpTy<'tcx>,
     ) -> InterpResult<'tcx, (Instance<'tcx>, Loc, String, String)> {
         let this = self.eval_context_mut();
 
         let ptr = this.read_pointer(ptr)?;
         // Take apart the pointer, we need its pieces. The offset encodes the span.
-        let (alloc_id, offset, _prov) = this.ptr_get_alloc_id(ptr)?;
+        let (alloc_id, offset, _prov) = this.ptr_get_alloc_id(ptr, 0)?;
 
         // This has to be an actual global fn ptr, not a dlsym function.
-        let fn_instance = if let Some(GlobalAlloc::Function(instance)) =
+        let fn_instance = if let Some(GlobalAlloc::Function { instance, .. }) =
             this.tcx.try_get_global_alloc(alloc_id)
         {
             instance
@@ -133,18 +107,18 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let name = fn_instance.to_string();
         let filename = lo.file.name.prefer_remapped_unconditionaly().to_string();
 
-        Ok((fn_instance, lo, name, filename))
+        interp_ok((fn_instance, lo, name, filename))
     }
 
     fn handle_miri_resolve_frame(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let [ptr, flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
+        let [ptr, flags] = this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
 
         let flags = this.read_scalar(flags)?.to_u64()?;
 
@@ -180,50 +154,49 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         match flags {
             0 => {
-                // These are "mutable" allocations as we consider them to be owned by the callee.
-                let name_alloc =
-                    this.allocate_str(&name, MiriMemoryKind::Rust.into(), Mutability::Mut)?;
-                let filename_alloc =
-                    this.allocate_str(&filename, MiriMemoryKind::Rust.into(), Mutability::Mut)?;
-
-                this.write_immediate(name_alloc.to_ref(this), &this.project_field(dest, 0)?)?;
-                this.write_immediate(filename_alloc.to_ref(this), &this.project_field(dest, 1)?)?;
+                throw_unsup_format!("miri_resolve_frame: v0 is not supported any more");
             }
             1 => {
                 this.write_scalar(
-                    Scalar::from_target_usize(name.len().try_into().unwrap(), this),
-                    &this.project_field(dest, 0)?,
+                    Scalar::from_target_usize(name.len().to_u64(), this),
+                    &this.project_field(dest, FieldIdx::from_u32(0))?,
                 )?;
                 this.write_scalar(
-                    Scalar::from_target_usize(filename.len().try_into().unwrap(), this),
-                    &this.project_field(dest, 1)?,
+                    Scalar::from_target_usize(filename.len().to_u64(), this),
+                    &this.project_field(dest, FieldIdx::from_u32(1))?,
                 )?;
             }
             _ => throw_unsup_format!("unknown `miri_resolve_frame` flags {}", flags),
         }
 
-        this.write_scalar(Scalar::from_u32(lineno), &this.project_field(dest, 2)?)?;
-        this.write_scalar(Scalar::from_u32(colno), &this.project_field(dest, 3)?)?;
+        this.write_scalar(
+            Scalar::from_u32(lineno),
+            &this.project_field(dest, FieldIdx::from_u32(2))?,
+        )?;
+        this.write_scalar(
+            Scalar::from_u32(colno),
+            &this.project_field(dest, FieldIdx::from_u32(3))?,
+        )?;
 
         // Support a 4-field struct for now - this is deprecated
         // and slated for removal.
         if num_fields == 5 {
-            this.write_pointer(fn_ptr, &this.project_field(dest, 4)?)?;
+            this.write_pointer(fn_ptr, &this.project_field(dest, FieldIdx::from_u32(4))?)?;
         }
 
-        Ok(())
+        interp_ok(())
     }
 
     fn handle_miri_resolve_frame_names(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
+        args: &[OpTy<'tcx>],
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
 
         let [ptr, flags, name_ptr, filename_ptr] =
-            this.check_shim(abi, Abi::Rust, link_name, args)?;
+            this.check_shim(abi, CanonAbi::Rust, link_name, args)?;
 
         let flags = this.read_scalar(flags)?.to_u64()?;
         if flags != 0 {
@@ -235,6 +208,6 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         this.write_bytes_ptr(this.read_pointer(name_ptr)?, name.bytes())?;
         this.write_bytes_ptr(this.read_pointer(filename_ptr)?, filename.bytes())?;
 
-        Ok(())
+        interp_ok(())
     }
 }

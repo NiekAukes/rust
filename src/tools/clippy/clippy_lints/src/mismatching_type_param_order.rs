@@ -49,12 +49,12 @@ declare_lint_pass!(TypeParamMismatch => [MISMATCHING_TYPE_PARAM_ORDER]);
 
 impl<'tcx> LateLintPass<'tcx> for TypeParamMismatch {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
-        if !item.span.from_expansion()
-            && let ItemKind::Impl(imp) = &item.kind
+        if let ItemKind::Impl(imp) = &item.kind
             && let TyKind::Path(QPath::Resolved(_, path)) = &imp.self_ty.kind
-            && let Some(segment) = path.segments.iter().next()
+            && let [segment, ..] = path.segments
             && let Some(generic_args) = segment.args
             && !generic_args.args.is_empty()
+            && !item.span.from_expansion()
         {
             // get the name and span of the generic parameters in the Impl
             let mut impl_params = Vec::new();
@@ -66,7 +66,7 @@ impl<'tcx> LateLintPass<'tcx> for TypeParamMismatch {
                     }) => impl_params.push((path.segments[0].ident.to_string(), path.span)),
                     GenericArg::Type(_) => return,
                     _ => (),
-                };
+                }
             }
 
             // find the type that the Impl is for
@@ -76,7 +76,7 @@ impl<'tcx> LateLintPass<'tcx> for TypeParamMismatch {
             };
 
             // get the names of the generic parameters in the type
-            let type_params = &cx.tcx.generics_of(defid).params;
+            let type_params = &cx.tcx.generics_of(defid).own_params;
             let type_param_names: Vec<_> = type_params
                 .iter()
                 .filter_map(|p| match p.kind {
@@ -111,10 +111,10 @@ impl<'tcx> LateLintPass<'tcx> for TypeParamMismatch {
 // Checks if impl_param_name is the same as one of type_param_names,
 // and is in a different position
 fn mismatch_param_name(i: usize, impl_param_name: &String, type_param_names: &FxHashMap<&String, usize>) -> bool {
-    if let Some(j) = type_param_names.get(impl_param_name) {
-        if i != *j {
-            return true;
-        }
+    if let Some(j) = type_param_names.get(impl_param_name)
+        && i != *j
+    {
+        return true;
     }
     false
 }

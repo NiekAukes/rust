@@ -1,5 +1,5 @@
 #![allow(internal_features)]
-#![feature(core_intrinsics, coroutines, coroutine_trait, is_sorted, stmt_expr_attributes)]
+#![feature(core_intrinsics, coroutines, coroutine_trait, stmt_expr_attributes)]
 
 #[cfg(feature="master")]
 #[cfg(target_arch="x86_64")]
@@ -7,7 +7,7 @@ use std::arch::x86_64::*;
 use std::io::Write;
 use std::ops::Coroutine;
 
-extern {
+extern "C" {
     pub fn printf(format: *const i8, ...) -> i32;
 }
 
@@ -77,18 +77,18 @@ fn main() {
     assert_eq!(tmp as i128, -0x1234_5678_9ABC_DEF0i128);
 
     // Check that all u/i128 <-> float casts work correctly.
-    let houndred_u128 = 100u128;
-    let houndred_i128 = 100i128;
-    let houndred_f32 = 100.0f32;
-    let houndred_f64 = 100.0f64;
-    assert_eq!(houndred_u128 as f32, 100.0);
-    assert_eq!(houndred_u128 as f64, 100.0);
-    assert_eq!(houndred_f32 as u128, 100);
-    assert_eq!(houndred_f64 as u128, 100);
-    assert_eq!(houndred_i128 as f32, 100.0);
-    assert_eq!(houndred_i128 as f64, 100.0);
-    assert_eq!(houndred_f32 as i128, 100);
-    assert_eq!(houndred_f64 as i128, 100);
+    let hundred_u128 = 100u128;
+    let hundred_i128 = 100i128;
+    let hundred_f32 = 100.0f32;
+    let hundred_f64 = 100.0f64;
+    assert_eq!(hundred_u128 as f32, 100.0);
+    assert_eq!(hundred_u128 as f64, 100.0);
+    assert_eq!(hundred_f32 as u128, 100);
+    assert_eq!(hundred_f64 as u128, 100);
+    assert_eq!(hundred_i128 as f32, 100.0);
+    assert_eq!(hundred_i128 as f64, 100.0);
+    assert_eq!(hundred_f32 as i128, 100);
+    assert_eq!(hundred_f64 as i128, 100);
 
     let _a = 1u32 << 2u8;
 

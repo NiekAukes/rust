@@ -10,7 +10,7 @@ fn needs_async(_: impl Future<Output = i32>) {}
 #[cfg(fail)]
 fn main() {
     needs_async(async {});
-    //[fail]~^ ERROR type mismatch
+    //[fail]~^ ERROR type mismatch resolving `() == i32`
 }
 
 #[cfg(pass)]

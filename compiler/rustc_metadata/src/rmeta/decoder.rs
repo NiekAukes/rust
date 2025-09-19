@@ -1,17 +1,20 @@
 // Decoding metadata from a single crate's metadata
 
-use crate::creader::CStore;
-use crate::rmeta::table::IsDefault;
-use crate::rmeta::*;
+use std::iter::TrustedLen;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use std::{io, mem};
 
+pub(super) use cstore_impl::provide;
 use rustc_ast as ast;
-use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fingerprint::Fingerprint;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::owned_slice::OwnedSlice;
-use rustc_data_structures::sync::{Lock, Lrc, OnceLock};
+use rustc_data_structures::sync::Lock;
 use rustc_data_structures::unhash::UnhashMap;
 use rustc_expand::base::{SyntaxExtension, SyntaxExtensionKind};
 use rustc_expand::proc_macro::{AttrProcMacro, BangProcMacro, DeriveProcMacro};
+use rustc_hir::Safety;
 use rustc_hir::def::Res;
 use rustc_hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE};
 use rustc_hir::definitions::{DefPath, DefPathData};
@@ -19,30 +22,29 @@ use rustc_hir::diagnostic_items::DiagnosticItems;
 use rustc_index::Idx;
 use rustc_middle::middle::lib_features::LibFeatures;
 use rustc_middle::mir::interpret::{AllocDecodingSession, AllocDecodingState};
-use rustc_middle::ty::codec::TyDecoder;
 use rustc_middle::ty::Visibility;
+use rustc_middle::ty::codec::TyDecoder;
+use rustc_middle::{bug, implement_ty_decoder};
+use rustc_proc_macro::bridge::client::ProcMacro;
 use rustc_serialize::opaque::MemDecoder;
 use rustc_serialize::{Decodable, Decoder};
-use rustc_session::cstore::{CrateSource, ExternCrate};
 use rustc_session::Session;
-use rustc_span::symbol::kw;
-use rustc_span::{BytePos, Pos, SpanData, SpanDecoder, SyntaxContext, DUMMY_SP};
-
-use proc_macro::bridge::client::ProcMacro;
-use std::iter::TrustedLen;
-use std::path::Path;
-use std::{io, iter, mem};
-
-pub(super) use cstore_impl::provide;
+use rustc_session::config::TargetModifier;
+use rustc_session::cstore::{CrateSource, ExternCrate};
 use rustc_span::hygiene::HygieneDecodeContext;
+use rustc_span::{BytePos, DUMMY_SP, Pos, SpanData, SpanDecoder, SyntaxContext, kw};
+use tracing::debug;
+
+use crate::creader::CStore;
+use crate::rmeta::table::IsDefault;
+use crate::rmeta::*;
 
 mod cstore_impl;
 
 /// A reference to the raw binary version of crate metadata.
-/// A `MetadataBlob` internally is just a reference counted pointer to
-/// the actual data, so cloning it is cheap.
-#[derive(Clone)]
-pub(crate) struct MetadataBlob(pub(crate) OwnedSlice);
+/// This struct applies [`MemDecoder`]'s validation when constructed
+/// so that later constructions are guaranteed to succeed.
+pub(crate) struct MetadataBlob(OwnedSlice);
 
 impl std::ops::Deref for MetadataBlob {
     type Target = [u8];
@@ -53,11 +55,27 @@ impl std::ops::Deref for MetadataBlob {
     }
 }
 
+impl MetadataBlob {
+    /// Runs the [`MemDecoder`] validation and if it passes, constructs a new [`MetadataBlob`].
+    pub(crate) fn new(slice: OwnedSlice) -> Result<Self, ()> {
+        if MemDecoder::new(&slice, 0).is_ok() { Ok(Self(slice)) } else { Err(()) }
+    }
+
+    /// Since this has passed the validation of [`MetadataBlob::new`], this returns bytes which are
+    /// known to pass the [`MemDecoder`] validation.
+    pub(crate) fn bytes(&self) -> &OwnedSlice {
+        &self.0
+    }
+}
+
 /// A map from external crate numbers (as decoded from some crate file) to
 /// local crate numbers (as generated during this session). Each external
 /// crate may refer to types in other external crates, and each has their
 /// own crate numbers.
 pub(crate) type CrateNumMap = IndexVec<CrateNum, CrateNum>;
+
+/// Target modifiers - abi or exploit mitigations flags
+pub(crate) type TargetModifiers = Vec<TargetModifier>;
 
 pub(crate) struct CrateMetadata {
     /// The primary crate data - binary metadata blob.
@@ -69,12 +87,12 @@ pub(crate) struct CrateMetadata {
     /// Trait impl data.
     /// FIXME: Used only from queries and can use query cache,
     /// so pre-decoding can probably be avoided.
-    trait_impls: FxHashMap<(u32, DefIndex), LazyArray<(DefIndex, Option<SimplifiedType>)>>,
+    trait_impls: FxIndexMap<(u32, DefIndex), LazyArray<(DefIndex, Option<SimplifiedType>)>>,
     /// Inherent impls which do not follow the normal coherence rules.
     ///
     /// These can be introduced using either `#![rustc_coherence_is_core]`
     /// or `#[rustc_allow_incoherent_impl]`.
-    incoherent_impls: FxHashMap<SimplifiedType, LazyArray<DefIndex>>,
+    incoherent_impls: FxIndexMap<SimplifiedType, LazyArray<DefIndex>>,
     /// Proc macro descriptions for this crate, if it's a proc macro crate.
     raw_proc_macros: Option<&'static [ProcMacro]>,
     /// Source maps for code from the crate.
@@ -99,7 +117,7 @@ pub(crate) struct CrateMetadata {
     /// How to link (or not link) this crate to the currently compiled crate.
     dep_kind: CrateDepKind,
     /// Filesystem location of this crate.
-    source: Lrc<CrateSource>,
+    source: Arc<CrateSource>,
     /// Whether or not this crate should be consider a private dependency.
     /// Used by the 'exported_private_dependencies' lint, and for determining
     /// whether to emit suggestions that reference this crate.
@@ -131,7 +149,7 @@ struct ImportedSourceFile {
     /// The end of this SourceFile within the source_map of its original crate
     original_end_pos: rustc_span::BytePos,
     /// The imported SourceFile's representation within the local source_map
-    translated_source_file: Lrc<rustc_span::SourceFile>,
+    translated_source_file: Arc<rustc_span::SourceFile>,
 }
 
 pub(super) struct DecodeContext<'a, 'tcx> {
@@ -164,7 +182,14 @@ pub(super) trait Metadata<'a, 'tcx>: Copy {
     fn decoder(self, pos: usize) -> DecodeContext<'a, 'tcx> {
         let tcx = self.tcx();
         DecodeContext {
-            opaque: MemDecoder::new(self.blob(), pos),
+            // FIXME: This unwrap should never panic because we check that it won't when creating
+            // `MetadataBlob`. Ideally we'd just have a `MetadataDecoder` and hand out subslices of
+            // it as we do elsewhere in the compiler using `MetadataDecoder::split_at`. But we own
+            // the data for the decoder so holding onto the `MemDecoder` too would make us a
+            // self-referential struct which is downright goofy because `MetadataBlob` is already
+            // self-referential. Probably `MemDecoder` should contain an `OwnedSlice`, but that
+            // demands a significant refactoring due to our crate graph.
+            opaque: MemDecoder::new(self.blob(), pos).unwrap(),
             cdata: self.cdata(),
             blob: self.blob(),
             sess: self.sess().or(tcx.map(|tcx| tcx.sess)),
@@ -311,12 +336,12 @@ impl<'a, 'tcx> DecodeContext<'a, 'tcx> {
     }
 
     #[inline]
-    pub fn blob(&self) -> &'a MetadataBlob {
+    pub(crate) fn blob(&self) -> &'a MetadataBlob {
         self.blob
     }
 
     #[inline]
-    pub fn cdata(&self) -> CrateMetadataRef<'a> {
+    fn cdata(&self) -> CrateMetadataRef<'a> {
         debug_assert!(self.cdata.is_some(), "missing CrateMetadata in DecodeContext");
         self.cdata.unwrap()
     }
@@ -356,18 +381,16 @@ impl<'a, 'tcx> DecodeContext<'a, 'tcx> {
     }
 
     #[inline]
-    pub fn read_raw_bytes(&mut self, len: usize) -> &[u8] {
+    fn read_raw_bytes(&mut self, len: usize) -> &[u8] {
         self.opaque.read_raw_bytes(len)
     }
 }
 
-impl<'a, 'tcx> TyDecoder for DecodeContext<'a, 'tcx> {
+impl<'a, 'tcx> TyDecoder<'tcx> for DecodeContext<'a, 'tcx> {
     const CLEAR_CROSS_CRATE: bool = true;
 
-    type I = TyCtxt<'tcx>;
-
     #[inline]
-    fn interner(&self) -> Self::I {
+    fn interner(&self) -> TyCtxt<'tcx> {
         self.tcx()
     }
 
@@ -392,7 +415,7 @@ impl<'a, 'tcx> TyDecoder for DecodeContext<'a, 'tcx> {
     where
         F: FnOnce(&mut Self) -> R,
     {
-        let new_opaque = MemDecoder::new(self.opaque.data(), pos);
+        let new_opaque = self.opaque.split_at(pos);
         let old_opaque = mem::replace(&mut self.opaque, new_opaque);
         let old_state = mem::replace(&mut self.lazy_state, LazyState::NoNode);
         let r = f(self);
@@ -518,7 +541,7 @@ impl<'a, 'tcx> SpanDecoder for DecodeContext<'a, 'tcx> {
         } else {
             SpanData::decode(self)
         };
-        Span::new(data.lo, data.hi, data.ctxt, data.parent)
+        data.span()
     }
 
     fn decode_symbol(&mut self) -> Symbol {
@@ -539,9 +562,9 @@ impl<'a, 'tcx> SpanDecoder for DecodeContext<'a, 'tcx> {
                     Symbol::intern(s)
                 })
             }
-            SYMBOL_PREINTERNED => {
+            SYMBOL_PREDEFINED => {
                 let symbol_index = self.read_u32();
-                Symbol::new_from_decoded(symbol_index)
+                Symbol::new(symbol_index)
             }
             _ => unreachable!(),
         }
@@ -648,7 +671,7 @@ impl<'a, 'tcx> Decodable<DecodeContext<'a, 'tcx>> for SpanData {
         let lo = lo + source_file.translated_source_file.start_pos;
         let hi = hi + source_file.translated_source_file.start_pos;
 
-        // Do not try to decode parent for foreign spans.
+        // Do not try to decode parent for foreign spans (it wasn't encoded in the first place).
         SpanData { lo, hi, ctxt, parent: None }
     }
 }
@@ -749,7 +772,7 @@ impl MetadataBlob {
                         root.stable_crate_id
                     )?;
                     writeln!(out, "proc_macro {:?}", root.proc_macro_data.is_some())?;
-                    writeln!(out, "triple {}", root.header.triple.triple())?;
+                    writeln!(out, "triple {}", root.header.triple.tuple())?;
                     writeln!(out, "edition {}", root.edition)?;
                     writeln!(out, "symbol_mangling_version {:?}", root.symbol_mangling_version)?;
                     writeln!(
@@ -850,8 +873,9 @@ impl MetadataBlob {
 
                         let def_kind = root.tables.def_kind.get(blob, item).unwrap();
                         let def_key = root.tables.def_keys.get(blob, item).unwrap().decode(blob);
+                        #[allow(rustc::symbol_intern_string_literal)]
                         let def_name = if item == CRATE_DEF_INDEX {
-                            rustc_span::symbol::kw::Crate
+                            kw::Crate
                         } else {
                             def_key
                                 .disambiguated_data
@@ -936,12 +960,19 @@ impl CrateRoot {
     pub(crate) fn decode_crate_deps<'a>(
         &self,
         metadata: &'a MetadataBlob,
-    ) -> impl ExactSizeIterator<Item = CrateDep> + Captures<'a> {
+    ) -> impl ExactSizeIterator<Item = CrateDep> {
         self.crate_deps.decode(metadata)
+    }
+
+    pub(crate) fn decode_target_modifiers<'a>(
+        &self,
+        metadata: &'a MetadataBlob,
+    ) -> impl ExactSizeIterator<Item = TargetModifier> {
+        self.target_modifiers.decode(metadata)
     }
 }
 
-impl<'a, 'tcx> CrateMetadataRef<'a> {
+impl<'a> CrateMetadataRef<'a> {
     fn missing(self, descr: &str, id: DefIndex) -> ! {
         bug!("missing `{descr}` for {:?}", self.local_def_id(id))
     }
@@ -1015,22 +1046,22 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             .decode((self, sess))
     }
 
-    fn load_proc_macro(self, id: DefIndex, tcx: TyCtxt<'tcx>) -> SyntaxExtension {
+    fn load_proc_macro<'tcx>(self, id: DefIndex, tcx: TyCtxt<'tcx>) -> SyntaxExtension {
         let (name, kind, helper_attrs) = match *self.raw_proc_macro(id) {
             ProcMacro::CustomDerive { trait_name, attributes, client } => {
                 let helper_attrs =
                     attributes.iter().cloned().map(Symbol::intern).collect::<Vec<_>>();
                 (
                     trait_name,
-                    SyntaxExtensionKind::Derive(Box::new(DeriveProcMacro { client })),
+                    SyntaxExtensionKind::Derive(Arc::new(DeriveProcMacro { client })),
                     helper_attrs,
                 )
             }
             ProcMacro::Attr { name, client } => {
-                (name, SyntaxExtensionKind::Attr(Box::new(AttrProcMacro { client })), Vec::new())
+                (name, SyntaxExtensionKind::Attr(Arc::new(AttrProcMacro { client })), Vec::new())
             }
             ProcMacro::Bang { name, client } => {
-                (name, SyntaxExtensionKind::Bang(Box::new(BangProcMacro { client })), Vec::new())
+                (name, SyntaxExtensionKind::Bang(Arc::new(BangProcMacro { client })), Vec::new())
             }
         };
 
@@ -1038,7 +1069,6 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
         let attrs: Vec<_> = self.get_item_attrs(id, sess).collect();
         SyntaxExtension::new(
             sess,
-            tcx.features(),
             kind,
             self.get_span(id, sess),
             helper_attrs,
@@ -1047,34 +1077,6 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             &attrs,
             false,
         )
-    }
-
-    fn get_explicit_item_bounds(
-        self,
-        index: DefIndex,
-        tcx: TyCtxt<'tcx>,
-    ) -> ty::EarlyBinder<&'tcx [(ty::Clause<'tcx>, Span)]> {
-        let lazy = self.root.tables.explicit_item_bounds.get(self, index);
-        let output = if lazy.is_default() {
-            &mut []
-        } else {
-            tcx.arena.alloc_from_iter(lazy.decode((self, tcx)))
-        };
-        ty::EarlyBinder::bind(&*output)
-    }
-
-    fn get_explicit_item_super_predicates(
-        self,
-        index: DefIndex,
-        tcx: TyCtxt<'tcx>,
-    ) -> ty::EarlyBinder<&'tcx [(ty::Clause<'tcx>, Span)]> {
-        let lazy = self.root.tables.explicit_item_super_predicates.get(self, index);
-        let output = if lazy.is_default() {
-            &mut []
-        } else {
-            tcx.arena.alloc_from_iter(lazy.decode((self, tcx)))
-        };
-        ty::EarlyBinder::bind(&*output)
     }
 
     fn get_variant(
@@ -1108,19 +1110,18 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
                         did,
                         name: self.item_name(did.index),
                         vis: self.get_visibility(did.index),
+                        safety: self.get_safety(did.index),
+                        value: self.get_default_field(did.index),
                     })
                     .collect(),
-                adt_kind,
                 parent_did,
-                false,
+                None,
                 data.is_non_exhaustive,
-                // FIXME: unnamed fields in crate metadata is unimplemented yet.
-                false,
             ),
         )
     }
 
-    fn get_adt_def(self, item_id: DefIndex, tcx: TyCtxt<'tcx>) -> ty::AdtDef<'tcx> {
+    fn get_adt_def<'tcx>(self, item_id: DefIndex, tcx: TyCtxt<'tcx>) -> ty::AdtDef<'tcx> {
         let kind = self.def_kind(item_id);
         let did = self.local_def_id(item_id);
 
@@ -1158,7 +1159,6 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             adt_kind,
             variants.into_iter().map(|(_, variant)| variant).collect(),
             repr,
-            false,
         )
     }
 
@@ -1170,6 +1170,14 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             .unwrap_or_else(|| self.missing("visibility", id))
             .decode(self)
             .map_id(|index| self.local_def_id(index))
+    }
+
+    fn get_safety(self, id: DefIndex) -> Safety {
+        self.root.tables.safety.get(self, id).unwrap_or_else(|| self.missing("safety", id))
+    }
+
+    fn get_default_field(self, id: DefIndex) -> Option<DefId> {
+        self.root.tables.default_fields.get(self, id).map(|d| d.decode(self))
     }
 
     fn get_trait_item_def_id(self, id: DefIndex) -> Option<DefId> {
@@ -1204,12 +1212,12 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
     /// Iterates over the stability implications in the given crate (when a `#[unstable]` attribute
     /// has an `implied_by` meta item, then the mapping from the implied feature to the actual
     /// feature is a stability implication).
-    fn get_stability_implications(self, tcx: TyCtxt<'tcx>) -> &'tcx [(Symbol, Symbol)] {
+    fn get_stability_implications<'tcx>(self, tcx: TyCtxt<'tcx>) -> &'tcx [(Symbol, Symbol)] {
         tcx.arena.alloc_from_iter(self.root.stability_implications.decode(self))
     }
 
     /// Iterates over the lang items in the given crate.
-    fn get_lang_items(self, tcx: TyCtxt<'tcx>) -> &'tcx [(DefId, LangItem)] {
+    fn get_lang_items<'tcx>(self, tcx: TyCtxt<'tcx>) -> &'tcx [(DefId, LangItem)] {
         tcx.arena.alloc_from_iter(
             self.root
                 .lang_items
@@ -1218,7 +1226,11 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
         )
     }
 
-    fn get_stripped_cfg_items(self, cnum: CrateNum, tcx: TyCtxt<'tcx>) -> &'tcx [StrippedCfgItem] {
+    fn get_stripped_cfg_items<'tcx>(
+        self,
+        cnum: CrateNum,
+        tcx: TyCtxt<'tcx>,
+    ) -> &'tcx [StrippedCfgItem] {
         let item_names = self
             .root
             .stripped_cfg_items
@@ -1259,35 +1271,31 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
         self,
         id: DefIndex,
         sess: &'a Session,
-    ) -> impl Iterator<Item = ModChild> + 'a {
-        iter::from_coroutine(
-            #[coroutine]
-            move || {
-                if let Some(data) = &self.root.proc_macro_data {
-                    // If we are loading as a proc macro, we want to return
-                    // the view of this crate as a proc macro crate.
-                    if id == CRATE_DEF_INDEX {
-                        for child_index in data.macros.decode(self) {
-                            yield self.get_mod_child(child_index, sess);
-                        }
-                    }
-                } else {
-                    // Iterate over all children.
-                    let non_reexports =
-                        self.root.tables.module_children_non_reexports.get(self, id);
-                    for child_index in non_reexports.unwrap().decode(self) {
+    ) -> impl Iterator<Item = ModChild> {
+        gen move {
+            if let Some(data) = &self.root.proc_macro_data {
+                // If we are loading as a proc macro, we want to return
+                // the view of this crate as a proc macro crate.
+                if id == CRATE_DEF_INDEX {
+                    for child_index in data.macros.decode(self) {
                         yield self.get_mod_child(child_index, sess);
                     }
+                }
+            } else {
+                // Iterate over all children.
+                let non_reexports = self.root.tables.module_children_non_reexports.get(self, id);
+                for child_index in non_reexports.unwrap().decode(self) {
+                    yield self.get_mod_child(child_index, sess);
+                }
 
-                    let reexports = self.root.tables.module_children_reexports.get(self, id);
-                    if !reexports.is_default() {
-                        for reexport in reexports.decode((self, sess)) {
-                            yield reexport;
-                        }
+                let reexports = self.root.tables.module_children_reexports.get(self, id);
+                if !reexports.is_default() {
+                    for reexport in reexports.decode((self, sess)) {
+                        yield reexport;
                     }
                 }
-            },
-        )
+            }
+        }
     }
 
     fn is_ctfe_mir_available(self, id: DefIndex) -> bool {
@@ -1298,25 +1306,18 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
         self.root.tables.optimized_mir.get(self, id).is_some()
     }
 
-    fn cross_crate_inlinable(self, id: DefIndex) -> bool {
-        self.root.tables.cross_crate_inlinable.get(self, id)
-    }
-
     fn get_fn_has_self_parameter(self, id: DefIndex, sess: &'a Session) -> bool {
         self.root
             .tables
-            .fn_arg_names
+            .fn_arg_idents
             .get(self, id)
             .expect("argument names not encoded for a function")
             .decode((self, sess))
             .nth(0)
-            .is_some_and(|ident| ident.name == kw::SelfLower)
+            .is_some_and(|ident| matches!(ident, Some(Ident { name: kw::SelfLower, .. })))
     }
 
-    fn get_associated_item_or_field_def_ids(
-        self,
-        id: DefIndex,
-    ) -> impl Iterator<Item = DefId> + 'a {
+    fn get_associated_item_or_field_def_ids(self, id: DefIndex) -> impl Iterator<Item = DefId> {
         self.root
             .tables
             .associated_item_or_field_def_ids
@@ -1327,29 +1328,30 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
     }
 
     fn get_associated_item(self, id: DefIndex, sess: &'a Session) -> ty::AssocItem {
-        let name = if self.root.tables.opt_rpitit_info.get(self, id).is_some() {
-            kw::Empty
-        } else {
-            self.item_name(id)
-        };
-        let (kind, has_self) = match self.def_kind(id) {
-            DefKind::AssocConst => (ty::AssocKind::Const, false),
-            DefKind::AssocFn => (ty::AssocKind::Fn, self.get_fn_has_self_parameter(id, sess)),
-            DefKind::AssocTy => (ty::AssocKind::Type, false),
+        let kind = match self.def_kind(id) {
+            DefKind::AssocConst => ty::AssocKind::Const { name: self.item_name(id) },
+            DefKind::AssocFn => ty::AssocKind::Fn {
+                name: self.item_name(id),
+                has_self: self.get_fn_has_self_parameter(id, sess),
+            },
+            DefKind::AssocTy => {
+                let data = if let Some(rpitit_info) = self.root.tables.opt_rpitit_info.get(self, id)
+                {
+                    ty::AssocTypeData::Rpitit(rpitit_info.decode(self))
+                } else {
+                    ty::AssocTypeData::Normal(self.item_name(id))
+                };
+                ty::AssocKind::Type { data }
+            }
             _ => bug!("cannot get associated-item of `{:?}`", self.def_key(id)),
         };
         let container = self.root.tables.assoc_container.get(self, id).unwrap();
-        let opt_rpitit_info =
-            self.root.tables.opt_rpitit_info.get(self, id).map(|d| d.decode(self));
 
         ty::AssocItem {
-            name,
             kind,
             def_id: self.local_def_id(id),
             trait_item_def_id: self.get_trait_item_def_id(id),
             container,
-            fn_has_self_parameter: has_self,
-            opt_rpitit_info,
         }
     }
 
@@ -1367,7 +1369,7 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
         self,
         id: DefIndex,
         sess: &'a Session,
-    ) -> impl Iterator<Item = ast::Attribute> + 'a {
+    ) -> impl Iterator<Item = hir::Attribute> {
         self.root
             .tables
             .attributes
@@ -1388,7 +1390,7 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             .decode((self, sess))
     }
 
-    fn get_inherent_implementations_for_type(
+    fn get_inherent_implementations_for_type<'tcx>(
         self,
         tcx: TyCtxt<'tcx>,
         id: DefIndex,
@@ -1404,18 +1406,18 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
     }
 
     /// Decodes all traits in the crate (for rustdoc and rustc diagnostics).
-    fn get_traits(self) -> impl Iterator<Item = DefId> + 'a {
+    fn get_traits(self) -> impl Iterator<Item = DefId> {
         self.root.traits.decode(self).map(move |index| self.local_def_id(index))
     }
 
     /// Decodes all trait impls in the crate (for rustdoc).
-    fn get_trait_impls(self) -> impl Iterator<Item = DefId> + 'a {
+    fn get_trait_impls(self) -> impl Iterator<Item = DefId> {
         self.cdata.trait_impls.values().flat_map(move |impls| {
             impls.decode(self).map(move |(impl_index, _)| self.local_def_id(impl_index))
         })
     }
 
-    fn get_incoherent_impls(self, tcx: TyCtxt<'tcx>, simp: SimplifiedType) -> &'tcx [DefId] {
+    fn get_incoherent_impls<'tcx>(self, tcx: TyCtxt<'tcx>, simp: SimplifiedType) -> &'tcx [DefId] {
         if let Some(impls) = self.cdata.incoherent_impls.get(&simp) {
             tcx.arena.alloc_from_iter(impls.decode(self).map(|idx| self.local_def_id(idx)))
         } else {
@@ -1423,7 +1425,7 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
         }
     }
 
-    fn get_implementations_of_trait(
+    fn get_implementations_of_trait<'tcx>(
         self,
         tcx: TyCtxt<'tcx>,
         trait_def_id: DefId,
@@ -1450,7 +1452,7 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
         }
     }
 
-    fn get_native_libraries(self, sess: &'a Session) -> impl Iterator<Item = NativeLib> + 'a {
+    fn get_native_libraries(self, sess: &'a Session) -> impl Iterator<Item = NativeLib> {
         self.root.native_libraries.decode((self, sess))
     }
 
@@ -1463,27 +1465,38 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             .decode((self, sess))
     }
 
-    fn get_foreign_modules(self, sess: &'a Session) -> impl Iterator<Item = ForeignModule> + '_ {
+    fn get_foreign_modules(self, sess: &'a Session) -> impl Iterator<Item = ForeignModule> {
         self.root.foreign_modules.decode((self, sess))
     }
 
-    fn get_dylib_dependency_formats(
+    fn get_dylib_dependency_formats<'tcx>(
         self,
         tcx: TyCtxt<'tcx>,
     ) -> &'tcx [(CrateNum, LinkagePreference)] {
         tcx.arena.alloc_from_iter(
             self.root.dylib_dependency_formats.decode(self).enumerate().flat_map(|(i, link)| {
-                let cnum = CrateNum::new(i + 1);
+                let cnum = CrateNum::new(i + 1); // We skipped LOCAL_CRATE when encoding
                 link.map(|link| (self.cnum_map[cnum], link))
             }),
         )
     }
 
-    fn get_missing_lang_items(self, tcx: TyCtxt<'tcx>) -> &'tcx [LangItem] {
+    fn get_missing_lang_items<'tcx>(self, tcx: TyCtxt<'tcx>) -> &'tcx [LangItem] {
         tcx.arena.alloc_from_iter(self.root.lang_items_missing.decode(self))
     }
 
-    fn exported_symbols(
+    fn get_exportable_items(self) -> impl Iterator<Item = DefId> {
+        self.root.exportable_items.decode(self).map(move |index| self.local_def_id(index))
+    }
+
+    fn get_stable_order_of_exportable_impls(self) -> impl Iterator<Item = (DefId, usize)> {
+        self.root
+            .stable_order_of_exportable_impls
+            .decode(self)
+            .map(move |v| (self.local_def_id(v.0), v.1))
+    }
+
+    fn exported_symbols<'tcx>(
         self,
         tcx: TyCtxt<'tcx>,
     ) -> &'tcx [(ExportedSymbol<'tcx>, SymbolExportInfo)] {
@@ -1593,10 +1606,14 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
     /// Proc macro crates don't currently export spans, so this function does not have
     /// to work for them.
     fn imported_source_file(self, source_file_index: u32, sess: &Session) -> ImportedSourceFile {
-        fn filter<'a>(sess: &Session, path: Option<&'a Path>) -> Option<&'a Path> {
+        fn filter<'a>(
+            sess: &Session,
+            real_source_base_dir: &Option<PathBuf>,
+            path: Option<&'a Path>,
+        ) -> Option<&'a Path> {
             path.filter(|_| {
                 // Only spend time on further checks if we have what to translate *to*.
-                sess.opts.real_rust_source_base_dir.is_some()
+                real_source_base_dir.is_some()
                 // Some tests need the translation to be always skipped.
                 && sess.opts.unstable_opts.translate_remapped_path_to_local_path
             })
@@ -1608,77 +1625,92 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             })
         }
 
-        let try_to_translate_virtual_to_real = |name: &mut rustc_span::FileName| {
-            // Translate the virtual `/rustc/$hash` prefix back to a real directory
-            // that should hold actual sources, where possible.
-            //
-            // NOTE: if you update this, you might need to also update bootstrap's code for generating
-            // the `rust-src` component in `Src::run` in `src/bootstrap/dist.rs`.
-            let virtual_rust_source_base_dir = [
-                filter(sess, option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR").map(Path::new)),
-                filter(sess, sess.opts.unstable_opts.simulate_remapped_rust_src_base.as_deref()),
-            ];
+        let try_to_translate_virtual_to_real =
+            |virtual_source_base_dir: Option<&str>,
+             real_source_base_dir: &Option<PathBuf>,
+             name: &mut rustc_span::FileName| {
+                let virtual_source_base_dir = [
+                    filter(sess, real_source_base_dir, virtual_source_base_dir.map(Path::new)),
+                    filter(
+                        sess,
+                        real_source_base_dir,
+                        sess.opts.unstable_opts.simulate_remapped_rust_src_base.as_deref(),
+                    ),
+                ];
 
-            debug!(
-                "try_to_translate_virtual_to_real(name={:?}): \
-                 virtual_rust_source_base_dir={:?}, real_rust_source_base_dir={:?}",
-                name, virtual_rust_source_base_dir, sess.opts.real_rust_source_base_dir,
-            );
+                debug!(
+                    "try_to_translate_virtual_to_real(name={:?}): \
+                     virtual_source_base_dir={:?}, real_source_base_dir={:?}",
+                    name, virtual_source_base_dir, real_source_base_dir,
+                );
 
-            for virtual_dir in virtual_rust_source_base_dir.iter().flatten() {
-                if let Some(real_dir) = &sess.opts.real_rust_source_base_dir {
-                    if let rustc_span::FileName::Real(old_name) = name {
-                        if let rustc_span::RealFileName::Remapped { local_path: _, virtual_name } =
+                for virtual_dir in virtual_source_base_dir.iter().flatten() {
+                    if let Some(real_dir) = &real_source_base_dir
+                        && let rustc_span::FileName::Real(old_name) = name
+                        && let rustc_span::RealFileName::Remapped { local_path: _, virtual_name } =
                             old_name
-                        {
-                            if let Ok(rest) = virtual_name.strip_prefix(virtual_dir) {
-                                let virtual_name = virtual_name.clone();
+                        && let Ok(rest) = virtual_name.strip_prefix(virtual_dir)
+                    {
+                        let new_path = real_dir.join(rest);
 
-                                // The std library crates are in
-                                // `$sysroot/lib/rustlib/src/rust/library`, whereas other crates
-                                // may be in `$sysroot/lib/rustlib/src/rust/` directly. So we
-                                // detect crates from the std libs and handle them specially.
-                                const STD_LIBS: &[&str] = &[
-                                    "core",
-                                    "alloc",
-                                    "std",
-                                    "test",
-                                    "term",
-                                    "unwind",
-                                    "proc_macro",
-                                    "panic_abort",
-                                    "panic_unwind",
-                                    "profiler_builtins",
-                                    "rtstartup",
-                                    "rustc-std-workspace-core",
-                                    "rustc-std-workspace-alloc",
-                                    "rustc-std-workspace-std",
-                                    "backtrace",
-                                ];
-                                let is_std_lib = STD_LIBS.iter().any(|l| rest.starts_with(l));
+                        debug!(
+                            "try_to_translate_virtual_to_real: `{}` -> `{}`",
+                            virtual_name.display(),
+                            new_path.display(),
+                        );
 
-                                let new_path = if is_std_lib {
-                                    real_dir.join("library").join(rest)
-                                } else {
-                                    real_dir.join(rest)
-                                };
-
-                                debug!(
-                                    "try_to_translate_virtual_to_real: `{}` -> `{}`",
-                                    virtual_name.display(),
-                                    new_path.display(),
-                                );
-                                let new_name = rustc_span::RealFileName::Remapped {
-                                    local_path: Some(new_path),
-                                    virtual_name,
-                                };
-                                *old_name = new_name;
+                        // Check if the translated real path is affected by any user-requested
+                        // remaps via --remap-path-prefix. Apply them if so.
+                        // Note that this is a special case for imported rust-src paths specified by
+                        // https://rust-lang.github.io/rfcs/3127-trim-paths.html#handling-sysroot-paths.
+                        // Other imported paths are not currently remapped (see #66251).
+                        let (user_remapped, applied) =
+                            sess.source_map().path_mapping().map_prefix(&new_path);
+                        let new_name = if applied {
+                            rustc_span::RealFileName::Remapped {
+                                local_path: Some(new_path.clone()),
+                                virtual_name: user_remapped.to_path_buf(),
                             }
-                        }
+                        } else {
+                            rustc_span::RealFileName::LocalPath(new_path)
+                        };
+                        *old_name = new_name;
                     }
                 }
-            }
-        };
+            };
+
+        let try_to_translate_real_to_virtual =
+            |virtual_source_base_dir: Option<&str>,
+             real_source_base_dir: &Option<PathBuf>,
+             subdir: &str,
+             name: &mut rustc_span::FileName| {
+                if let Some(virtual_dir) = &sess.opts.unstable_opts.simulate_remapped_rust_src_base
+                    && let Some(real_dir) = real_source_base_dir
+                    && let rustc_span::FileName::Real(old_name) = name
+                {
+                    let relative_path = match old_name {
+                        rustc_span::RealFileName::LocalPath(local) => {
+                            local.strip_prefix(real_dir).ok()
+                        }
+                        rustc_span::RealFileName::Remapped { virtual_name, .. } => {
+                            virtual_source_base_dir
+                                .and_then(|virtual_dir| virtual_name.strip_prefix(virtual_dir).ok())
+                        }
+                    };
+                    debug!(
+                        ?relative_path,
+                        ?virtual_dir,
+                        ?subdir,
+                        "simulate_remapped_rust_src_base"
+                    );
+                    if let Some(rest) = relative_path.and_then(|p| p.strip_prefix(subdir).ok()) {
+                        *old_name = rustc_span::RealFileName::Remapped {
+                            local_path: None,
+                            virtual_name: virtual_dir.join(subdir).join(rest),
+                        };
+                    }
+                }
+            };
 
         let mut import_info = self.cdata.source_map_import_info.lock();
         for _ in import_info.len()..=(source_file_index as usize) {
@@ -1699,11 +1731,11 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
                 let rustc_span::SourceFile {
                     mut name,
                     src_hash,
+                    checksum_hash,
                     start_pos: original_start_pos,
                     source_len,
                     lines,
                     multibyte_chars,
-                    non_narrow_chars,
                     normalized_pos,
                     stable_id,
                     ..
@@ -1716,46 +1748,55 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
                 // This is useful for testing so that tests about the effects of
                 // `try_to_translate_virtual_to_real` don't have to worry about how the
                 // compiler is bootstrapped.
-                if let Some(virtual_dir) = &sess.opts.unstable_opts.simulate_remapped_rust_src_base
-                    && let Some(real_dir) = &sess.opts.real_rust_source_base_dir
-                    && let rustc_span::FileName::Real(ref mut old_name) = name
-                {
-                    let relative_path = match old_name {
-                        rustc_span::RealFileName::LocalPath(local) => {
-                            local.strip_prefix(real_dir).ok()
-                        }
-                        rustc_span::RealFileName::Remapped { virtual_name, .. } => {
-                            option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR")
-                                .and_then(|virtual_dir| virtual_name.strip_prefix(virtual_dir).ok())
-                        }
-                    };
-                    debug!(?relative_path, ?virtual_dir, "simulate_remapped_rust_src_base");
-                    for subdir in ["library", "compiler"] {
-                        if let Some(rest) = relative_path.and_then(|p| p.strip_prefix(subdir).ok())
-                        {
-                            *old_name = rustc_span::RealFileName::Remapped {
-                                local_path: None, // FIXME: maybe we should preserve this?
-                                virtual_name: virtual_dir.join(subdir).join(rest),
-                            };
-                            break;
-                        }
-                    }
-                }
+                try_to_translate_real_to_virtual(
+                    option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rust_source_base_dir,
+                    "library",
+                    &mut name,
+                );
+
+                // If this file is under $sysroot/lib/rustlib/rustc-src/
+                // and the user wish to simulate remapping with -Z simulate-remapped-rust-src-base,
+                // then we change `name` to a similar state as if the rust was bootstrapped
+                // with `remap-debuginfo = true`.
+                try_to_translate_real_to_virtual(
+                    option_env!("CFG_VIRTUAL_RUSTC_DEV_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rustc_dev_source_base_dir,
+                    "compiler",
+                    &mut name,
+                );
 
                 // If this file's path has been remapped to `/rustc/$hash`,
-                // we might be able to reverse that (also see comments above,
-                // on `try_to_translate_virtual_to_real`).
-                try_to_translate_virtual_to_real(&mut name);
+                // we might be able to reverse that.
+                //
+                // NOTE: if you update this, you might need to also update bootstrap's code for generating
+                // the `rust-src` component in `Src::run` in `src/bootstrap/dist.rs`.
+                try_to_translate_virtual_to_real(
+                    option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rust_source_base_dir,
+                    &mut name,
+                );
+
+                // If this file's path has been remapped to `/rustc-dev/$hash`,
+                // we might be able to reverse that.
+                //
+                // NOTE: if you update this, you might need to also update bootstrap's code for generating
+                // the `rustc-dev` component in `Src::run` in `src/bootstrap/dist.rs`.
+                try_to_translate_virtual_to_real(
+                    option_env!("CFG_VIRTUAL_RUSTC_DEV_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rustc_dev_source_base_dir,
+                    &mut name,
+                );
 
                 let local_version = sess.source_map().new_imported_source_file(
                     name,
                     src_hash,
+                    checksum_hash,
                     stable_id,
                     source_len.to_u32(),
                     self.cnum,
                     lines,
                     multibyte_chars,
-                    non_narrow_chars,
                     normalized_pos,
                     source_file_index,
                 );
@@ -1796,7 +1837,7 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             .decode(self)
     }
 
-    fn get_doc_link_traits_in_scope(self, index: DefIndex) -> impl Iterator<Item = DefId> + 'a {
+    fn get_doc_link_traits_in_scope(self, index: DefIndex) -> impl Iterator<Item = DefId> {
         self.root
             .tables
             .doc_link_traits_in_scope
@@ -1847,7 +1888,7 @@ impl CrateMetadata {
             cnum_map,
             dependencies,
             dep_kind,
-            source: Lrc::new(source),
+            source: Arc::new(source),
             private_dep,
             host_hash,
             used: false,
@@ -1867,12 +1908,16 @@ impl CrateMetadata {
         cdata
     }
 
-    pub(crate) fn dependencies(&self) -> impl Iterator<Item = CrateNum> + '_ {
+    pub(crate) fn dependencies(&self) -> impl Iterator<Item = CrateNum> {
         self.dependencies.iter().copied()
     }
 
     pub(crate) fn add_dependency(&mut self, cnum: CrateNum) {
         self.dependencies.push(cnum);
+    }
+
+    pub(crate) fn target_modifiers(&self) -> TargetModifiers {
+        self.root.decode_target_modifiers(&self.blob).collect()
     }
 
     pub(crate) fn update_extern_crate(&mut self, new_extern_crate: ExternCrate) -> bool {
@@ -1912,12 +1957,20 @@ impl CrateMetadata {
         self.root.needs_panic_runtime
     }
 
+    pub(crate) fn is_private_dep(&self) -> bool {
+        self.private_dep
+    }
+
     pub(crate) fn is_panic_runtime(&self) -> bool {
         self.root.panic_runtime
     }
 
     pub(crate) fn is_profiler_runtime(&self) -> bool {
         self.root.profiler_runtime
+    }
+
+    pub(crate) fn is_compiler_builtins(&self) -> bool {
+        self.root.compiler_builtins
     }
 
     pub(crate) fn needs_allocator(&self) -> bool {
@@ -1946,6 +1999,10 @@ impl CrateMetadata {
 
     pub(crate) fn hash(&self) -> Svh {
         self.root.header.hash
+    }
+
+    pub(crate) fn has_async_drops(&self) -> bool {
+        self.root.tables.adt_async_destructor.len > 0
     }
 
     fn num_def_ids(&self) -> usize {

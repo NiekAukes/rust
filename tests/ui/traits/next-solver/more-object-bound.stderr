@@ -1,4 +1,4 @@
-error[E0271]: type mismatch resolving `<dyn Trait<A = A, B = B> as SuperTrait>::A == B`
+error[E0271]: type mismatch resolving `A == B`
   --> $DIR/more-object-bound.rs:12:5
    |
 LL |     foo::<A, B, dyn Trait<A = A, B = B>>(x)

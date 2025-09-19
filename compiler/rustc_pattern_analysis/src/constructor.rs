@@ -176,20 +176,18 @@
 //! we assume they never cover each other. In order to respect the invariants of
 //! [`SplitConstructorSet`], we give each `Opaque` constructor a unique id so we can recognize it.
 
-use std::cmp::{self, max, min, Ordering};
+use std::cmp::{self, Ordering, max, min};
 use std::fmt;
 use std::iter::once;
 
-use smallvec::SmallVec;
-
-use rustc_apfloat::ieee::{DoubleS, IeeeFloat, SingleS};
-use rustc_index::bit_set::{BitSet, GrowableBitSet};
+use rustc_apfloat::ieee::{DoubleS, HalfS, IeeeFloat, QuadS, SingleS};
 use rustc_index::IndexVec;
+use rustc_index::bit_set::{DenseBitSet, GrowableBitSet};
+use smallvec::SmallVec;
 
 use self::Constructor::*;
 use self::MaybeInfiniteInt::*;
 use self::SliceKind::*;
-
 use crate::PatCx;
 
 /// Whether we have seen a constructor in the column or not.
@@ -290,7 +288,7 @@ impl IntRange {
     /// Best effort; will not know that e.g. `255u8..` is a singleton.
     pub fn is_singleton(&self) -> bool {
         // Since `lo` and `hi` can't be the same `Infinity` and `plus_one` never changes from finite
-        // to infinite, this correctly only detects ranges that contain exacly one `Finite(x)`.
+        // to infinite, this correctly only detects ranges that contain exactly one `Finite(x)`.
         self.lo.plus_one() == Some(self.hi)
     }
 
@@ -692,10 +690,16 @@ pub enum Constructor<Cx: PatCx> {
     /// Ranges of integer literal values (`2`, `2..=5` or `2..5`).
     IntRange(IntRange),
     /// Ranges of floating-point literal values (`2.0..=5.2`).
+    F16Range(IeeeFloat<HalfS>, IeeeFloat<HalfS>, RangeEnd),
     F32Range(IeeeFloat<SingleS>, IeeeFloat<SingleS>, RangeEnd),
     F64Range(IeeeFloat<DoubleS>, IeeeFloat<DoubleS>, RangeEnd),
+    F128Range(IeeeFloat<QuadS>, IeeeFloat<QuadS>, RangeEnd),
     /// String literals. Strings are not quite the same as `&[u8]` so we treat them separately.
     Str(Cx::StrLit),
+    /// Deref patterns (enabled by the `deref_patterns` feature) provide a way of matching on a
+    /// smart pointer ADT through its pointee. They don't directly correspond to ADT constructors,
+    /// and currently are not supported alongside them. Carries the type of the pointee.
+    DerefPattern(Cx::Ty),
     /// Constants that must not be matched structurally. They are treated as black boxes for the
     /// purposes of exhaustiveness: we must not inspect them, and they don't count towards making a
     /// match exhaustive.
@@ -735,9 +739,12 @@ impl<Cx: PatCx> Clone for Constructor<Cx> {
             Constructor::UnionField => Constructor::UnionField,
             Constructor::Bool(b) => Constructor::Bool(*b),
             Constructor::IntRange(range) => Constructor::IntRange(*range),
-            Constructor::F32Range(lo, hi, end) => Constructor::F32Range(lo.clone(), *hi, *end),
-            Constructor::F64Range(lo, hi, end) => Constructor::F64Range(lo.clone(), *hi, *end),
+            Constructor::F16Range(lo, hi, end) => Constructor::F16Range(*lo, *hi, *end),
+            Constructor::F32Range(lo, hi, end) => Constructor::F32Range(*lo, *hi, *end),
+            Constructor::F64Range(lo, hi, end) => Constructor::F64Range(*lo, *hi, *end),
+            Constructor::F128Range(lo, hi, end) => Constructor::F128Range(*lo, *hi, *end),
             Constructor::Str(value) => Constructor::Str(value.clone()),
+            Constructor::DerefPattern(ty) => Constructor::DerefPattern(ty.clone()),
             Constructor::Opaque(inner) => Constructor::Opaque(inner.clone()),
             Constructor::Or => Constructor::Or,
             Constructor::Never => Constructor::Never,
@@ -812,6 +819,14 @@ impl<Cx: PatCx> Constructor<Cx> {
             (Bool(self_b), Bool(other_b)) => self_b == other_b,
 
             (IntRange(self_range), IntRange(other_range)) => self_range.is_subrange(other_range),
+            (F16Range(self_from, self_to, self_end), F16Range(other_from, other_to, other_end)) => {
+                self_from.ge(other_from)
+                    && match self_to.partial_cmp(other_to) {
+                        Some(Ordering::Less) => true,
+                        Some(Ordering::Equal) => other_end == self_end,
+                        _ => false,
+                    }
+            }
             (F32Range(self_from, self_to, self_end), F32Range(other_from, other_to, other_end)) => {
                 self_from.ge(other_from)
                     && match self_to.partial_cmp(other_to) {
@@ -828,12 +843,27 @@ impl<Cx: PatCx> Constructor<Cx> {
                         _ => false,
                     }
             }
+            (
+                F128Range(self_from, self_to, self_end),
+                F128Range(other_from, other_to, other_end),
+            ) => {
+                self_from.ge(other_from)
+                    && match self_to.partial_cmp(other_to) {
+                        Some(Ordering::Less) => true,
+                        Some(Ordering::Equal) => other_end == self_end,
+                        _ => false,
+                    }
+            }
             (Str(self_val), Str(other_val)) => {
                 // FIXME Once valtrees are available we can directly use the bytes
                 // in the `Str` variant of the valtree for the comparison here.
                 self_val == other_val
             }
             (Slice(self_slice), Slice(other_slice)) => self_slice.is_covered_by(*other_slice),
+
+            // Deref patterns only interact with other deref patterns. Prior to usefulness analysis,
+            // we ensure they don't appear alongside any other non-wild non-opaque constructors.
+            (DerefPattern(_), DerefPattern(_)) => true,
 
             // Opaque constructors don't interact with anything unless they come from the
             // syntactically identical pattern.
@@ -881,7 +911,7 @@ impl<Cx: PatCx> Constructor<Cx> {
             // be careful to detect strings here. However a string literal pattern will never
             // be reported as a non-exhaustiveness witness, so we can ignore this issue.
             Ref => {
-                write!(f, "&{:?}", &fields.next().unwrap())?;
+                write!(f, "&{:?}", fields.next().unwrap())?;
             }
             Slice(slice) => {
                 write!(f, "[")?;
@@ -906,9 +936,12 @@ impl<Cx: PatCx> Constructor<Cx> {
             Bool(b) => write!(f, "{b}")?,
             // Best-effort, will render signed ranges incorrectly
             IntRange(range) => write!(f, "{range:?}")?,
+            F16Range(lo, hi, end) => write!(f, "{lo}{end}{hi}")?,
             F32Range(lo, hi, end) => write!(f, "{lo}{end}{hi}")?,
             F64Range(lo, hi, end) => write!(f, "{lo}{end}{hi}")?,
+            F128Range(lo, hi, end) => write!(f, "{lo}{end}{hi}")?,
             Str(value) => write!(f, "{value:?}")?,
+            DerefPattern(_) => write!(f, "deref!({:?})", fields.next().unwrap())?,
             Opaque(..) => write!(f, "<constant pattern>")?,
             Or => {
                 for pat in fields {
@@ -1016,8 +1049,17 @@ impl<Cx: PatCx> ConstructorSet<Cx> {
         let mut missing = Vec::new();
         // Constructors in `ctors`, except wildcards and opaques.
         let mut seen = Vec::new();
+        // If we see a deref pattern, it must be the only non-wildcard non-opaque constructor; we
+        // ensure this prior to analysis.
+        let mut deref_pat_present = false;
         for ctor in ctors.cloned() {
             match ctor {
+                DerefPattern(..) => {
+                    if !deref_pat_present {
+                        deref_pat_present = true;
+                        present.push(ctor);
+                    }
+                }
                 Opaque(..) => present.push(ctor),
                 Wildcard => {} // discard wildcards
                 _ => seen.push(ctor),
@@ -1025,6 +1067,9 @@ impl<Cx: PatCx> ConstructorSet<Cx> {
         }
 
         match self {
+            _ if deref_pat_present => {
+                // Deref patterns are the only constructor; nothing is missing.
+            }
             ConstructorSet::Struct { empty } => {
                 if !seen.is_empty() {
                     present.push(Struct);
@@ -1049,7 +1094,7 @@ impl<Cx: PatCx> ConstructorSet<Cx> {
                 }
             }
             ConstructorSet::Variants { variants, non_exhaustive } => {
-                let mut seen_set = BitSet::new_empty(variants.len());
+                let mut seen_set = DenseBitSet::new_empty(variants.len());
                 for idx in seen.iter().filter_map(|c| c.as_variant()) {
                     seen_set.insert(idx);
                 }

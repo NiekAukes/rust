@@ -1,20 +1,20 @@
-use clippy_config::msrvs::{self, Msrv};
-use clippy_utils::consts::{constant, Constant};
+use clippy_config::Conf;
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::higher::IfLet;
+use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::ty::is_copy;
-use clippy_utils::{is_expn_of, is_lint_allowed, path_to_local};
-use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
+use clippy_utils::{is_expn_of, is_lint_allowed, path_to_local, sym};
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
-use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::HirId;
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::ty;
 use rustc_session::impl_lint_pass;
-use rustc_span::symbol::Ident;
 use rustc_span::Span;
+use rustc_span::symbol::Ident;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -58,10 +58,10 @@ pub struct IndexRefutableSlice {
 }
 
 impl IndexRefutableSlice {
-    pub fn new(max_suggested_slice_pattern_length: u64, msrv: Msrv) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            max_suggested_slice: max_suggested_slice_pattern_length,
-            msrv,
+            max_suggested_slice: conf.max_suggested_slice_pattern_length,
+            msrv: conf.msrv,
         }
     }
 }
@@ -70,22 +70,20 @@ impl_lint_pass!(IndexRefutableSlice => [INDEX_REFUTABLE_SLICE]);
 
 impl<'tcx> LateLintPass<'tcx> for IndexRefutableSlice {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
-        if (!expr.span.from_expansion() || is_expn_of(expr.span, "if_chain").is_some())
-            && let Some(IfLet { let_pat, if_then, .. }) = IfLet::hir(cx, expr)
+        if let Some(IfLet { let_pat, if_then, .. }) = IfLet::hir(cx, expr)
+            && (!expr.span.from_expansion() || is_expn_of(expr.span, sym::if_chain).is_some())
             && !is_lint_allowed(cx, INDEX_REFUTABLE_SLICE, expr.hir_id)
-            && self.msrv.meets(msrvs::SLICE_PATTERNS)
             && let found_slices = find_slice_values(cx, let_pat)
             && !found_slices.is_empty()
             && let filtered_slices = filter_lintable_slices(cx, found_slices, self.max_suggested_slice, if_then)
             && !filtered_slices.is_empty()
+            && self.msrv.meets(cx, msrvs::SLICE_PATTERNS)
         {
             for slice in filtered_slices.values() {
                 lint_slice(cx, slice);
             }
         }
     }
-
-    extract_msrv_attr!(LateContext);
 }
 
 fn find_slice_values(cx: &LateContext<'_>, pat: &hir::Pat<'_>) -> FxIndexMap<HirId, SliceLintInformation> {
@@ -110,11 +108,11 @@ fn find_slice_values(cx: &LateContext<'_>, pat: &hir::Pat<'_>) -> FxIndexMap<Hir
             }
 
             let bound_ty = cx.typeck_results().node_type(pat.hir_id);
-            if let ty::Slice(inner_ty) | ty::Array(inner_ty, _) = bound_ty.peel_refs().kind() {
+            if let Some(inner_ty) = bound_ty.peel_refs().builtin_index() {
                 // The values need to use the `ref` keyword if they can't be copied.
                 // This will need to be adjusted if the lint want to support mutable access in the future
                 let src_is_ref = bound_ty.is_ref() && by_ref == hir::ByRef::No;
-                let needs_ref = !(src_is_ref || is_copy(cx, *inner_ty));
+                let needs_ref = !(src_is_ref || is_copy(cx, inner_ty));
 
                 let slice_info = slices
                     .entry(value_hir_id)
@@ -132,9 +130,9 @@ fn lint_slice(cx: &LateContext<'_>, slice: &SliceLintInformation) {
         .index_use
         .iter()
         .map(|(index, _)| *index)
-        .collect::<FxHashSet<_>>();
+        .collect::<FxIndexSet<_>>();
 
-    let value_name = |index| format!("{}_{index}", slice.ident.name);
+    let value_name = |index| format!("{}_{}", slice.ident.name, index);
 
     if let Some(max_index) = used_indices.iter().max() {
         let opt_ref = if slice.needs_ref { "ref " } else { "" };
@@ -149,6 +147,18 @@ fn lint_slice(cx: &LateContext<'_>, slice: &SliceLintInformation) {
             .collect::<Vec<_>>();
         let pat_sugg = format!("[{}, ..]", pat_sugg_idents.join(", "));
 
+        let mut suggestions = Vec::new();
+
+        // Add the binding pattern suggestion
+        if !slice.pattern_spans.is_empty() {
+            suggestions.extend(slice.pattern_spans.iter().map(|span| (*span, pat_sugg.clone())));
+        }
+
+        // Add the index replacement suggestions
+        if !slice.index_use.is_empty() {
+            suggestions.extend(slice.index_use.iter().map(|(index, span)| (*span, value_name(*index))));
+        }
+
         span_lint_and_then(
             cx,
             INDEX_REFUTABLE_SLICE,
@@ -156,28 +166,10 @@ fn lint_slice(cx: &LateContext<'_>, slice: &SliceLintInformation) {
             "this binding can be a slice pattern to avoid indexing",
             |diag| {
                 diag.multipart_suggestion(
-                    "try using a slice pattern here",
-                    slice
-                        .pattern_spans
-                        .iter()
-                        .map(|span| (*span, pat_sugg.clone()))
-                        .collect(),
+                    "replace the binding and indexed access with a slice pattern",
+                    suggestions,
                     Applicability::MaybeIncorrect,
                 );
-
-                diag.multipart_suggestion(
-                    "and replace the index expressions here",
-                    slice
-                        .index_use
-                        .iter()
-                        .map(|(index, span)| (*span, value_name(*index)))
-                        .collect(),
-                    Applicability::MaybeIncorrect,
-                );
-
-                // The lint message doesn't contain a warning about the removed index expression,
-                // since `filter_lintable_slices` will only return slices where all access indices
-                // are known at compile time. Therefore, they can be removed without side effects.
             },
         );
     }
@@ -225,11 +217,11 @@ struct SliceIndexLintingVisitor<'a, 'tcx> {
     max_suggested_slice: u64,
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for SliceIndexLintingVisitor<'a, 'tcx> {
+impl<'tcx> Visitor<'tcx> for SliceIndexLintingVisitor<'_, 'tcx> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.cx.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.cx.tcx
     }
 
     fn visit_expr(&mut self, expr: &'tcx hir::Expr<'tcx>) {
@@ -245,7 +237,7 @@ impl<'a, 'tcx> Visitor<'tcx> for SliceIndexLintingVisitor<'a, 'tcx> {
                 && let parent_id = cx.tcx.parent_hir_id(expr.hir_id)
                 && let hir::Node::Expr(parent_expr) = cx.tcx.hir_node(parent_id)
                 && let hir::ExprKind::Index(_, index_expr, _) = parent_expr.kind
-                && let Some(Constant::Int(index_value)) = constant(cx, cx.typeck_results(), index_expr)
+                && let Some(Constant::Int(index_value)) = ConstEvalCtxt::new(cx).eval(index_expr)
                 && let Ok(index_value) = index_value.try_into()
                 && index_value < max_suggested_slice
 
@@ -255,7 +247,7 @@ impl<'a, 'tcx> Visitor<'tcx> for SliceIndexLintingVisitor<'a, 'tcx> {
             {
                 use_info
                     .index_use
-                    .push((index_value, cx.tcx.hir().span(parent_expr.hir_id)));
+                    .push((index_value, cx.tcx.hir_span(parent_expr.hir_id)));
                 return;
             }
 

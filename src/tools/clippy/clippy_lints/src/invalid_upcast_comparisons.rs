@@ -7,7 +7,7 @@ use rustc_span::Span;
 
 use clippy_utils::comparisons;
 use clippy_utils::comparisons::Rel;
-use clippy_utils::consts::{constant_full_int, FullInt};
+use clippy_utils::consts::{ConstEvalCtxt, FullInt};
 use clippy_utils::diagnostics::span_lint;
 use clippy_utils::source::snippet;
 
@@ -21,9 +21,6 @@ declare_clippy_lint! {
     /// An expression like `let x : u8 = ...; (x as u32) > 300`
     /// will mistakenly imply that it is possible for `x` to be outside the range of
     /// `u8`.
-    ///
-    /// ### Known problems
-    /// https://github.com/rust-lang/rust-clippy/issues/886
     ///
     /// ### Example
     /// ```no_run
@@ -94,49 +91,49 @@ fn upcast_comparison_bounds_err<'tcx>(
     rhs: &'tcx Expr<'_>,
     invert: bool,
 ) {
-    if let Some((lb, ub)) = lhs_bounds {
-        if let Some(norm_rhs_val) = constant_full_int(cx, cx.typeck_results(), rhs) {
-            if rel == Rel::Eq || rel == Rel::Ne {
-                if norm_rhs_val < lb || norm_rhs_val > ub {
-                    err_upcast_comparison(cx, span, lhs, rel == Rel::Ne);
-                }
-            } else if match rel {
-                Rel::Lt => {
-                    if invert {
-                        norm_rhs_val < lb
-                    } else {
-                        ub < norm_rhs_val
-                    }
-                },
-                Rel::Le => {
-                    if invert {
-                        norm_rhs_val <= lb
-                    } else {
-                        ub <= norm_rhs_val
-                    }
-                },
-                Rel::Eq | Rel::Ne => unreachable!(),
-            } {
-                err_upcast_comparison(cx, span, lhs, true);
-            } else if match rel {
-                Rel::Lt => {
-                    if invert {
-                        norm_rhs_val >= ub
-                    } else {
-                        lb >= norm_rhs_val
-                    }
-                },
-                Rel::Le => {
-                    if invert {
-                        norm_rhs_val > ub
-                    } else {
-                        lb > norm_rhs_val
-                    }
-                },
-                Rel::Eq | Rel::Ne => unreachable!(),
-            } {
-                err_upcast_comparison(cx, span, lhs, false);
+    if let Some((lb, ub)) = lhs_bounds
+        && let Some(norm_rhs_val) = ConstEvalCtxt::new(cx).eval_full_int(rhs)
+    {
+        if rel == Rel::Eq || rel == Rel::Ne {
+            if norm_rhs_val < lb || norm_rhs_val > ub {
+                err_upcast_comparison(cx, span, lhs, rel == Rel::Ne);
             }
+        } else if match rel {
+            Rel::Lt => {
+                if invert {
+                    norm_rhs_val < lb
+                } else {
+                    ub < norm_rhs_val
+                }
+            },
+            Rel::Le => {
+                if invert {
+                    norm_rhs_val <= lb
+                } else {
+                    ub <= norm_rhs_val
+                }
+            },
+            Rel::Eq | Rel::Ne => unreachable!(),
+        } {
+            err_upcast_comparison(cx, span, lhs, true);
+        } else if match rel {
+            Rel::Lt => {
+                if invert {
+                    norm_rhs_val >= ub
+                } else {
+                    lb >= norm_rhs_val
+                }
+            },
+            Rel::Le => {
+                if invert {
+                    norm_rhs_val > ub
+                } else {
+                    lb > norm_rhs_val
+                }
+            },
+            Rel::Eq | Rel::Ne => unreachable!(),
+        } {
+            err_upcast_comparison(cx, span, lhs, false);
         }
     }
 }

@@ -1,7 +1,7 @@
 use ide_db::{famous_defs::FamousDefs, helpers::mod_path_to_ast, traits::resolve_target_trait};
-use syntax::ast::{self, AstNode, HasName};
+use syntax::ast::{self, AstNode, HasGenericArgs, HasName};
 
-use crate::{AssistContext, AssistId, AssistKind, Assists};
+use crate::{AssistContext, AssistId, Assists};
 
 // FIXME: this should be a diagnostic
 
@@ -43,19 +43,18 @@ pub(crate) fn convert_into_to_from(acc: &mut Assists, ctx: &AssistContext<'_>) -
         return None;
     }
 
+    let cfg = ctx.config.import_path_config();
+
     let src_type_path = {
         let src_type_path = src_type.syntax().descendants().find_map(ast::Path::cast)?;
         let src_type_def = match ctx.sema.resolve_path(&src_type_path) {
             Some(hir::PathResolution::Def(module_def)) => module_def,
             _ => return None,
         };
-
-        mod_path_to_ast(&module.find_use_path(
-            ctx.db(),
-            src_type_def,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
-        )?)
+        mod_path_to_ast(
+            &module.find_path(ctx.db(), src_type_def, cfg)?,
+            module.krate().edition(ctx.db()),
+        )
     };
 
     let dest_type = match &ast_trait {
@@ -86,7 +85,7 @@ pub(crate) fn convert_into_to_from(acc: &mut Assists, ctx: &AssistContext<'_>) -
         .filter(|name| name.text() == "self" || name.text() == "Self");
 
     acc.add(
-        AssistId("convert_into_to_from", AssistKind::RefactorRewrite),
+        AssistId::refactor_rewrite("convert_into_to_from"),
         "Convert Into to From",
         impl_.syntax().text_range(),
         |builder| {

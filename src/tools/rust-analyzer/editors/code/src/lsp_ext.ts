@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-empty-object-type */
 /**
  * This file mirrors `crates/rust-analyzer/src/lsp_ext.rs` declarations.
  */
@@ -45,9 +46,11 @@ export const rebuildProcMacros = new lc.RequestType0<null, void>("rust-analyzer/
 export const runFlycheck = new lc.NotificationType<{
     textDocument: lc.TextDocumentIdentifier | null;
 }>("rust-analyzer/runFlycheck");
-export const shuffleCrateGraph = new lc.RequestType0<null, void>("rust-analyzer/shuffleCrateGraph");
 export const syntaxTree = new lc.RequestType<SyntaxTreeParams, string, void>(
     "rust-analyzer/syntaxTree",
+);
+export const viewSyntaxTree = new lc.RequestType<ViewSyntaxTreeParams, string, void>(
+    "rust-analyzer/viewSyntaxTree",
 );
 export const viewCrateGraph = new lc.RequestType<ViewCrateGraphParams, string, void>(
     "rust-analyzer/viewCrateGraph",
@@ -158,6 +161,7 @@ export type SyntaxTreeParams = {
     textDocument: lc.TextDocumentIdentifier;
     range: lc.Range | null;
 };
+export type ViewSyntaxTreeParams = { textDocument: lc.TextDocumentIdentifier };
 export type ViewCrateGraphParams = { full: boolean };
 export type ViewItemTreeParams = { textDocument: lc.TextDocumentIdentifier };
 
@@ -190,6 +194,11 @@ export const parentModule = new lc.RequestType<
     lc.LocationLink[] | null,
     void
 >("experimental/parentModule");
+export const childModules = new lc.RequestType<
+    lc.TextDocumentPositionParams,
+    lc.LocationLink[] | null,
+    void
+>("experimental/childModules");
 export const runnables = new lc.RequestType<RunnablesParams, Runnable[], void>(
     "experimental/runnables",
 );
@@ -223,16 +232,56 @@ export type OpenCargoTomlParams = {
 export type Runnable = {
     label: string;
     location?: lc.LocationLink;
+} & (RunnableCargo | RunnableShell);
+
+type RunnableCargo = {
     kind: "cargo";
-    args: {
-        workspaceRoot?: string;
-        cargoArgs: string[];
-        cargoExtraArgs: string[];
-        executableArgs: string[];
-        expectTest?: boolean;
-        overrideCargo?: string;
-    };
+    args: CargoRunnableArgs;
 };
+
+type RunnableShell = {
+    kind: "shell";
+    args: ShellRunnableArgs;
+};
+
+export type CommonRunnableArgs = {
+    /**
+     * Environment variables to set before running the command.
+     */
+    environment?: Record<string, string>;
+    /**
+     * The working directory to run the command in.
+     */
+    cwd: string;
+};
+
+export type ShellRunnableArgs = {
+    kind: string;
+    program: string;
+    args: string[];
+} & CommonRunnableArgs;
+
+export type CargoRunnableArgs = {
+    /**
+     * The workspace root directory of the cargo project.
+     */
+    workspaceRoot?: string;
+    /**
+     * Arguments to pass to the executable, these will be passed to the command after a `--` argument.
+     */
+    executableArgs: string[];
+    /**
+     * Arguments to pass to cargo.
+     */
+    cargoArgs: string[];
+    /**
+     * Command to execute instead of `cargo`.
+     */
+    // This is supplied by the user via config. We could pull this through the client config in the
+    // extension directly, but that would prevent us from honoring the rust-analyzer.toml for it.
+    overrideCargo?: string;
+} & CommonRunnableArgs;
+
 export type RunnablesParams = {
     textDocument: lc.TextDocumentIdentifier;
     position: lc.Position | null;
@@ -263,9 +312,3 @@ export type RecursiveMemoryLayoutNode = {
 export type RecursiveMemoryLayout = {
     nodes: RecursiveMemoryLayoutNode[];
 };
-
-export const unindexedProject = new lc.NotificationType<UnindexedProjectParams>(
-    "rust-analyzer/unindexedProject",
-);
-
-export type UnindexedProjectParams = { textDocuments: lc.TextDocumentIdentifier[] };

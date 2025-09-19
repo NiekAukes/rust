@@ -1,6 +1,6 @@
 #![crate_type = "lib"]
 
-//@ compile-flags: -O
+//@ compile-flags: -Copt-level=3
 
 use std::slice::Windows;
 
@@ -12,10 +12,7 @@ pub fn naive_string_search(haystack: &str, needle: &str) -> Option<usize> {
     }
     // CHECK-NOT: panic
     // CHECK-NOT: fail
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .position(|sub| sub == needle.as_bytes())
+    haystack.as_bytes().windows(needle.len()).position(|sub| sub == needle.as_bytes())
 }
 
 // CHECK-LABEL: @next

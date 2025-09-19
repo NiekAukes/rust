@@ -1,10 +1,8 @@
-error[E0080]: evaluation of `foo::<i32>::{constant#0}` failed
+error[E0080]: evaluation panicked: explicit panic
   --> $DIR/required-const.rs:6:17
    |
 LL |         const { panic!() }
-   |                 ^^^^^^^^ the evaluated program panicked at 'explicit panic', $DIR/required-const.rs:6:17
-   |
-   = note: this error originates in the macro `$crate::panic::panic_2015` which comes from the expansion of the macro `panic` (in Nightly builds, run with -Z macro-backtrace for more info)
+   |                 ^^^^^^^^ evaluation of `foo::<i32>::{constant#0}` failed here
 
 note: erroneous constant encountered
   --> $DIR/required-const.rs:6:9

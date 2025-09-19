@@ -8,6 +8,11 @@ use std::marker::PhantomData;
 
 type WithEmplacableForFn<'a> = impl EmplacableFn + 'a;
 
+#[define_opaque(WithEmplacableForFn)]
+fn _constrain(_: &mut ()) -> WithEmplacableForFn<'_> {
+    ()
+}
+
 fn with_emplacable_for<'a, F, R>(mut f: F) -> R
 where
     F: for<'b> FnMut(Emplacable<WithEmplacableForFn<'b>>) -> R,
@@ -16,9 +21,6 @@ where
         _: &'a (),
         _: &mut dyn FnMut(Emplacable<WithEmplacableForFn<'a>>) -> R,
     ) -> R {
-        fn _constrain(_: &mut ()) -> WithEmplacableForFn<'_> {
-            ()
-        }
         loop {}
     }
 

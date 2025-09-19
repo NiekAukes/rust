@@ -1,15 +1,17 @@
+use std::ops::Not;
+
 use hir::{
+    ClosureStyle, HirDisplay, ImportPathConfig,
     db::ExpandDatabase,
-    term_search::{term_search, TermSearchCtx},
-    ClosureStyle, HirDisplay,
+    term_search::{TermSearchConfig, TermSearchCtx, term_search},
 };
+use ide_db::text_edit::TextEdit;
 use ide_db::{
-    assists::{Assist, AssistId, AssistKind, GroupLabel},
+    assists::{Assist, AssistId, GroupLabel},
     label::Label,
     source_change::SourceChange,
 };
 use itertools::Itertools;
-use text_edit::TextEdit;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
@@ -26,13 +28,16 @@ pub(crate) fn typed_hole(ctx: &DiagnosticsContext<'_>, d: &hir::TypedHole) -> Di
         (
             format!(
                 "invalid `_` expression, expected type `{}`",
-                d.expected.display(ctx.sema.db).with_closure_style(ClosureStyle::ClosureWithId),
+                d.expected
+                    .display(ctx.sema.db, ctx.display_target)
+                    .with_closure_style(ClosureStyle::ClosureWithId),
             ),
             fixes(ctx, d),
         )
     };
 
     Diagnostic::new(DiagnosticCode::RustcHardError("typed-hole"), message, display_range)
+        .stable()
         .with_fixes(fixes)
 }
 
@@ -47,49 +52,57 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::TypedHole) -> Option<Vec<Assist>
         sema: &ctx.sema,
         scope: &scope,
         goal: d.expected.clone(),
-        config: Default::default(),
+        config: TermSearchConfig {
+            fuel: ctx.config.term_search_fuel,
+            enable_borrowcheck: ctx.config.term_search_borrowck,
+
+            ..Default::default()
+        },
     };
     let paths = term_search(&term_search_ctx);
 
     let mut formatter = |_: &hir::Type| String::from("_");
 
-    let assists: Vec<Assist> = paths
+    let assists: Vec<Assist> = d
+        .expected
+        .is_unknown()
+        .not()
+        .then(|| "todo!()".to_owned())
         .into_iter()
-        .filter_map(|path| {
+        .chain(paths.into_iter().filter_map(|path| {
             path.gen_source_code(
                 &scope,
                 &mut formatter,
-                ctx.config.prefer_no_std,
-                ctx.config.prefer_prelude,
+                ImportPathConfig {
+                    prefer_no_std: ctx.config.prefer_no_std,
+                    prefer_prelude: ctx.config.prefer_prelude,
+                    prefer_absolute: ctx.config.prefer_absolute,
+                    allow_unstable: ctx.is_nightly,
+                },
+                ctx.display_target,
             )
             .ok()
-        })
+        }))
         .unique()
         .map(|code| Assist {
-            id: AssistId("typed-hole", AssistKind::QuickFix),
-            label: Label::new(format!("Replace `_` with `{}`", &code)),
+            id: AssistId::quick_fix("typed-hole"),
+            label: Label::new(format!("Replace `_` with `{code}`")),
             group: Some(GroupLabel("Replace `_` with a term".to_owned())),
             target: original_range.range,
             source_change: Some(SourceChange::from_text_edit(
-                original_range.file_id,
+                original_range.file_id.file_id(ctx.sema.db),
                 TextEdit::replace(original_range.range, code),
             )),
-            trigger_signature_help: false,
+            command: None,
         })
         .collect();
 
-    if !assists.is_empty() {
-        Some(assists)
-    } else {
-        None
-    }
+    if !assists.is_empty() { Some(assists) } else { None }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tests::{
-        check_diagnostics, check_fixes_unordered, check_has_fix, check_has_single_fix,
-    };
+    use crate::tests::{check_diagnostics, check_fixes_unordered, check_has_fix};
 
     #[test]
     fn unknown() {
@@ -111,9 +124,9 @@ fn main() {
     if _ {}
      //^ 💡 error: invalid `_` expression, expected type `bool`
     let _: fn() -> i32 = _;
-                       //^ error: invalid `_` expression, expected type `fn() -> i32`
+                       //^ 💡 error: invalid `_` expression, expected type `fn() -> i32`
     let _: fn() -> () = _; // FIXME: This should trigger an assist because `main` matches via *coercion*
-                      //^ error: invalid `_` expression, expected type `fn()`
+                      //^ 💡 error: invalid `_` expression, expected type `fn()`
 }
 "#,
         );
@@ -139,7 +152,7 @@ fn main() {
 fn main() {
     let mut x = t();
     x = _;
-      //^ error: invalid `_` expression, expected type `&str`
+      //^ 💡 error: invalid `_` expression, expected type `&'static str`
     x = "";
 }
 fn t<T>() -> T { loop {} }
@@ -300,7 +313,7 @@ fn main() {
 
     #[test]
     fn ignore_impl_func_with_incorrect_return() {
-        check_has_single_fix(
+        check_fixes_unordered(
             r#"
 struct Bar {}
 trait Foo {
@@ -315,7 +328,8 @@ fn main() {
     let a: i32 = 1;
     let c: Bar = _$0;
 }"#,
-            r#"
+            vec![
+                r#"
 struct Bar {}
 trait Foo {
     type Res;
@@ -329,6 +343,21 @@ fn main() {
     let a: i32 = 1;
     let c: Bar = Bar {  };
 }"#,
+                r#"
+struct Bar {}
+trait Foo {
+    type Res;
+    fn foo(&self) -> Self::Res;
+}
+impl Foo for i32 {
+    type Res = Self;
+    fn foo(&self) -> Self::Res { 1 }
+}
+fn main() {
+    let a: i32 = 1;
+    let c: Bar = todo!();
+}"#,
+            ],
         );
     }
 
@@ -368,6 +397,7 @@ fn main() {
         );
     }
 
+    // FIXME
     #[test]
     fn local_shadow_fn() {
         check_fixes_unordered(
@@ -385,9 +415,31 @@ fn f() {
                 r#"
 fn f() {
     let f: i32 = 0;
-    crate::f()
+    f()
 }"#,
             ],
+        );
+    }
+
+    #[test]
+    fn underscore_in_asm() {
+        check_diagnostics(
+            r#"
+//- minicore: asm
+fn rdtscp() -> u64 {
+    let hi: u64;
+    let lo: u64;
+    unsafe {
+        core::arch::asm!(
+            "rdtscp",
+            out("rdx") hi,
+            out("rax") lo,
+            out("rcx") _,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (hi << 32) | lo
+}"#,
         );
     }
 }

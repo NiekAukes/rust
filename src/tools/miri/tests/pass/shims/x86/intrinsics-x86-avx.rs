@@ -1,12 +1,5 @@
-// Ignore everything except x86 and x86_64
-// Any new targets that are added to CI should be ignored here.
-// (We cannot use `cfg`-based tricks here since the `target-feature` flags below only work on x86.)
-//@ignore-target-aarch64
-//@ignore-target-arm
-//@ignore-target-avr
-//@ignore-target-s390x
-//@ignore-target-thumbv7em
-//@ignore-target-wasm32
+// We're testing x86 target specific features
+//@only-target: x86_64 i686
 //@compile-flags: -C target-feature=+avx
 
 #[cfg(target_arch = "x86")]
@@ -1342,6 +1335,11 @@ unsafe fn test_avx() {
         assert_eq!(r, 1);
     }
     test_mm_testnzc_ps();
+
+    // These intrinsics are functionally no-ops. The only thing
+    // that needs to be tested is that they can be executed.
+    _mm256_zeroupper();
+    _mm256_zeroall();
 }
 
 #[target_feature(enable = "sse2")]

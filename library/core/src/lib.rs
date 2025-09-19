@@ -34,30 +34,15 @@
 //!   Rust user code is to call the functions provided by this library instead (such as
 //!   `ptr::copy`).
 //!
-//! * `rust_begin_panic` - This function takes four arguments, a
-//!   `fmt::Arguments`, a `&'static str`, and two `u32`'s. These four arguments
-//!   dictate the panic message, the file at which panic was invoked, and the
-//!   line and column inside the file. It is up to consumers of this core
+//! * Panic handler - This function takes one argument, a `&panic::PanicInfo`. It is up to consumers of this core
 //!   library to define this panic function; it is only required to never
-//!   return. This requires a `lang` attribute named `panic_impl`.
+//!   return. You should mark your implementation using `#[panic_handler]`.
 //!
 //! * `rust_eh_personality` - is used by the failure mechanisms of the
 //!    compiler. This is often mapped to GCC's personality function, but crates
 //!    which do not trigger a panic can be assured that this function is never
 //!    called. The `lang` attribute is called `eh_personality`.
 
-// Since core defines many fundamental lang items, all tests live in a
-// separate crate, libcoretest (library/core/tests), to avoid bizarre issues.
-//
-// Here we explicitly #[cfg]-out this whole crate when testing. If we don't do
-// this, both the generated test artifact and the linked libtest (which
-// transitively includes core) will both define the same set of lang items,
-// and this will cause the E0152 "found duplicate lang item" error. See
-// discussion in #50466 for details.
-//
-// This cfg won't affect doc tests.
-#![cfg(not(test))]
-//
 #![stable(feature = "core", since = "1.6.0")]
 #![doc(
     html_playground_url = "https://play.rust-lang.org/",
@@ -67,7 +52,6 @@
 )]
 #![doc(rust_logo)]
 #![doc(cfg_hide(
-    not(test),
     no_fp_fmt_parse,
     target_pointer_width = "16",
     target_pointer_width = "32",
@@ -104,96 +88,46 @@
 #![warn(multiple_supertrait_upcastable)]
 #![allow(internal_features)]
 #![deny(ffi_unwind_calls)]
+#![warn(unreachable_pub)]
 // Do not check link redundancy on bootstraping phase
 #![allow(rustdoc::redundant_explicit_links)]
+#![warn(rustdoc::unescaped_backticks)]
 //
 // Library features:
 // tidy-alphabetical-start
 #![feature(array_ptr_get)]
 #![feature(asm_experimental_arch)]
-#![feature(char_indices_offset)]
-#![feature(const_align_of_val)]
-#![feature(const_align_of_val_raw)]
-#![feature(const_align_offset)]
-#![feature(const_alloc_layout)]
-#![feature(const_arguments_as_str)]
-#![feature(const_array_from_ref)]
-#![feature(const_array_into_iter_constructors)]
-#![feature(const_bigint_helper_methods)]
-#![feature(const_black_box)]
-#![feature(const_cell_into_inner)]
-#![feature(const_char_from_u32_unchecked)]
+#![feature(bigint_helper_methods)]
+#![feature(bstr)]
+#![feature(bstr_internals)]
+#![feature(cfg_select)]
+#![feature(cfg_target_has_reliable_f16_f128)]
+#![feature(const_carrying_mul_add)]
+#![feature(const_destruct)]
 #![feature(const_eval_select)]
-#![feature(const_exact_div)]
-#![feature(const_float_bits_conv)]
-#![feature(const_float_classify)]
-#![feature(const_fmt_arguments_new)]
-#![feature(const_hash)]
-#![feature(const_heap)]
-#![feature(const_hint_assert_unchecked)]
-#![feature(const_index_range_slice_index)]
-#![feature(const_int_from_str)]
-#![feature(const_intrinsic_copy)]
-#![feature(const_intrinsic_forget)]
-#![feature(const_ipv4)]
-#![feature(const_ipv6)]
-#![feature(const_likely)]
-#![feature(const_maybe_uninit_as_mut_ptr)]
-#![feature(const_maybe_uninit_assume_init)]
-#![feature(const_maybe_uninit_uninit_array)]
-#![feature(const_nonnull_new)]
-#![feature(const_num_midpoint)]
-#![feature(const_option)]
-#![feature(const_option_ext)]
-#![feature(const_pin)]
-#![feature(const_pointer_is_aligned)]
-#![feature(const_ptr_as_ref)]
-#![feature(const_ptr_is_null)]
-#![feature(const_ptr_sub_ptr)]
-#![feature(const_ptr_write)]
-#![feature(const_raw_ptr_comparison)]
-#![feature(const_replace)]
-#![feature(const_size_of_val)]
-#![feature(const_size_of_val_raw)]
-#![feature(const_slice_from_raw_parts_mut)]
-#![feature(const_slice_from_ref)]
-#![feature(const_slice_index)]
-#![feature(const_slice_split_at_mut)]
-#![feature(const_str_from_utf8_unchecked_mut)]
-#![feature(const_strict_overflow_ops)]
-#![feature(const_swap)]
-#![feature(const_try)]
-#![feature(const_type_id)]
-#![feature(const_type_name)]
-#![feature(const_typed_swap)]
-#![feature(const_ub_checks)]
-#![feature(const_unicode_case_lookup)]
-#![feature(const_unsafecell_get_mut)]
-#![feature(const_waker)]
+#![feature(core_intrinsics)]
 #![feature(coverage_attribute)]
-#![feature(duration_consts_float)]
+#![feature(disjoint_bitor)]
 #![feature(internal_impls_macro)]
 #![feature(ip)]
-#![feature(ip_bits)]
 #![feature(is_ascii_octdigit)]
-#![feature(isqrt)]
+#![feature(lazy_get)]
 #![feature(link_cfg)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(offset_of_enum)]
-#![feature(offset_of_nested)]
 #![feature(panic_internals)]
 #![feature(ptr_alignment_type)]
 #![feature(ptr_metadata)]
 #![feature(set_ptr_value)]
+#![feature(slice_as_array)]
 #![feature(slice_ptr_get)]
 #![feature(str_internals)]
 #![feature(str_split_inclusive_remainder)]
 #![feature(str_split_remainder)]
-#![feature(strict_provenance)]
 #![feature(ub_checks)]
+#![feature(unchecked_neg)]
 #![feature(unchecked_shifts)]
+#![feature(unsafe_pinned)]
 #![feature(utf16_extra)]
-#![feature(utf16_extra_const)]
 #![feature(variant_count)]
 // tidy-alphabetical-end
 //
@@ -203,46 +137,37 @@
 #![feature(adt_const_params)]
 #![feature(allow_internal_unsafe)]
 #![feature(allow_internal_unstable)]
-#![feature(asm_const)]
 #![feature(auto_traits)]
-#![feature(c_unwind)]
 #![feature(cfg_sanitize)]
 #![feature(cfg_target_has_atomic)]
 #![feature(cfg_target_has_atomic_equal_alignment)]
-#![feature(const_closures)]
-#![feature(const_fn_floating_point_arithmetic)]
-#![feature(const_for)]
-#![feature(const_mut_refs)]
+#![feature(cfg_ub_checks)]
 #![feature(const_precise_live_drops)]
-#![feature(const_refs_to_cell)]
 #![feature(const_trait_impl)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
 #![feature(doc_cfg)]
 #![feature(doc_cfg_hide)]
 #![feature(doc_notable_trait)]
-#![feature(effects)]
 #![feature(extern_types)]
 #![feature(f128)]
 #![feature(f16)]
 #![feature(freeze_impls)]
 #![feature(fundamental)]
-#![feature(generic_arg_infer)]
 #![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
-#![feature(let_chains)]
 #![feature(link_llvm_intrinsics)]
 #![feature(macro_metavar_expr)]
-#![feature(min_exhaustive_patterns)]
+#![feature(marker_trait_attr)]
 #![feature(min_specialization)]
 #![feature(multiple_supertrait_upcastable)]
 #![feature(must_not_suspend)]
 #![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(no_core)]
-#![feature(no_sanitize)]
+#![feature(optimize_attribute)]
 #![feature(prelude_import)]
 #![feature(repr_simd)]
 #![feature(rustc_allow_const_fn_unstable)]
@@ -251,7 +176,7 @@
 #![feature(simd_ffi)]
 #![feature(staged_api)]
 #![feature(stmt_expr_attributes)]
-#![feature(target_feature_11)]
+#![feature(strict_provenance_lints)]
 #![feature(trait_alias)]
 #![feature(transparent_unions)]
 #![feature(try_blocks)]
@@ -262,17 +187,19 @@
 //
 // Target features:
 // tidy-alphabetical-start
+#![feature(aarch64_unstable_target_feature)]
 #![feature(arm_target_feature)]
-#![feature(avx512_target_feature)]
 #![feature(hexagon_target_feature)]
 #![feature(loongarch_target_feature)]
 #![feature(mips_target_feature)]
 #![feature(powerpc_target_feature)]
 #![feature(riscv_target_feature)]
 #![feature(rtm_target_feature)]
+#![feature(s390x_target_feature)]
 #![feature(sse4a_target_feature)]
 #![feature(tbm_target_feature)]
 #![feature(wasm_target_feature)]
+#![feature(x86_amx_intrinsics)]
 // tidy-alphabetical-end
 
 // allow using `core::` in intra-doc links
@@ -281,15 +208,11 @@ extern crate self as core;
 
 #[prelude_import]
 #[allow(unused)]
-use prelude::rust_2021::*;
+use prelude::rust_2024::*;
 
-#[cfg(not(test))] // See #65860
 #[macro_use]
 mod macros;
 
-// We don't export this through #[macro_export] for now, to avoid breakage.
-// See https://github.com/rust-lang/rust/issues/82913
-#[cfg(not(test))]
 #[unstable(feature = "assert_matches", issue = "82775")]
 /// Unstable module containing the unstable `assert_matches` macro.
 pub mod assert_matches {
@@ -297,8 +220,19 @@ pub mod assert_matches {
     pub use crate::macros::{assert_matches, debug_assert_matches};
 }
 
-#[unstable(feature = "cfg_match", issue = "115585")]
-pub use crate::macros::cfg_match;
+// We don't export this through #[macro_export] for now, to avoid breakage.
+#[unstable(feature = "autodiff", issue = "124509")]
+/// Unstable module containing the unstable `autodiff` macro.
+pub mod autodiff {
+    #[unstable(feature = "autodiff", issue = "124509")]
+    pub use crate::macros::builtin::{autodiff_forward, autodiff_reverse};
+}
+
+#[unstable(feature = "contracts", issue = "128044")]
+pub mod contracts;
+
+#[unstable(feature = "cfg_select", issue = "115585")]
+pub use crate::macros::cfg_select;
 
 #[macro_use]
 mod internal_macros;
@@ -389,6 +323,8 @@ pub mod ascii;
 pub mod asserting;
 #[unstable(feature = "async_iterator", issue = "79024")]
 pub mod async_iter;
+#[unstable(feature = "bstr", issue = "134915")]
+pub mod bstr;
 pub mod cell;
 pub mod char;
 pub mod ffi;
@@ -399,11 +335,17 @@ pub mod net;
 pub mod option;
 pub mod panic;
 pub mod panicking;
-#[unstable(feature = "core_pattern_types", issue = "none")]
+#[unstable(feature = "pattern_type_macro", issue = "123646")]
 pub mod pat;
 pub mod pin;
+#[unstable(feature = "random", issue = "130703")]
+pub mod random;
+#[unstable(feature = "new_range_api", issue = "125687")]
+pub mod range;
 pub mod result;
 pub mod sync;
+#[unstable(feature = "unsafe_binders", issue = "130516")]
+pub mod unsafe_binder;
 
 pub mod fmt;
 pub mod hash;
@@ -444,7 +386,8 @@ pub mod primitive;
     unused_imports,
     unsafe_op_in_unsafe_fn,
     ambiguous_glob_reexports,
-    deprecated_in_future
+    deprecated_in_future,
+    unreachable_pub
 )]
 #[allow(rustdoc::bare_urls)]
 mod core_arch;

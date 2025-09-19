@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::process::{Command, Stdio};
+
+use camino::{Utf8Path, Utf8PathBuf};
+
 use crate::environment::Environment;
 use crate::metrics::{load_metrics, record_metrics};
 use crate::timer::TimerSection;
 use crate::training::{BoltProfile, LlvmPGOProfile, RustcPGOProfile};
-use camino::{Utf8Path, Utf8PathBuf};
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::process::{Command, Stdio};
 
 #[derive(Default)]
 pub struct CmdBuilder {
@@ -103,21 +105,24 @@ impl Bootstrap {
             env.checkout_path().join("x.py").as_str(),
             "build",
             "--target",
-            &env.host_triple(),
+            &env.host_tuple(),
             "--host",
-            &env.host_triple(),
+            &env.host_tuple(),
             "--stage",
             "2",
             "library/std",
         ])
         .env("RUST_BACKTRACE", "full");
+        let cmd = add_shared_x_flags(env, cmd);
+
         Self { cmd, metrics_path }
     }
 
     pub fn dist(env: &Environment, dist_args: &[String]) -> Self {
         let metrics_path = env.build_root().join("build").join("metrics.json");
-        let cmd = cmd(&dist_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>())
-            .env("RUST_BACKTRACE", "full");
+        let args = dist_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
+        let cmd = cmd(&args).env("RUST_BACKTRACE", "full");
+        let cmd = add_shared_x_flags(env, cmd);
         Self { cmd, metrics_path }
     }
 
@@ -181,4 +186,8 @@ impl Bootstrap {
         record_metrics(&metrics, timer);
         Ok(())
     }
+}
+
+fn add_shared_x_flags(env: &Environment, cmd: CmdBuilder) -> CmdBuilder {
+    if env.is_fast_try_build() { cmd.arg("--set").arg("rust.deny-warnings=false") } else { cmd }
 }

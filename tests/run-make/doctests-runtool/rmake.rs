@@ -1,17 +1,19 @@
-// Tests behavior of rustdoc `--runtool`.
+//@ ignore-cross-compile (needs to run host tool binary)
 
-use run_make_support::{rustc, rustdoc, tmp_dir};
-use std::env::current_dir;
-use std::fs::{create_dir, remove_dir_all};
+// Tests behavior of rustdoc `--test-runtool`.
+
 use std::path::PathBuf;
 
+use run_make_support::rfs::{create_dir, remove_dir_all};
+use run_make_support::{rustc, rustdoc};
+
 fn mkdir(name: &str) -> PathBuf {
-    let dir = tmp_dir().join(name);
-    create_dir(&dir).expect("failed to create doctests folder");
+    let dir = PathBuf::from(name);
+    create_dir(&dir);
     dir
 }
 
-// Behavior with --runtool with relative paths and --test-run-directory.
+// Behavior with --test-runtool with relative paths and --test-run-directory.
 fn main() {
     let run_dir_name = "rundir";
     let run_dir = mkdir(run_dir_name);
@@ -22,16 +24,14 @@ fn main() {
     rustc().input("runtool.rs").output(&run_tool_binary).run();
 
     rustdoc()
-        .input(current_dir().unwrap().join("t.rs"))
+        .input("t.rs")
         .arg("-Zunstable-options")
         .arg("--test")
         .arg("--test-run-directory")
         .arg(run_dir_name)
-        .arg("--runtool")
+        .arg("--test-runtool")
         .arg(&run_tool_binary)
-        .arg("--extern")
-        .arg("t=libt.rlib")
-        .current_dir(tmp_dir())
+        .extern_("t", "libt.rlib")
         .run();
 
     remove_dir_all(run_dir);

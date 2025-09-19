@@ -1,33 +1,31 @@
-use crate::util;
-
-use rustc_ast::token;
-use rustc_ast::{LitKind, MetaItemKind};
-use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_data_structures::defer;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::jobserver;
-use rustc_data_structures::stable_hasher::StableHasher;
-use rustc_data_structures::sync::Lrc;
-use rustc_errors::registry::Registry;
-use rustc_errors::{DiagCtxt, ErrorGuaranteed};
-use rustc_lint::LintStore;
-
-use rustc_middle::ty;
-use rustc_middle::ty::CurrentGcx;
-use rustc_middle::util::Providers;
-use rustc_parse::maybe_new_parser_from_source_str;
-use rustc_query_impl::QueryCtxt;
-use rustc_query_system::query::print_query_stack;
-use rustc_session::config::{self, Cfg, CheckCfg, ExpectedValues, Input, OutFileName};
-use rustc_session::filesearch::{self, sysroot_candidates};
-use rustc_session::parse::ParseSess;
-use rustc_session::{lint, CompilerIO, EarlyDiagCtxt, Session};
-use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMapInputs};
-use rustc_span::symbol::sym;
-use rustc_span::FileName;
 use std::path::PathBuf;
 use std::result;
 use std::sync::Arc;
+
+use rustc_ast::{LitKind, MetaItemKind, token};
+use rustc_codegen_ssa::traits::CodegenBackend;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::jobserver::{self, Proxy};
+use rustc_data_structures::stable_hasher::StableHasher;
+use rustc_errors::registry::Registry;
+use rustc_errors::{DiagCtxtHandle, ErrorGuaranteed};
+use rustc_lint::LintStore;
+use rustc_middle::ty;
+use rustc_middle::ty::CurrentGcx;
+use rustc_middle::util::Providers;
+use rustc_parse::new_parser_from_source_str;
+use rustc_parse::parser::attr::AllowLeadingUnsafe;
+use rustc_query_impl::QueryCtxt;
+use rustc_query_system::query::print_query_stack;
+use rustc_session::config::{self, Cfg, CheckCfg, ExpectedValues, Input, OutFileName};
+use rustc_session::filesearch::sysroot_with_fallback;
+use rustc_session::parse::ParseSess;
+use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, lint};
+use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMapInputs};
+use rustc_span::{FileName, sym};
+use tracing::trace;
+
+use crate::util;
 
 pub type Result<T> = result::Result<T, ErrorGuaranteed>;
 
@@ -42,17 +40,21 @@ pub struct Compiler {
     pub sess: Session,
     pub codegen_backend: Box<dyn CodegenBackend>,
     pub(crate) override_queries: Option<fn(&Session, &mut Providers)>,
+
+    /// A reference to the current `GlobalCtxt` which we pass on to `GlobalCtxt`.
     pub(crate) current_gcx: CurrentGcx,
+
+    /// A jobserver reference which we pass on to `GlobalCtxt`.
+    pub(crate) jobserver_proxy: Arc<Proxy>,
 }
 
 /// Converts strings provided as `--cfg [cfgspec]` into a `Cfg`.
-pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
+pub(crate) fn parse_cfg(dcx: DiagCtxtHandle<'_>, cfgs: Vec<String>) -> Cfg {
     cfgs.into_iter()
         .map(|s| {
-            let psess = ParseSess::with_silent_emitter(
+            let psess = ParseSess::with_fatal_emitter(
                 vec![crate::DEFAULT_LOCALE_RESOURCE, rustc_parse::DEFAULT_LOCALE_RESOURCE],
                 format!("this error occurred on the command line: `--cfg={s}`"),
-                true,
             );
             let filename = FileName::cfg_spec_source_code(&s);
 
@@ -67,8 +69,8 @@ pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
                 };
             }
 
-            match maybe_new_parser_from_source_str(&psess, filename, s.to_string()) {
-                Ok(mut parser) => match parser.parse_meta_item() {
+            match new_parser_from_source_str(&psess, filename, s.to_string()) {
+                Ok(mut parser) => match parser.parse_meta_item(AllowLeadingUnsafe::No) {
                     Ok(meta_item) if parser.token == token::Eof => {
                         if meta_item.path.segments.len() != 1 {
                             error!("argument key must be an identifier");
@@ -105,7 +107,7 @@ pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
 }
 
 /// Converts strings provided as `--check-cfg [specs]` into a `CheckCfg`.
-pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
+pub(crate) fn parse_check_cfg(dcx: DiagCtxtHandle<'_>, specs: Vec<String>) -> CheckCfg {
     // If any --check-cfg is passed then exhaustive_values and exhaustive_names
     // are enabled by default.
     let exhaustive_names = !specs.is_empty();
@@ -113,10 +115,9 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
     let mut check_cfg = CheckCfg { exhaustive_names, exhaustive_values, ..CheckCfg::default() };
 
     for s in specs {
-        let psess = ParseSess::with_silent_emitter(
+        let psess = ParseSess::with_fatal_emitter(
             vec![crate::DEFAULT_LOCALE_RESOURCE, rustc_parse::DEFAULT_LOCALE_RESOURCE],
             format!("this error occurred on the command line: `--check-cfg={s}`"),
-            true,
         );
         let filename = FileName::cfg_spec_source_code(&s);
 
@@ -166,7 +167,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
             error!("expected `cfg(name, values(\"value1\", \"value2\", ... \"valueN\"))`")
         };
 
-        let mut parser = match maybe_new_parser_from_source_str(&psess, filename, s.to_string()) {
+        let mut parser = match new_parser_from_source_str(&psess, filename, s.to_string()) {
             Ok(parser) => parser,
             Err(errs) => {
                 errs.into_iter().for_each(|err| err.cancel());
@@ -174,7 +175,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
             }
         };
 
-        let meta_item = match parser.parse_meta_item() {
+        let meta_item = match parser.parse_meta_item(AllowLeadingUnsafe::No) {
             Ok(meta_item) if parser.token == token::Eof => meta_item,
             Ok(..) => expected_error(),
             Err(err) => {
@@ -206,6 +207,14 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
                     error!("`cfg()` names cannot be after values");
                 }
                 names.push(ident);
+            } else if let Some(boolean) = arg.boolean_literal() {
+                if values_specified {
+                    error!("`cfg()` names cannot be after values");
+                }
+                names.push(rustc_span::Ident::new(
+                    if boolean { rustc_span::kw::True } else { rustc_span::kw::False },
+                    arg.span(),
+                ));
             } else if arg.has_name(sym::any)
                 && let Some(args) = arg.meta_item_list()
             {
@@ -310,8 +319,15 @@ pub struct Config {
     pub output_dir: Option<PathBuf>,
     pub output_file: Option<OutFileName>,
     pub ice_file: Option<PathBuf>,
+    /// Load files from sources other than the file system.
+    ///
+    /// Has no uses within this repository, but may be used in the future by
+    /// bjorn3 for "hooking rust-analyzer's VFS into rustc at some point for
+    /// running rustc without having to save". (See #102759.)
     pub file_loader: Option<Box<dyn FileLoader + Send + Sync>>,
-    pub locale_resources: &'static [&'static str],
+    /// The list of fluent resources, used for lints declared with
+    /// [`Diagnostic`](rustc_errors::Diagnostic) and [`LintDiagnostic`](rustc_errors::LintDiagnostic).
+    pub locale_resources: Vec<&'static str>,
 
     pub lint_caps: FxHashMap<lint::LintId, lint::Level>,
 
@@ -335,7 +351,16 @@ pub struct Config {
     /// the list of queries.
     pub override_queries: Option<fn(&Session, &mut Providers)>,
 
+    /// An extra set of symbols to add to the symbol interner, the symbol indices
+    /// will start at [`PREDEFINED_SYMBOLS_COUNT`](rustc_span::symbol::PREDEFINED_SYMBOLS_COUNT)
+    pub extra_symbols: Vec<&'static str>,
+
     /// This is a callback from the driver that is called to create a codegen backend.
+    ///
+    /// Has no uses within this repository, but is used by bjorn3 for "the
+    /// hotswapping branch of cg_clif" for "setting the codegen backend from a
+    /// custom driver where the custom codegen backend has arbitrary data."
+    /// (See #102759.)
     pub make_codegen_backend:
         Option<Box<dyn FnOnce(&config::Options) -> Box<dyn CodegenBackend> + Send>>,
 
@@ -345,8 +370,7 @@ pub struct Config {
     /// The inner atomic value is set to true when a feature marked as `internal` is
     /// enabled. Makes it so that "please report a bug" is hidden, as ICEs with
     /// internal features are wontfix, and they are usually the cause of the ICEs.
-    /// None signifies that this is not tracked.
-    pub using_internal_features: Arc<std::sync::atomic::AtomicBool>,
+    pub using_internal_features: &'static std::sync::atomic::AtomicBool,
 
     /// All commandline args used to invoke the compiler, with @file args fully expanded.
     /// This will only be used within debug info, e.g. in the pdb file on windows
@@ -369,7 +393,6 @@ pub(crate) fn initialize_checked_jobserver(early_dcx: &EarlyDiagCtxt) {
 
 // JUSTIFICATION: before session exists, only config
 #[allow(rustc::bad_opt_access)]
-#[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
 pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Send) -> R {
     trace!("run_compiler");
 
@@ -382,17 +405,20 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
 
     crate::callbacks::setup_callbacks();
 
-    let sysroot = filesearch::materialize_sysroot(config.opts.maybe_sysroot.clone());
-    let target = config::build_target_config(&early_dcx, &config.opts, &sysroot);
+    let sysroot = config.opts.sysroot.clone();
+    let target = config::build_target_config(&early_dcx, &config.opts.target_triple, &sysroot);
     let file_loader = config.file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
     let path_mapping = config.opts.file_path_mapping();
     let hash_kind = config.opts.unstable_opts.src_hash_algorithm(&target);
+    let checksum_hash_kind = config.opts.unstable_opts.checksum_hash_algorithm();
 
     util::run_in_thread_pool_with_globals(
+        &early_dcx,
         config.opts.edition,
         config.opts.unstable_opts.threads,
-        SourceMapInputs { file_loader, path_mapping, hash_kind },
-        |current_gcx| {
+        &config.extra_symbols,
+        SourceMapInputs { file_loader, path_mapping, hash_kind, checksum_hash_kind },
+        |current_gcx, jobserver_proxy| {
             // The previous `early_dcx` can't be reused here because it doesn't
             // impl `Send`. Creating a new one is fine.
             let early_dcx = EarlyDiagCtxt::new(config.opts.error_format);
@@ -414,21 +440,23 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
             let temps_dir = config.opts.unstable_opts.temps_dir.as_deref().map(PathBuf::from);
 
             let bundle = match rustc_errors::fluent_bundle(
-                config.opts.maybe_sysroot.clone(),
-                sysroot_candidates().to_vec(),
+                sysroot_with_fallback(&config.opts.sysroot),
                 config.opts.unstable_opts.translate_lang.clone(),
                 config.opts.unstable_opts.translate_additional_ftl.as_deref(),
                 config.opts.unstable_opts.translate_directionality_markers,
             ) {
                 Ok(bundle) => bundle,
-                Err(e) => early_dcx.early_fatal(format!("failed to load fluent bundle: {e}")),
+                Err(e) => {
+                    // We can't translate anything if we failed to load translations
+                    #[allow(rustc::untranslatable_diagnostic)]
+                    early_dcx.early_fatal(format!("failed to load fluent bundle: {e}"))
+                }
             };
 
-            let mut locale_resources = Vec::from(config.locale_resources);
+            let mut locale_resources = config.locale_resources;
             locale_resources.push(codegen_backend.locale_resource());
 
             let mut sess = rustc_session::build_session(
-                early_dcx,
                 config.opts,
                 CompilerIO {
                     input: config.input,
@@ -437,7 +465,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                     temps_dir,
                 },
                 bundle,
-                config.registry.clone(),
+                config.registry,
                 locale_resources,
                 config.lint_caps,
                 target,
@@ -450,12 +478,12 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
 
             codegen_backend.init(&sess);
 
-            let cfg = parse_cfg(&sess.dcx(), config.crate_cfg);
+            let cfg = parse_cfg(sess.dcx(), config.crate_cfg);
             let mut cfg = config::build_configuration(&sess, cfg);
             util::add_configuration(&mut cfg, &mut sess, &*codegen_backend);
             sess.psess.config = cfg;
 
-            let mut check_cfg = parse_check_cfg(&sess.dcx(), config.crate_check_cfg);
+            let mut check_cfg = parse_check_cfg(sess.dcx(), config.crate_check_cfg);
             check_cfg.fill_well_known(&sess.target);
             sess.psess.check_config = check_cfg;
 
@@ -475,48 +503,49 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
             let mut lint_store = rustc_lint::new_lint_store(sess.enable_internal_lints());
             if let Some(register_lints) = config.register_lints.as_deref() {
                 register_lints(&sess, &mut lint_store);
-                sess.registered_lints = true;
             }
-            sess.lint_store = Some(Lrc::new(lint_store));
+            sess.lint_store = Some(Arc::new(lint_store));
+
+            util::check_abi_required_features(&sess);
 
             let compiler = Compiler {
                 sess,
                 codegen_backend,
                 override_queries: config.override_queries,
                 current_gcx,
+                jobserver_proxy,
             };
 
             // There are two paths out of `f`.
             // - Normal exit.
-            // - Panic, e.g. triggered by `abort_if_errors`.
+            // - Panic, e.g. triggered by `abort_if_errors` or a fatal error.
             //
             // We must run `finish_diagnostics` in both cases.
-            let res = {
-                // If `f` panics, `finish_diagnostics` will run during
-                // unwinding because of the `defer`.
-                let mut guar = None;
-                let sess_abort_guard = defer(|| {
-                    guar = compiler.sess.finish_diagnostics(&config.registry);
-                });
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&compiler)));
 
-                let res = f(&compiler);
+            compiler.sess.finish_diagnostics();
 
-                // If `f` doesn't panic, `finish_diagnostics` will run
-                // normally when `sess_abort_guard` is dropped.
-                drop(sess_abort_guard);
+            // If error diagnostics have been emitted, we can't return an
+            // error directly, because the return type of this function
+            // is `R`, not `Result<R, E>`. But we need to communicate the
+            // errors' existence to the caller, otherwise the caller might
+            // mistakenly think that no errors occurred and return a zero
+            // exit code. So we abort (panic) instead, similar to if `f`
+            // had panicked.
+            if res.is_ok() {
+                compiler.sess.dcx().abort_if_errors();
+            }
 
-                // If `finish_diagnostics` emits errors (e.g. stashed
-                // errors) we can't return an error directly, because the
-                // return type of this function is `R`, not `Result<R, E>`.
-                // But we need to communicate the errors' existence to the
-                // caller, otherwise the caller might mistakenly think that
-                // no errors occurred and return a zero exit code. So we
-                // abort (panic) instead, similar to if `f` had panicked.
-                if guar.is_some() {
-                    compiler.sess.dcx().abort_if_errors();
-                }
+            // Also make sure to flush delayed bugs as if we panicked, the
+            // bugs would be flushed by the Drop impl of DiagCtxt while
+            // unwinding, which would result in an abort with
+            // "panic in a destructor during cleanup".
+            compiler.sess.dcx().flush_delayed();
 
-                res
+            let res = match res {
+                Ok(res) => res,
+                // Resume unwinding if a panic happened.
+                Err(err) => std::panic::resume_unwind(err),
             };
 
             let prof = compiler.sess.prof.clone();
@@ -528,8 +557,8 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
 }
 
 pub fn try_print_query_stack(
-    dcx: &DiagCtxt,
-    num_frames: Option<usize>,
+    dcx: DiagCtxtHandle<'_>,
+    limit_frames: Option<usize>,
     file: Option<std::fs::File>,
 ) {
     eprintln!("query stack during panic:");
@@ -537,13 +566,13 @@ pub fn try_print_query_stack(
     // Be careful relying on global state here: this code is called from
     // a panic hook, which means that the global `DiagCtxt` may be in a weird
     // state if it was responsible for triggering the panic.
-    let i = ty::tls::with_context_opt(|icx| {
+    let all_frames = ty::tls::with_context_opt(|icx| {
         if let Some(icx) = icx {
             ty::print::with_no_queries!(print_query_stack(
                 QueryCtxt::new(icx.tcx),
                 icx.query,
                 dcx,
-                num_frames,
+                limit_frames,
                 file,
             ))
         } else {
@@ -551,9 +580,14 @@ pub fn try_print_query_stack(
         }
     });
 
-    if num_frames == None || num_frames >= Some(i) {
-        eprintln!("end of query stack");
+    if let Some(limit_frames) = limit_frames
+        && all_frames > limit_frames
+    {
+        eprintln!(
+            "... and {} other queries... use `env RUST_BACKTRACE=1` to see the full query stack",
+            all_frames - limit_frames
+        );
     } else {
-        eprintln!("we're just showing a limited slice of the query stack");
+        eprintln!("end of query stack");
     }
 }

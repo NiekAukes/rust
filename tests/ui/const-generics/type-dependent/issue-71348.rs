@@ -1,6 +1,6 @@
 //@ [full] run-pass
 //@ revisions: full min
-#![cfg_attr(full, feature(adt_const_params))]
+#![cfg_attr(full, feature(adt_const_params, unsized_const_params))]
 #![cfg_attr(full, allow(incomplete_features))]
 
 struct Foo {
@@ -17,6 +17,7 @@ trait Get<'a, const N: &'static str> {
 impl Foo {
     fn ask<'a, const N: &'static str>(&'a self) -> &'a <Self as Get<N>>::Target
     //[min]~^ ERROR `&'static str` is forbidden as the type of a const generic parameter
+    //[full]~^^ WARNING lifetime flowing from input to output with different syntax
     where
         Self: Get<'a, N>,
     {

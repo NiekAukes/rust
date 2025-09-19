@@ -9,16 +9,22 @@ macro_rules! mac {
 /// foo //~ ERROR unused doc comment
 mac!();
 
+/// a //~ ERROR unused doc comment
+#[doc(test(attr(allow(dead_code))))] //~ ERROR unused doc comment
+unsafe extern "C" { }
+
 fn foo() {
     /// a //~ ERROR unused doc comment
+    #[doc(test(attr(allow(dead_code))))] //~ ERROR unused doc comment
     let x = 12;
 
-    /// multi-line //~ unused doc comment
+    /// multi-line //~ ERROR unused doc comment
     /// doc comment
     /// that is unused
     match x {
         /// c //~ ERROR unused doc comment
         1 => {},
+        #[doc(test(attr(allow(dead_code))))] //~ ERROR unused doc comment
         _ => {}
     }
 
@@ -32,6 +38,7 @@ fn foo() {
     /// bar //~ ERROR unused doc comment
     mac!();
 
+    #[doc(test(attr(allow(dead_code))))] //~ ERROR unused doc comment
     let x = /** comment */ 47; //~ ERROR unused doc comment
 
     /// dox //~ ERROR unused doc comment

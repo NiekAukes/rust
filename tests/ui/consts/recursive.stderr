@@ -9,27 +9,22 @@ LL |     f(x);
    = help: a `loop` may express intention better if this is on purpose
    = note: `#[warn(unconditional_recursion)]` on by default
 
-error[E0080]: evaluation of constant value failed
-  --> $DIR/recursive.rs:4:5
+error[E0080]: reached the configured maximum number of stack frames
+  --> $DIR/recursive.rs:7:15
    |
-LL |     f(x);
-   |     ^^^^ reached the configured maximum number of stack frames
+LL | const X: () = f(1);
+   |               ^^^^ evaluation of `X` failed inside this call
    |
-note: inside `f::<i32>`
-  --> $DIR/recursive.rs:4:5
-   |
-LL |     f(x);
-   |     ^^^^
 note: [... 126 additional calls inside `f::<i32>` ...]
   --> $DIR/recursive.rs:4:5
    |
 LL |     f(x);
    |     ^^^^
-note: inside `X`
-  --> $DIR/recursive.rs:8:15
+note: inside `f::<i32>`
+  --> $DIR/recursive.rs:4:5
    |
-LL | const X: () = f(1);
-   |               ^^^^
+LL |     f(x);
+   |     ^^^^ the failure occurred here
 
 error: aborting due to 1 previous error; 1 warning emitted
 

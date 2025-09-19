@@ -1,21 +1,30 @@
 #![feature(non_exhaustive_omitted_patterns_lint)]
 #![warn(clippy::match_same_arms)]
 #![no_main]
-//@no-rustfix
 use std::sync::atomic::Ordering; // #[non_exhaustive] enum
 
 fn repeat() -> ! {
     panic!()
 }
 
+#[deny(non_exhaustive_omitted_patterns)]
 pub fn f(x: Ordering) {
-    #[deny(non_exhaustive_omitted_patterns)]
     match x {
         Ordering::Relaxed => println!("relaxed"),
         Ordering::Release => println!("release"),
         Ordering::Acquire => println!("acquire"),
         Ordering::AcqRel | Ordering::SeqCst => repeat(),
+        //~^ match_same_arms
         _ => repeat(),
+    }
+
+    match x {
+        Ordering::Relaxed => println!("relaxed"),
+        Ordering::Release => println!("release"),
+        Ordering::Acquire => println!("acquire"),
+        Ordering::AcqRel => repeat(),
+        //~^ match_same_arms
+        Ordering::SeqCst | _ => repeat(),
     }
 }
 
@@ -30,12 +39,13 @@ mod f {
             Ordering::Release => println!("release"),
             Ordering::Acquire => println!("acquire"),
             Ordering::AcqRel | Ordering::SeqCst => repeat(),
+            //~^ match_same_arms
             _ => repeat(),
         }
     }
 }
 
-// Below should still lint
+// Below can still suggest removing the other patterns
 
 pub fn g(x: Ordering) {
     match x {
@@ -43,8 +53,8 @@ pub fn g(x: Ordering) {
         Ordering::Release => println!("release"),
         Ordering::Acquire => println!("acquire"),
         Ordering::AcqRel | Ordering::SeqCst => repeat(),
-        //~^ ERROR: this match arm has an identical body to the `_` wildcard arm
         _ => repeat(),
+        //~^ match_same_arms
     }
 }
 
@@ -57,8 +67,8 @@ mod g {
             Ordering::Release => println!("release"),
             Ordering::Acquire => println!("acquire"),
             Ordering::AcqRel | Ordering::SeqCst => repeat(),
-            //~^ ERROR: this match arm has an identical body to the `_` wildcard arm
             _ => repeat(),
+            //~^ match_same_arms
         }
     }
 }

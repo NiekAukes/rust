@@ -3,7 +3,7 @@
 
 #![crate_type = "lib"]
 
-// CHECK: @VAR1 = {{(dso_local )?}}constant <{ [4 x i8] }> <{ [4 x i8] c"\01\00\00\00" }>, section ".test_one"
+// CHECK: @VAR1 = {{(dso_local )?}}constant [4 x i8] c"\01\00\00\00", section ".test_one"
 #[no_mangle]
 #[link_section = ".test_one"]
 #[cfg(target_endian = "little")]
@@ -16,7 +16,7 @@ pub static VAR1: u32 = 0x01000000;
 
 pub enum E {
     A(u32),
-    B(f32)
+    B(f32),
 }
 
 // CHECK: @VAR2 = {{(dso_local )?}}constant {{.*}}, section ".test_two"

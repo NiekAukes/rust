@@ -7,23 +7,26 @@
 //!
 //! For now, we are developing everything inside `rustc`, thus, we keep this module private.
 
+use std::ops::RangeInclusive;
+
+use rustc_data_structures::PointeeSized;
 use rustc_hir::def::DefKind;
 use rustc_middle::mir;
 use rustc_middle::mir::interpret::AllocId;
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_span::def_id::{CrateNum, DefId, LOCAL_CRATE};
 use stable_mir::abi::Layout;
-use stable_mir::mir::mono::InstanceDef;
-use stable_mir::ty::{ConstId, Span};
+use stable_mir::mir::mono::{InstanceDef, StaticDef};
+use stable_mir::ty::{FnDef, MirConstId, Span, TyConstId};
 use stable_mir::{CtorKind, ItemKind};
-use std::ops::RangeInclusive;
 use tracing::debug;
 
 use crate::rustc_internal::IndexMap;
+use crate::stable_mir;
 
 mod alloc;
 mod builder;
-pub(crate) mod context;
+pub mod context;
 mod convert;
 
 pub struct Tables<'tcx> {
@@ -33,8 +36,9 @@ pub struct Tables<'tcx> {
     pub(crate) spans: IndexMap<rustc_span::Span, Span>,
     pub(crate) types: IndexMap<Ty<'tcx>, stable_mir::ty::Ty>,
     pub(crate) instances: IndexMap<ty::Instance<'tcx>, InstanceDef>,
-    pub(crate) constants: IndexMap<mir::Const<'tcx>, ConstId>,
-    pub(crate) layouts: IndexMap<rustc_target::abi::Layout<'tcx>, Layout>,
+    pub(crate) ty_consts: IndexMap<ty::Const<'tcx>, TyConstId>,
+    pub(crate) mir_consts: IndexMap<mir::Const<'tcx>, MirConstId>,
+    pub(crate) layouts: IndexMap<rustc_abi::Layout<'tcx>, Layout>,
 }
 
 impl<'tcx> Tables<'tcx> {
@@ -42,19 +46,70 @@ impl<'tcx> Tables<'tcx> {
         self.types.create_or_fetch(ty)
     }
 
-    pub(crate) fn intern_const(&mut self, constant: mir::Const<'tcx>) -> ConstId {
-        self.constants.create_or_fetch(constant)
+    pub(crate) fn intern_ty_const(&mut self, ct: ty::Const<'tcx>) -> TyConstId {
+        self.ty_consts.create_or_fetch(ct)
     }
 
-    pub(crate) fn has_body(&self, instance: Instance<'tcx>) -> bool {
+    pub(crate) fn intern_mir_const(&mut self, constant: mir::Const<'tcx>) -> MirConstId {
+        self.mir_consts.create_or_fetch(constant)
+    }
+
+    /// Return whether the instance as a body available.
+    ///
+    /// Items and intrinsics may have a body available from its definition.
+    /// Shims body may be generated depending on their type.
+    pub(crate) fn instance_has_body(&self, instance: Instance<'tcx>) -> bool {
         let def_id = instance.def_id();
-        self.tcx.is_mir_available(def_id)
+        self.item_has_body(def_id)
             || !matches!(
                 instance.def,
-                ty::InstanceDef::Virtual(..)
-                    | ty::InstanceDef::Intrinsic(..)
-                    | ty::InstanceDef::Item(..)
+                ty::InstanceKind::Virtual(..)
+                    | ty::InstanceKind::Intrinsic(..)
+                    | ty::InstanceKind::Item(..)
             )
+    }
+
+    /// Return whether the item has a body defined by the user.
+    ///
+    /// Note that intrinsics may have a placeholder body that shouldn't be used in practice.
+    /// In StableMIR, we handle this case as if the body is not available.
+    pub(crate) fn item_has_body(&self, def_id: DefId) -> bool {
+        let must_override = if let Some(intrinsic) = self.tcx.intrinsic(def_id) {
+            intrinsic.must_be_overridden
+        } else {
+            false
+        };
+        !must_override && self.tcx.is_mir_available(def_id)
+    }
+
+    fn to_fn_def(&mut self, def_id: DefId) -> Option<FnDef> {
+        if matches!(self.tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
+            Some(self.fn_def(def_id))
+        } else {
+            None
+        }
+    }
+
+    fn to_static(&mut self, def_id: DefId) -> Option<StaticDef> {
+        matches!(self.tcx.def_kind(def_id), DefKind::Static { .. }).then(|| self.static_def(def_id))
+    }
+}
+
+/// Iterate over the definitions of the given crate.
+pub(crate) fn filter_def_ids<F, T>(tcx: TyCtxt<'_>, krate: CrateNum, mut func: F) -> Vec<T>
+where
+    F: FnMut(DefId) -> Option<T>,
+{
+    if krate == LOCAL_CRATE {
+        tcx.iter_local_def_id().filter_map(|did| func(did.to_def_id())).collect()
+    } else {
+        let num_definitions = tcx.num_extern_def_ids(krate);
+        (0..num_definitions)
+            .filter_map(move |i| {
+                let def_id = DefId { krate, index: rustc_span::def_id::DefIndex::from_usize(i) };
+                func(def_id)
+            })
+            .collect()
     }
 }
 
@@ -91,7 +146,9 @@ pub(crate) fn new_item_kind(kind: DefKind) -> ItemKind {
         | DefKind::GlobalAsm => {
             unreachable!("Not a valid item kind: {kind:?}");
         }
-        DefKind::Closure | DefKind::AssocFn | DefKind::Fn => ItemKind::Fn,
+        DefKind::Closure | DefKind::AssocFn | DefKind::Fn | DefKind::SyntheticCoroutineBody => {
+            ItemKind::Fn
+        }
         DefKind::Const | DefKind::InlineConst | DefKind::AssocConst | DefKind::AnonConst => {
             ItemKind::Const
         }
@@ -102,7 +159,7 @@ pub(crate) fn new_item_kind(kind: DefKind) -> ItemKind {
 }
 
 /// Trait used to convert between an internal MIR type to a Stable MIR type.
-pub trait Stable<'cx> {
+pub trait Stable<'cx>: PointeeSized {
     /// The stable representation of the type implementing Stable.
     type T;
     /// Converts an object to the equivalent Stable MIR representation.

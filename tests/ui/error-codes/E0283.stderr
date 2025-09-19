@@ -7,10 +7,12 @@ LL |     fn create() -> u32;
 LL |     let cont: u32 = Coroutine::create();
    |                     ^^^^^^^^^^^^^^^^^^^ cannot call associated function of trait
    |
-help: use a fully-qualified path to a specific available implementation
+help: use a fully-qualified path to one of the available implementations
    |
-LL |     let cont: u32 = </* self type */ as Coroutine>::create();
-   |                     +++++++++++++++++++          +
+LL |     let cont: u32 = <Impl as Coroutine>::create();
+   |                     ++++++++          +
+LL |     let cont: u32 = <AnotherImpl as Coroutine>::create();
+   |                     +++++++++++++++          +
 
 error[E0283]: type annotations needed
   --> $DIR/E0283.rs:35:24
@@ -28,8 +30,9 @@ LL | impl Into<u32> for Impl {
              where U: From<T>;
 help: try using a fully qualified path to specify the expected types
    |
-LL |     let bar = <Impl as Into<T>>::into(foo_impl) * 1u32;
-   |               ++++++++++++++++++++++++        ~
+LL -     let bar = foo_impl.into() * 1u32;
+LL +     let bar = <Impl as Into<T>>::into(foo_impl) * 1u32;
+   |
 
 error: aborting due to 2 previous errors
 

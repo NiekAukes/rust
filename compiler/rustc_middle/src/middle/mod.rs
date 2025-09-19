@@ -6,13 +6,13 @@ pub mod lang_items;
 pub mod lib_features {
     use rustc_data_structures::unord::UnordMap;
     use rustc_macros::{HashStable, TyDecodable, TyEncodable};
-    use rustc_span::{symbol::Symbol, Span};
+    use rustc_span::{Span, Symbol};
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     #[derive(HashStable, TyEncodable, TyDecodable)]
     pub enum FeatureStability {
         AcceptedSince(Symbol),
-        Unstable,
+        Unstable { old_name: Option<Symbol> },
     }
 
     #[derive(HashStable, Debug, Default)]
@@ -25,17 +25,12 @@ pub mod lib_features {
             self.stability
                 .to_sorted_stable_ord()
                 .iter()
-                .map(|(&sym, &(stab, _))| (sym, stab))
+                .map(|&(&sym, &(stab, _))| (sym, stab))
                 .collect()
         }
     }
 }
-pub mod limits;
 pub mod privacy;
 pub mod region;
 pub mod resolve_bound_vars;
 pub mod stability;
-
-pub fn provide(providers: &mut crate::query::Providers) {
-    limits::provide(providers);
-}

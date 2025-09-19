@@ -1,9 +1,8 @@
 use super::usercalls::alloc::UserRef;
-use crate::cmp;
 use crate::io::{self, Write};
-use crate::mem;
+use crate::{cmp, mem};
 
-extern "C" {
+unsafe extern "C" {
     fn take_debug_panic_buf_ptr() -> *mut u8;
     static DEBUG: u8;
 }

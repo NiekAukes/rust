@@ -14,65 +14,38 @@
 
 #![deny(warnings)]
 
-use run_make_support::object;
-use run_make_support::object::read::archive::ArchiveFile;
-use run_make_support::object::read::Object;
-use run_make_support::object::ObjectSection;
-use run_make_support::object::ObjectSymbol;
-use run_make_support::object::RelocationTarget;
-use run_make_support::set_host_rpath;
-use run_make_support::tmp_dir;
 use std::collections::HashSet;
 
-const MANIFEST: &str = r#"
-[package]
-name = "scratch"
-version = "0.1.0"
-edition = "2021"
-
-[lib]
-path = "lib.rs""#;
+use run_make_support::object::read::Object;
+use run_make_support::object::read::archive::ArchiveFile;
+use run_make_support::object::{ObjectSection, ObjectSymbol, RelocationTarget};
+use run_make_support::rfs::{read, read_dir};
+use run_make_support::{cargo, object, path, target};
 
 fn main() {
-    let target_dir = tmp_dir().join("target");
-    let target = std::env::var("TARGET").unwrap();
+    let target_dir = path("target");
 
-    println!("Testing compiler_builtins for {}", target);
+    println!("Testing compiler_builtins for {}", target());
 
-    // Set up the tiniest Cargo project: An empty no_std library. Just enough to run -Zbuild-std.
-    let manifest_path = tmp_dir().join("Cargo.toml");
-    std::fs::write(&manifest_path, MANIFEST.as_bytes()).unwrap();
-    std::fs::write(tmp_dir().join("lib.rs"), b"#![no_std]").unwrap();
+    cargo()
+        .args(&[
+            "build",
+            "--manifest-path",
+            "Cargo.toml",
+            "-Zbuild-std=core",
+            "--target",
+            &target(),
+        ])
+        .env("RUSTFLAGS", "-Copt-level=0 -Cdebug-assertions=yes")
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTC_BOOTSTRAP", "1")
+        // Visual Studio 2022 requires that the LIB env var be set so it can
+        // find the Windows SDK.
+        .env("LIB", std::env::var("LIB").unwrap_or_default())
+        .run();
 
-    let path = std::env::var("PATH").unwrap();
-    let rustc = std::env::var("RUSTC").unwrap();
-    let bootstrap_cargo = std::env::var("BOOTSTRAP_CARGO").unwrap();
-    let mut cmd = std::process::Command::new(bootstrap_cargo);
-    cmd.args([
-        "build",
-        "--manifest-path",
-        manifest_path.to_str().unwrap(),
-        "-Zbuild-std=core",
-        "--target",
-        &target,
-    ])
-    .env_clear()
-    .env("PATH", path)
-    .env("RUSTC", rustc)
-    .env("RUSTFLAGS", "-Copt-level=0 -Cdebug-assertions=yes")
-    .env("CARGO_TARGET_DIR", &target_dir)
-    .env("RUSTC_BOOTSTRAP", "1")
-    // Visual Studio 2022 requires that the LIB env var be set so it can
-    // find the Windows SDK.
-    .env("LIB", std::env::var("LIB").unwrap_or_default());
-    set_host_rpath(&mut cmd);
-
-    let status = cmd.status().unwrap();
-    assert!(status.success());
-
-    let rlibs_path = target_dir.join(target).join("debug").join("deps");
-    let compiler_builtins_rlib = std::fs::read_dir(rlibs_path)
-        .unwrap()
+    let rlibs_path = target_dir.join(target()).join("debug").join("deps");
+    let compiler_builtins_rlib = read_dir(rlibs_path)
         .find_map(|e| {
             let path = e.unwrap().path();
             let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -86,7 +59,7 @@ fn main() {
 
     // rlib files are archives, where the archive members each a CGU, and we also have one called
     // lib.rmeta which is the encoded metadata. Each of the CGUs is an object file.
-    let data = std::fs::read(compiler_builtins_rlib).unwrap();
+    let data = read(compiler_builtins_rlib);
 
     let mut defined_symbols = HashSet::new();
     let mut undefined_relocations = HashSet::new();

@@ -1,22 +1,17 @@
 //! Thread implementation backed by μITRON tasks. Assumes `acre_tsk` and
 //! `exd_tsk` are available.
-use super::{
-    abi,
-    error::{expect_success, expect_success_aborting, ItronError},
-    task,
-    time::dur2reltims,
-};
-use crate::{
-    cell::UnsafeCell,
-    ffi::CStr,
-    hint, io,
-    mem::ManuallyDrop,
-    num::NonZero,
-    ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
-    sys::thread_local_dtor::run_dtors,
-    time::Duration,
-};
+
+use super::error::{ItronError, expect_success, expect_success_aborting};
+use super::time::dur2reltims;
+use super::{abi, task};
+use crate::cell::UnsafeCell;
+use crate::ffi::CStr;
+use crate::mem::ManuallyDrop;
+use crate::num::NonZero;
+use crate::ptr::NonNull;
+use crate::sync::atomic::{Atomic, AtomicUsize, Ordering};
+use crate::time::Duration;
+use crate::{hint, io};
 
 pub struct Thread {
     p_inner: NonNull<ThreadInner>,
@@ -69,7 +64,7 @@ struct ThreadInner {
     ///                 '--> JOIN_FINALIZE ---'
     ///                          (-1)
     ///
-    lifecycle: AtomicUsize,
+    lifecycle: Atomic<usize>,
 }
 
 // Safety: The only `!Sync` field, `ThreadInner::start`, is only touched by
@@ -85,7 +80,7 @@ const LIFECYCLE_EXITED_OR_FINISHED_OR_JOIN_FINALIZE: usize = usize::MAX;
 // there's no single value for `JOINING`
 
 // 64KiB for 32-bit ISAs, 128KiB for 64-bit ISAs.
-pub const DEFAULT_MIN_STACK_SIZE: usize = 0x4000 * crate::mem::size_of::<usize>();
+pub const DEFAULT_MIN_STACK_SIZE: usize = 0x4000 * size_of::<usize>();
 
 impl Thread {
     /// # Safety
@@ -116,7 +111,7 @@ impl Thread {
 
             // Run TLS destructors now because they are not
             // called automatically for terminated tasks.
-            unsafe { run_dtors() };
+            unsafe { crate::sys::thread_local::destructors::run() };
 
             let old_lifecycle = inner
                 .lifecycle
@@ -308,7 +303,7 @@ impl Drop for Thread {
     }
 }
 
-/// Terminate and delete the specified task.
+/// Terminates and deletes the specified task.
 ///
 /// This function will abort if `deleted_task` refers to the calling task.
 ///
@@ -337,7 +332,7 @@ unsafe fn terminate_and_delete_task(deleted_task: abi::ID) {
     expect_success_aborting(unsafe { abi::del_tsk(deleted_task) }, &"del_tsk");
 }
 
-/// Terminate and delete the calling task.
+/// Terminates and deletes the calling task.
 ///
 /// Atomicity is not required - i.e., it can be assumed that other threads won't
 /// `ter_tsk` the calling task while this function is still in progress. (This

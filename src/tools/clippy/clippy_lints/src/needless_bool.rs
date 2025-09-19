@@ -1,21 +1,17 @@
-//! Checks for needless boolean results of if-else expressions
-//!
-//! This lint is **warn** by default
-
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::sugg::Sugg;
 use clippy_utils::{
-    higher, is_else_clause, is_expn_of, is_parent_stmt, peel_blocks, peel_blocks_with_stmt, span_extract_comment,
-    SpanlessEq,
+    SpanlessEq, get_parent_expr, higher, is_block_like, is_else_clause, is_expn_of, is_parent_stmt,
+    is_receiver_of_method_call, peel_blocks, peel_blocks_with_stmt, span_extract_comment, sym,
 };
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
 use rustc_hir::{BinOpKind, Expr, ExprKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::declare_lint_pass;
-use rustc_span::source_map::Spanned;
 use rustc_span::Span;
+use rustc_span::source_map::Spanned;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -121,14 +117,7 @@ fn condition_needs_parentheses(e: &Expr<'_>) -> bool {
     | ExprKind::Type(i, _)
     | ExprKind::Index(i, _, _) = inner.kind
     {
-        if matches!(
-            i.kind,
-            ExprKind::Block(..)
-                | ExprKind::ConstBlock(..)
-                | ExprKind::If(..)
-                | ExprKind::Loop(..)
-                | ExprKind::Match(..)
-        ) {
+        if is_block_like(i) {
             return true;
         }
         inner = i;
@@ -161,8 +150,11 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
                     snip = snip.blockify();
                 }
 
-                if condition_needs_parentheses(cond) && is_parent_stmt(cx, e.hir_id) {
-                    snip = snip.maybe_par();
+                if (condition_needs_parentheses(cond) && is_parent_stmt(cx, e.hir_id))
+                    || is_receiver_of_method_call(cx, e)
+                    || is_as_argument(cx, e)
+                {
+                    snip = snip.maybe_paren();
                 }
 
                 span_lint_and_sugg(
@@ -328,7 +320,7 @@ fn check_comparison<'a, 'tcx>(
             cx.typeck_results().expr_ty(left_side),
             cx.typeck_results().expr_ty(right_side),
         );
-        if is_expn_of(left_side.span, "cfg").is_some() || is_expn_of(right_side.span, "cfg").is_some() {
+        if is_expn_of(left_side.span, sym::cfg).is_some() || is_expn_of(right_side.span, sym::cfg).is_some() {
             return;
         }
         if l_ty.is_bool() && r_ty.is_bool() {
@@ -434,10 +426,10 @@ fn fetch_bool_block(expr: &Expr<'_>) -> Option<Expression> {
 }
 
 fn fetch_bool_expr(expr: &Expr<'_>) -> Option<bool> {
-    if let ExprKind::Lit(lit_ptr) = peel_blocks(expr).kind {
-        if let LitKind::Bool(value) = lit_ptr.node {
-            return Some(value);
-        }
+    if let ExprKind::Lit(lit_ptr) = peel_blocks(expr).kind
+        && let LitKind::Bool(value) = lit_ptr.node
+    {
+        return Some(value);
     }
     None
 }
@@ -448,4 +440,8 @@ fn fetch_assign<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, bool)
     } else {
         None
     }
+}
+
+fn is_as_argument(cx: &LateContext<'_>, e: &Expr<'_>) -> bool {
+    matches!(get_parent_expr(cx, e).map(|e| e.kind), Some(ExprKind::Cast(_, _)))
 }

@@ -1,8 +1,8 @@
-error: expected `,`, found `&`
+error: expected one of `,` or `|`, found `&`
   --> $DIR/issue-66706.rs:2:16
    |
 LL |     [0; [|_: _ &_| ()].len()]
-   |               -^ expected `,`
+   |               -^ expected one of `,` or `|`
    |               |
    |               help: missing `,`
 
@@ -12,11 +12,11 @@ error: expected identifier, found reserved identifier `_`
 LL |     [0; [|f @ &ref _| {} ; 0 ].len() ];
    |                    ^ expected identifier, found reserved identifier
 
-error: expected `,`, found `&`
+error: expected one of `,` or `|`, found `&`
   --> $DIR/issue-66706.rs:13:17
    |
 LL |     [0; [|&_: _ &_| {}; 0 ].len()]
-   |                -^ expected `,`
+   |                -^ expected one of `,` or `|`
    |                |
    |                help: missing `,`
 
@@ -29,10 +29,10 @@ LL |     [0; match [|f @ &ref _| () ] {} ]
    |         while parsing this `match` expression
 
 error[E0282]: type annotations needed
-  --> $DIR/issue-66706.rs:2:11
+  --> $DIR/issue-66706.rs:2:14
    |
 LL |     [0; [|_: _ &_| ()].len()]
-   |           ^ cannot infer type
+   |              ^ cannot infer type
 
 error[E0282]: type annotations needed
   --> $DIR/issue-66706.rs:13:11

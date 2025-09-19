@@ -2,13 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::Optimization;
-use crate::Target;
+use crate::{Optimization, Target};
 
 #[derive(Debug)]
 pub struct Session {
     target: Target,
     cpu: Option<String>,
+    feature: Option<String>,
     symbols: Vec<String>,
 
     /// A file that `llvm-link` supports, like a bitcode file or an archive.
@@ -22,7 +22,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(target: crate::Target, cpu: Option<String>, out_path: PathBuf) -> Self {
+    pub fn new(
+        target: crate::Target,
+        cpu: Option<String>,
+        feature: Option<String>,
+        out_path: PathBuf,
+    ) -> Self {
         let link_path = out_path.with_extension("o");
         let opt_path = out_path.with_extension("optimized.o");
         let sym_path = out_path.with_extension("symbols.txt");
@@ -30,6 +35,7 @@ impl Session {
         Session {
             target,
             cpu,
+            feature,
             symbols: Vec::new(),
             files: Vec::new(),
             link_path,
@@ -133,6 +139,10 @@ impl Session {
 
         if let Some(mcpu) = &self.cpu {
             lcc_command.arg("--mcpu").arg(mcpu);
+        }
+
+        if let Some(mattr) = &self.feature {
+            lcc_command.arg(&format!("--mattr={}", mattr));
         }
 
         let lcc_output = lcc_command

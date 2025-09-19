@@ -1,21 +1,21 @@
+use rustc_abi::ExternAbi;
 use rustc_middle::ty::layout::LayoutOf;
-use rustc_target::spec::abi::Abi;
 
+use self::shims::windows::handle::{EvalContextExt as _, Handle, PseudoHandle};
 use crate::*;
-use shims::windows::handle::{EvalContextExt as _, Handle, PseudoHandle};
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
 
 #[allow(non_snake_case)]
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn CreateThread(
         &mut self,
-        security_op: &OpTy<'tcx, Provenance>,
-        stacksize_op: &OpTy<'tcx, Provenance>,
-        start_op: &OpTy<'tcx, Provenance>,
-        arg_op: &OpTy<'tcx, Provenance>,
-        flags_op: &OpTy<'tcx, Provenance>,
-        thread_op: &OpTy<'tcx, Provenance>,
+        security_op: &OpTy<'tcx>,
+        stacksize_op: &OpTy<'tcx>,
+        start_op: &OpTy<'tcx>,
+        arg_op: &OpTy<'tcx>,
+        flags_op: &OpTy<'tcx>,
+        thread_op: &OpTy<'tcx>,
     ) -> InterpResult<'tcx, ThreadId> {
         let this = self.eval_context_mut();
 
@@ -29,7 +29,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let thread = if this.ptr_is_null(this.read_pointer(thread_op)?)? {
             None
         } else {
-            let thread_info_place = this.deref_pointer(thread_op)?;
+            let thread_info_place = this.deref_pointer_as(thread_op, this.machine.layouts.u32)?;
             Some(thread_info_place)
         };
 
@@ -49,7 +49,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         this.start_regular_thread(
             thread,
             start_routine,
-            Abi::System { unwind: false },
+            ExternAbi::System { unwind: false },
             func_arg,
             this.layout_of(this.tcx.types.u32)?,
         )
@@ -57,19 +57,19 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
     fn WaitForSingleObject(
         &mut self,
-        handle_op: &OpTy<'tcx, Provenance>,
-        timeout_op: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, u32> {
+        handle_op: &OpTy<'tcx>,
+        timeout_op: &OpTy<'tcx>,
+    ) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
-        let handle = this.read_scalar(handle_op)?;
+        let handle = this.read_handle(handle_op, "WaitForSingleObject")?;
         let timeout = this.read_scalar(timeout_op)?.to_u32()?;
 
-        let thread = match Handle::from_scalar(handle, this)? {
-            Some(Handle::Thread(thread)) => thread,
+        let thread = match handle {
+            Handle::Thread(thread) => thread,
             // Unlike on posix, the outcome of joining the current thread is not documented.
             // On current Windows, it just deadlocks.
-            Some(Handle::Pseudo(PseudoHandle::CurrentThread)) => this.get_active_thread(),
+            Handle::Pseudo(PseudoHandle::CurrentThread) => this.active_thread(),
             _ => this.invalid_handle("WaitForSingleObject")?,
         };
 
@@ -79,6 +79,6 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         this.join_thread(thread)?;
 
-        Ok(0)
+        interp_ok(this.eval_windows("c", "WAIT_OBJECT_0"))
     }
 }

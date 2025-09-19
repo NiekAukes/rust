@@ -14,18 +14,18 @@
 // ** `logw` -> `log::warn!(...)`
 // ** `loge` -> `log::error!(...)`
 //
-// image::https://user-images.githubusercontent.com/48062697/113020656-b560f500-917a-11eb-87de-02991f61beb8.gif[]
+// ![Format String Completion](https://user-images.githubusercontent.com/48062697/113020656-b560f500-917a-11eb-87de-02991f61beb8.gif)
 
 use ide_db::{
-    syntax_helpers::format_string_exprs::{parse_format_exprs, with_placeholders, Arg},
     SnippetCap,
+    syntax_helpers::format_string_exprs::{Arg, parse_format_exprs, with_placeholders},
 };
-use syntax::{ast, AstToken};
+use syntax::{AstToken, ast};
 
 use crate::{
+    Completions,
     completions::postfix::{build_postfix_snippet_builder, escape_snippet_bits},
     context::CompletionContext,
-    Completions,
 };
 
 /// Mapping ("postfix completion item" => "macro to use")
@@ -65,7 +65,7 @@ pub(crate) fn add_format_like_completions(
         let exprs = with_placeholders(exprs);
         for (label, macro_name) in KINDS {
             let snippet = if exprs.is_empty() {
-                format!(r#"{}({})"#, macro_name, out)
+                format!(r#"{macro_name}({out})"#)
             } else {
                 format!(r#"{}({}, {})"#, macro_name, out, exprs.join(", "))
             };
@@ -108,7 +108,7 @@ mod tests {
 
         for (kind, input, output) in test_vector {
             let (parsed_string, _exprs) = parse_format_exprs(input).unwrap();
-            let snippet = format!(r#"{}("{}")"#, kind, parsed_string);
+            let snippet = format!(r#"{kind}("{parsed_string}")"#);
             assert_eq!(&snippet, output);
         }
     }

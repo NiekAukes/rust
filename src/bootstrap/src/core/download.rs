@@ -1,36 +1,47 @@
-use std::{
-    env,
-    ffi::OsString,
-    fs::{self, File},
-    io::{BufRead, BufReader, BufWriter, ErrorKind, Write},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::OnceLock,
-};
+use std::env;
+use std::ffi::OsString;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use build_helper::ci::CiEnv;
 use xz2::bufread::XzDecoder;
 
-use crate::core::config::RustfmtMetadata;
-use crate::utils::helpers::{check_run, exe, program_out_of_date};
-use crate::{core::build_steps::llvm::detect_llvm_sha, utils::helpers::hex_encode};
-use crate::{t, Config};
+use crate::core::config::BUILDER_CONFIG_FILENAME;
+use crate::utils::build_stamp::BuildStamp;
+use crate::utils::exec::command;
+use crate::utils::helpers::{exe, hex_encode, move_file};
+use crate::{Config, t};
 
 static SHOULD_FIX_BINS_AND_DYLIBS: OnceLock<bool> = OnceLock::new();
 
-/// `Config::try_run` wrapper for this module to avoid warnings on `try_run`, since we don't have access to a `builder` yet.
-fn try_run(config: &Config, cmd: &mut Command) -> Result<(), ()> {
-    #[allow(deprecated)]
-    config.try_run(cmd)
+fn extract_curl_version(out: String) -> semver::Version {
+    // The output should look like this: "curl <major>.<minor>.<patch> ..."
+    out.lines()
+        .next()
+        .and_then(|line| line.split(" ").nth(1))
+        .and_then(|version| semver::Version::parse(version).ok())
+        .unwrap_or(semver::Version::new(1, 0, 0))
+}
+
+fn curl_version(config: &Config) -> semver::Version {
+    let mut curl = command("curl");
+    curl.arg("-V");
+    let curl = curl.run_capture_stdout(config);
+    if curl.is_failure() {
+        return semver::Version::new(1, 0, 0);
+    }
+    let output = curl.stdout();
+    extract_curl_version(output)
 }
 
 /// Generic helpers that are useful anywhere in bootstrap.
 impl Config {
     pub fn is_verbose(&self) -> bool {
-        self.verbose > 0
+        self.exec_ctx.is_verbose()
     }
 
-    pub(crate) fn create(&self, path: &Path, s: &str) {
+    pub(crate) fn create<P: AsRef<Path>>(&self, path: P, s: &str) {
         if self.dry_run() {
             return;
         }
@@ -41,7 +52,7 @@ impl Config {
         if self.dry_run() {
             return;
         }
-        fs::remove_file(f).unwrap_or_else(|_| panic!("failed to remove {:?}", f));
+        fs::remove_file(f).unwrap_or_else(|_| panic!("failed to remove {f:?}"));
     }
 
     /// Create a temporary directory in `out` and return its path.
@@ -54,35 +65,18 @@ impl Config {
         tmp
     }
 
-    /// Runs a command, printing out nice contextual information if it fails.
-    /// Returns false if do not execute at all, otherwise returns its
-    /// `status.success()`.
-    pub(crate) fn check_run(&self, cmd: &mut Command) -> bool {
-        if self.dry_run() {
-            return true;
-        }
-        self.verbose(|| println!("running: {cmd:?}"));
-        check_run(cmd, self.is_verbose())
-    }
-
     /// Whether or not `fix_bin_or_dylib` needs to be run; can only be true
     /// on NixOS
     fn should_fix_bins_and_dylibs(&self) -> bool {
         let val = *SHOULD_FIX_BINS_AND_DYLIBS.get_or_init(|| {
-            match Command::new("uname").arg("-s").stderr(Stdio::inherit()).output() {
-                Err(_) => return false,
-                Ok(output) if !output.status.success() => return false,
-                Ok(output) => {
-                    let mut os_name = output.stdout;
-                    if os_name.last() == Some(&b'\n') {
-                        os_name.pop();
-                    }
-                    if os_name != b"Linux" {
-                        return false;
-                    }
-                }
+            let uname = command("uname").allow_failure().arg("-s").run_capture_stdout(self);
+            if uname.is_failure() {
+                return false;
             }
-
+            let output = uname.stdout();
+            if !output.starts_with("Linux") {
+                return false;
+            }
             // If the user has asked binaries to be patched for Nix, then
             // don't check for NixOS or `/lib`.
             // NOTE: this intentionally comes after the Linux check:
@@ -96,7 +90,7 @@ impl Config {
             // The latter one does not exist on NixOS when using tmpfs as root.
             let is_nixos = match File::open("/etc/os-release") {
                 Err(e) if e.kind() == ErrorKind::NotFound => false,
-                Err(e) => panic!("failed to access /etc/os-release: {}", e),
+                Err(e) => panic!("failed to access /etc/os-release: {e}"),
                 Ok(os_release) => BufReader::new(os_release).lines().any(|l| {
                     let l = l.expect("reading /etc/os-release");
                     matches!(l.trim(), "ID=nixos" | "ID='nixos'" | "ID=\"nixos\"")
@@ -107,7 +101,7 @@ impl Config {
                 if let Ok(in_nix_shell) = in_nix_shell {
                     eprintln!(
                         "The IN_NIX_SHELL environment variable is `{in_nix_shell}`; \
-                         you may need to set `patch-binaries-for-nix=true` in config.toml"
+                         you may need to set `patch-binaries-for-nix=true` in bootstrap.toml"
                     );
                 }
             }
@@ -157,41 +151,30 @@ impl Config {
                 ];
             }
             ";
-            nix_build_succeeded = try_run(
-                self,
-                Command::new("nix-build").args([
-                    Path::new("-E"),
-                    Path::new(NIX_EXPR),
-                    Path::new("-o"),
-                    &nix_deps_dir,
-                ]),
-            )
-            .is_ok();
+            nix_build_succeeded = command("nix-build")
+                .allow_failure()
+                .args([Path::new("-E"), Path::new(NIX_EXPR), Path::new("-o"), &nix_deps_dir])
+                .run_capture_stdout(self)
+                .is_success();
             nix_deps_dir
         });
         if !nix_build_succeeded {
             return;
         }
 
-        let mut patchelf = Command::new(nix_deps_dir.join("bin/patchelf"));
-        let rpath_entries = {
-            // ORIGIN is a relative default, all binary and dynamic libraries we ship
-            // appear to have this (even when `../lib` is redundant).
-            // NOTE: there are only two paths here, delimited by a `:`
-            let mut entries = OsString::from("$ORIGIN/../lib:");
-            entries.push(t!(fs::canonicalize(nix_deps_dir)).join("lib"));
-            entries
-        };
-        patchelf.args(&[OsString::from("--set-rpath"), rpath_entries]);
+        let mut patchelf = command(nix_deps_dir.join("bin/patchelf"));
+        patchelf.args(&[
+            OsString::from("--add-rpath"),
+            OsString::from(t!(fs::canonicalize(nix_deps_dir)).join("lib")),
+        ]);
         if !path_is_dylib(fname) {
             // Finally, set the correct .interp for binaries
             let dynamic_linker_path = nix_deps_dir.join("nix-support/dynamic-linker");
-            // FIXME: can we support utf8 here? `args` doesn't accept Vec<u8>, only OsString ...
-            let dynamic_linker = t!(String::from_utf8(t!(fs::read(dynamic_linker_path))));
+            let dynamic_linker = t!(fs::read_to_string(dynamic_linker_path));
             patchelf.args(["--set-interpreter", dynamic_linker.trim_end()]);
         }
-
-        let _ = try_run(self, patchelf.arg(fname));
+        patchelf.arg(fname);
+        let _ = patchelf.allow_failure().run_capture_stdout(self);
     }
 
     fn download_file(&self, url: &str, dest_path: &Path, help_on_error: &str) {
@@ -209,7 +192,7 @@ impl Config {
             None => panic!("no protocol in {url}"),
         }
         t!(
-            std::fs::rename(&tempfile, dest_path),
+            move_file(&tempfile, dest_path),
             format!("failed to rename {tempfile:?} to {dest_path:?}")
         );
     }
@@ -217,32 +200,55 @@ impl Config {
     fn download_http_with_retries(&self, tempfile: &Path, url: &str, help_on_error: &str) {
         println!("downloading {url}");
         // Try curl. If that fails and we are on windows, fallback to PowerShell.
-        let mut curl = Command::new("curl");
+        // options should be kept in sync with
+        // src/bootstrap/src/core/download.rs
+        // for consistency
+        let mut curl = command("curl").allow_failure();
         curl.args([
-            "-y",
+            // follow redirect
+            "--location",
+            // timeout if speed is < 10 bytes/sec for > 30 seconds
+            "--speed-time",
             "30",
-            "-Y",
-            "10", // timeout if speed is < 10 bytes/sec for > 30 seconds
+            "--speed-limit",
+            "10",
+            // timeout if cannot connect within 30 seconds
             "--connect-timeout",
-            "30", // timeout if cannot connect within 30 seconds
-            "-o",
+            "30",
+            // output file
+            "--output",
             tempfile.to_str().unwrap(),
+            // if there is an error, don't restart the download,
+            // instead continue where it left off.
+            "--continue-at",
+            "-",
+            // retry up to 3 times.  note that this means a maximum of 4
+            // attempts will be made, since the first attempt isn't a *re*try.
             "--retry",
             "3",
-            "-SRf",
+            // show errors, even if --silent is specified
+            "--show-error",
+            // set timestamp of downloaded file to that of the server
+            "--remote-time",
+            // fail on non-ok http status
+            "--fail",
         ]);
         // Don't print progress in CI; the \r wrapping looks bad and downloads don't take long enough for progress to be useful.
-        if CiEnv::is_ci() {
-            curl.arg("-s");
+        if self.is_running_on_ci {
+            curl.arg("--silent");
         } else {
             curl.arg("--progress-bar");
         }
+        // --retry-all-errors was added in 7.71.0, don't use it if curl is old.
+        if curl_version(self) >= semver::Version::new(7, 71, 0) {
+            curl.arg("--retry-all-errors");
+        }
         curl.arg(url);
-        if !self.check_run(&mut curl) {
-            if self.build.contains("windows-msvc") {
+        if !curl.run(self) {
+            if self.host_target.contains("windows-msvc") {
                 eprintln!("Fallback to PowerShell");
                 for _ in 0..3 {
-                    if try_run(self, Command::new("PowerShell.exe").args([
+                    let powershell = command("PowerShell.exe").allow_failure().args([
                         "/nologo",
                         "-Command",
                         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;",
@@ -250,9 +256,12 @@ impl Config {
                             "(New-Object System.Net.WebClient).DownloadFile('{}', '{}')",
                             url, tempfile.to_str().expect("invalid UTF-8 not supported with powershell downloads"),
                         ),
-                    ])).is_err() {
+                    ]).run_capture_stdout(self);
+
+                    if powershell.is_failure() {
                         return;
                     }
+
                     eprintln!("\nspurious failure, trying again");
                 }
             }
@@ -281,11 +290,13 @@ impl Config {
 
         let mut tar = tar::Archive::new(decompressor);
 
+        let is_ci_rustc = dst.ends_with("ci-rustc");
+        let is_ci_llvm = dst.ends_with("ci-llvm");
+
         // `compile::Sysroot` needs to know the contents of the `rustc-dev` tarball to avoid adding
         // it to the sysroot unless it was explicitly requested. But parsing the 100 MB tarball is slow.
         // Cache the entries when we extract it so we only have to read it once.
-        let mut recorded_entries =
-            if dst.ends_with("ci-rustc") { recorded_entries(dst, pattern) } else { None };
+        let mut recorded_entries = if is_ci_rustc { recorded_entries(dst, pattern) } else { None };
 
         for member in t!(tar.entries()) {
             let mut member = t!(member);
@@ -295,10 +306,14 @@ impl Config {
                 continue;
             }
             let mut short_path = t!(original_path.strip_prefix(directory_prefix));
-            if !short_path.starts_with(pattern) {
+            let is_builder_config = short_path.to_str() == Some(BUILDER_CONFIG_FILENAME);
+
+            if !(short_path.starts_with(pattern)
+                || ((is_ci_rustc || is_ci_llvm) && is_builder_config))
+            {
                 continue;
             }
-            short_path = t!(short_path.strip_prefix(pattern));
+            short_path = short_path.strip_prefix(pattern).unwrap_or(short_path);
             let dst_path = dst.join(short_path);
             self.verbose(|| {
                 println!("extracting {} to {}", original_path.display(), dst.display())
@@ -313,7 +328,7 @@ impl Config {
             if src_path.is_dir() && dst_path.exists() {
                 continue;
             }
-            t!(fs::rename(src_path, dst_path));
+            t!(move_file(src_path, dst_path));
         }
         let dst_dir = dst.join(directory_prefix);
         if dst_dir.exists() {
@@ -378,19 +393,19 @@ enum DownloadSource {
     Dist,
 }
 
-/// Functions that are only ever called once, but named for clarify and to avoid thousand-line functions.
+/// Functions that are only ever called once, but named for clarity and to avoid thousand-line functions.
 impl Config {
     pub(crate) fn download_clippy(&self) -> PathBuf {
         self.verbose(|| println!("downloading stage0 clippy artifacts"));
 
         let date = &self.stage0_metadata.compiler.date;
         let version = &self.stage0_metadata.compiler.version;
-        let host = self.build;
+        let host = self.host_target;
 
-        let bin_root = self.out.join(host.triple).join("stage0");
-        let clippy_stamp = bin_root.join(".clippy-stamp");
-        let cargo_clippy = bin_root.join("bin").join(exe("cargo-clippy", host));
-        if cargo_clippy.exists() && !program_out_of_date(&clippy_stamp, date) {
+        let clippy_stamp =
+            BuildStamp::new(&self.initial_sysroot).with_prefix("clippy").add_stamp(date);
+        let cargo_clippy = self.initial_sysroot.join("bin").join(exe("cargo-clippy", host));
+        if cargo_clippy.exists() && clippy_stamp.is_up_to_date() {
             return cargo_clippy;
         }
 
@@ -401,21 +416,33 @@ impl Config {
             self.fix_bin_or_dylib(&cargo_clippy.with_file_name(exe("clippy-driver", host)));
         }
 
-        self.create(&clippy_stamp, date);
+        t!(clippy_stamp.write());
         cargo_clippy
+    }
+
+    #[cfg(test)]
+    pub(crate) fn maybe_download_rustfmt(&self) -> Option<PathBuf> {
+        Some(PathBuf::new())
     }
 
     /// NOTE: rustfmt is a completely different toolchain than the bootstrap compiler, so it can't
     /// reuse target directories or artifacts
+    #[cfg(not(test))]
     pub(crate) fn maybe_download_rustfmt(&self) -> Option<PathBuf> {
-        let RustfmtMetadata { date, version } = self.stage0_metadata.rustfmt.as_ref()?;
+        use build_helper::stage0_parser::VersionMetadata;
+
+        if self.dry_run() {
+            return Some(PathBuf::new());
+        }
+
+        let VersionMetadata { date, version } = self.stage0_metadata.rustfmt.as_ref()?;
         let channel = format!("{version}-{date}");
 
-        let host = self.build;
-        let bin_root = self.out.join(host.triple).join("rustfmt");
+        let host = self.host_target;
+        let bin_root = self.out.join(host).join("rustfmt");
         let rustfmt_path = bin_root.join("bin").join(exe("rustfmt", host));
-        let rustfmt_stamp = bin_root.join(".rustfmt-stamp");
-        if rustfmt_path.exists() && !program_out_of_date(&rustfmt_stamp, &channel) {
+        let rustfmt_stamp = BuildStamp::new(&bin_root).with_prefix("rustfmt").add_stamp(channel);
+        if rustfmt_path.exists() && rustfmt_stamp.is_up_to_date() {
             return Some(rustfmt_path);
         }
 
@@ -446,7 +473,7 @@ impl Config {
             }
         }
 
-        self.create(&rustfmt_stamp, &channel);
+        t!(rustfmt_stamp.write());
         Some(rustfmt_path)
     }
 
@@ -487,6 +514,10 @@ impl Config {
         );
     }
 
+    #[cfg(test)]
+    pub(crate) fn download_beta_toolchain(&self) {}
+
+    #[cfg(not(test))]
     pub(crate) fn download_beta_toolchain(&self) {
         self.verbose(|| println!("downloading stage0 beta artifacts"));
 
@@ -515,12 +546,12 @@ impl Config {
         extra_components: &[&str],
         download_component: fn(&Config, String, &str, &str),
     ) {
-        let host = self.build.triple;
+        let host = self.host_target.triple;
         let bin_root = self.out.join(host).join(sysroot);
-        let rustc_stamp = bin_root.join(".rustc-stamp");
+        let rustc_stamp = BuildStamp::new(&bin_root).with_prefix("rustc").add_stamp(stamp_key);
 
-        if !bin_root.join("bin").join(exe("rustc", self.build)).exists()
-            || program_out_of_date(&rustc_stamp, stamp_key)
+        if !bin_root.join("bin").join(exe("rustc", self.host_target)).exists()
+            || !rustc_stamp.is_up_to_date()
         {
             if bin_root.exists() {
                 t!(fs::remove_dir_all(&bin_root));
@@ -551,7 +582,7 @@ impl Config {
                 }
             }
 
-            t!(fs::write(rustc_stamp, stamp_key));
+            t!(rustc_stamp.write());
         }
     }
 
@@ -588,7 +619,7 @@ impl Config {
             t!(fs::create_dir_all(&cache_dir));
         }
 
-        let bin_root = self.out.join(self.build.triple).join(destination);
+        let bin_root = self.out.join(self.host_target).join(destination);
         let tarball = cache_dir.join(&filename);
         let (base_url, url, should_verify) = match mode {
             DownloadSource::CI => {
@@ -606,17 +637,15 @@ impl Config {
             DownloadSource::Dist => {
                 let dist_server = env::var("RUSTUP_DIST_SERVER")
                     .unwrap_or(self.stage0_metadata.config.dist_server.to_string());
-                // NOTE: make `dist` part of the URL because that's how it's stored in src/stage0.json
+                // NOTE: make `dist` part of the URL because that's how it's stored in src/stage0
                 (dist_server, format!("dist/{key}/{filename}"), true)
             }
         };
 
-        // For the beta compiler, put special effort into ensuring the checksums are valid.
-        // FIXME: maybe we should do this for download-rustc as well? but it would be a pain to update
-        // this on each and every nightly ...
+        // For the stage0 compiler, put special effort into ensuring the checksums are valid.
         let checksum = if should_verify {
             let error = format!(
-                "src/stage0.json doesn't contain a checksum for {url}. \
+                "src/stage0 doesn't contain a checksum for {url}. \
                 Pre-built artifacts might not be available for this \
                 target at this time, see https://doc.rust-lang.org/nightly\
                 /rustc/platform-support.html for more information."
@@ -649,32 +678,59 @@ impl Config {
             help_on_error = "ERROR: failed to download pre-built rustc from CI
 
 NOTE: old builds get deleted after a certain time
-HELP: if trying to compile an old commit of rustc, disable `download-rustc` in config.toml:
+HELP: if trying to compile an old commit of rustc, disable `download-rustc` in bootstrap.toml:
 
 [rust]
 download-rustc = false
 ";
         }
         self.download_file(&format!("{base_url}/{url}"), &tarball, help_on_error);
-        if let Some(sha256) = checksum {
-            if !self.verify(&tarball, sha256) {
-                panic!("failed to verify {}", tarball.display());
-            }
+        if let Some(sha256) = checksum
+            && !self.verify(&tarball, sha256)
+        {
+            panic!("failed to verify {}", tarball.display());
         }
 
         self.unpack(&tarball, &bin_root, prefix);
     }
 
+    #[cfg(test)]
+    pub(crate) fn maybe_download_ci_llvm(&self) {}
+
+    #[cfg(not(test))]
     pub(crate) fn maybe_download_ci_llvm(&self) {
+        use build_helper::exit;
+        use build_helper::git::PathFreshness;
+
+        use crate::core::build_steps::llvm::detect_llvm_freshness;
+        use crate::core::config::toml::llvm::check_incompatible_options_for_ci_llvm;
+
         if !self.llvm_from_ci {
             return;
         }
+
         let llvm_root = self.ci_llvm_root();
-        let llvm_stamp = llvm_root.join(".llvm-stamp");
-        let llvm_sha = detect_llvm_sha(self, self.rust_info.is_managed_git_subrepository());
-        let key = format!("{}{}", llvm_sha, self.llvm_assertions);
-        if program_out_of_date(&llvm_stamp, &key) && !self.dry_run() {
+        let llvm_freshness =
+            detect_llvm_freshness(self, self.rust_info.is_managed_git_subrepository());
+        self.verbose(|| {
+            eprintln!("LLVM freshness: {llvm_freshness:?}");
+        });
+        let llvm_sha = match llvm_freshness {
+            PathFreshness::LastModifiedUpstream { upstream } => upstream,
+            PathFreshness::HasLocalModifications { upstream } => upstream,
+            PathFreshness::MissingUpstream => {
+                eprintln!("error: could not find commit hash for downloading LLVM");
+                eprintln!("HELP: maybe your repository history is too shallow?");
+                eprintln!("HELP: consider disabling `download-ci-llvm`");
+                eprintln!("HELP: or fetch enough history to include one upstream commit");
+                crate::exit!(1);
+            }
+        };
+        let stamp_key = format!("{}{}", llvm_sha, self.llvm_assertions);
+        let llvm_stamp = BuildStamp::new(&llvm_root).with_prefix("llvm").add_stamp(stamp_key);
+        if !llvm_stamp.is_up_to_date() && !self.dry_run() {
             self.download_ci_llvm(&llvm_sha);
+
             if self.should_fix_bins_and_dylibs() {
                 for entry in t!(fs::read_dir(llvm_root.join("bin"))) {
                     self.fix_bin_or_dylib(&t!(entry).path());
@@ -689,9 +745,11 @@ download-rustc = false
             // time `rustc_llvm` build script ran. However, the timestamps of the
             // files in the tarball are in the past, so it doesn't trigger a
             // rebuild.
-            let now = filetime::FileTime::from_system_time(std::time::SystemTime::now());
-            let llvm_config = llvm_root.join("bin").join(exe("llvm-config", self.build));
-            t!(filetime::set_file_times(llvm_config, now, now));
+            let now = std::time::SystemTime::now();
+            let file_times = fs::FileTimes::new().set_accessed(now).set_modified(now);
+
+            let llvm_config = llvm_root.join("bin").join(exe("llvm-config", self.host_target));
+            t!(crate::utils::helpers::set_file_times(llvm_config, file_times));
 
             if self.should_fix_bins_and_dylibs() {
                 let llvm_lib = llvm_root.join("lib");
@@ -703,10 +761,31 @@ download-rustc = false
                 }
             }
 
-            t!(fs::write(llvm_stamp, key));
+            t!(llvm_stamp.write());
         }
+
+        if let Some(config_path) = &self.config {
+            let current_config_toml = Self::get_toml(config_path).unwrap();
+
+            match self.get_builder_toml("ci-llvm") {
+                Ok(ci_config_toml) => {
+                    t!(check_incompatible_options_for_ci_llvm(current_config_toml, ci_config_toml));
+                }
+                Err(e) if e.to_string().contains("unknown field") => {
+                    println!(
+                        "WARNING: CI LLVM has some fields that are no longer supported in bootstrap; download-ci-llvm will be disabled."
+                    );
+                    println!("HELP: Consider rebasing to a newer commit if available.");
+                }
+                Err(e) => {
+                    eprintln!("ERROR: Failed to parse CI LLVM bootstrap.toml: {e}");
+                    exit!(2);
+                }
+            };
+        };
     }
 
+    #[cfg(not(test))]
     fn download_ci_llvm(&self, llvm_sha: &str) {
         let llvm_assertions = self.llvm_assertions;
 
@@ -724,7 +803,7 @@ download-rustc = false
             &self.stage0_metadata.config.artifacts_server
         };
         let version = self.artifact_version_part(llvm_sha);
-        let filename = format!("rust-dev-{}-{}.tar.xz", version, self.build.triple);
+        let filename = format!("rust-dev-{}-{}.tar.xz", version, self.host_target.triple);
         let tarball = rustc_cache.join(&filename);
         if !tarball.exists() {
             let help_on_error = "ERROR: failed to download llvm from ci
@@ -732,7 +811,7 @@ download-rustc = false
     HELP: There could be two reasons behind this:
         1) The host triple is not supported for `download-ci-llvm`.
         2) Old builds get deleted after a certain time.
-    HELP: In either case, disable `download-ci-llvm` in your config.toml:
+    HELP: In either case, disable `download-ci-llvm` in your bootstrap.toml:
 
     [llvm]
     download-ci-llvm = false
@@ -742,9 +821,78 @@ download-rustc = false
         let llvm_root = self.ci_llvm_root();
         self.unpack(&tarball, &llvm_root, "rust-dev");
     }
+
+    pub fn download_ci_gcc(&self, gcc_sha: &str, root_dir: &Path) {
+        let cache_prefix = format!("gcc-{gcc_sha}");
+        let cache_dst =
+            self.bootstrap_cache_path.as_ref().cloned().unwrap_or_else(|| self.out.join("cache"));
+
+        let gcc_cache = cache_dst.join(cache_prefix);
+        if !gcc_cache.exists() {
+            t!(fs::create_dir_all(&gcc_cache));
+        }
+        let base = &self.stage0_metadata.config.artifacts_server;
+        let version = self.artifact_version_part(gcc_sha);
+        let filename = format!("gcc-{version}-{}.tar.xz", self.host_target.triple);
+        let tarball = gcc_cache.join(&filename);
+        if !tarball.exists() {
+            let help_on_error = "ERROR: failed to download gcc from ci
+
+    HELP: There could be two reasons behind this:
+        1) The host triple is not supported for `download-ci-gcc`.
+        2) Old builds get deleted after a certain time.
+    HELP: In either case, disable `download-ci-gcc` in your bootstrap.toml:
+
+    [gcc]
+    download-ci-gcc = false
+    ";
+            self.download_file(&format!("{base}/{gcc_sha}/{filename}"), &tarball, help_on_error);
+        }
+        self.unpack(&tarball, root_dir, "gcc");
+    }
 }
 
 fn path_is_dylib(path: &Path) -> bool {
     // The .so is not necessarily the extension, it might be libLLVM.so.18.1
-    path.to_str().map_or(false, |path| path.contains(".so"))
+    path.to_str().is_some_and(|path| path.contains(".so"))
+}
+
+/// Checks whether the CI rustc is available for the given target triple.
+pub(crate) fn is_download_ci_available(target_triple: &str, llvm_assertions: bool) -> bool {
+    // All tier 1 targets and tier 2 targets with host tools.
+    const SUPPORTED_PLATFORMS: &[&str] = &[
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "arm-unknown-linux-gnueabi",
+        "arm-unknown-linux-gnueabihf",
+        "armv7-unknown-linux-gnueabihf",
+        "i686-pc-windows-gnu",
+        "i686-pc-windows-msvc",
+        "i686-unknown-linux-gnu",
+        "loongarch64-unknown-linux-gnu",
+        "powerpc-unknown-linux-gnu",
+        "powerpc64-unknown-linux-gnu",
+        "powerpc64le-unknown-linux-gnu",
+        "riscv64gc-unknown-linux-gnu",
+        "s390x-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-gnu",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-freebsd",
+        "x86_64-unknown-illumos",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "x86_64-unknown-netbsd",
+    ];
+
+    const SUPPORTED_PLATFORMS_WITH_ASSERTIONS: &[&str] =
+        &["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"];
+
+    if llvm_assertions {
+        SUPPORTED_PLATFORMS_WITH_ASSERTIONS.contains(&target_triple)
+    } else {
+        SUPPORTED_PLATFORMS.contains(&target_triple)
+    }
 }

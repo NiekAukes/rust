@@ -47,8 +47,14 @@ pub mod __macro {
     pub struct T;
     impl T {
         pub unsafe fn f() {}
-        //~^ ERROR: unsafe function's docs miss `# Safety` section
+        //~^ ERROR: unsafe function's docs are missing a `# Safety` section
     }
+}
+
+#[warn(clippy::missing_errors_doc)]
+#[test]
+fn test() -> Result<(), ()> {
+    Ok(())
 }
 
 fn main() {}

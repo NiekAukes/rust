@@ -5,14 +5,14 @@ LL |       needlesArr.iter().fold(|x, y| {
    |  _______________________^^^^-
 LL | |
 LL | |     });
-   | |______- an argument is missing
+   | |______- argument #2 is missing
    |
 note: method defined here
   --> $SRC_DIR/core/src/iter/traits/iterator.rs:LL:COL
 help: provide the argument
    |
-LL ~     needlesArr.iter().fold(|x, y| {
-LL +
+LL |     needlesArr.iter().fold(|x, y| {
+LL |
 LL ~     }, /* f */);
    |
 

@@ -1,25 +1,31 @@
 use std::any::Any;
-use std::process::ExitStatus;
-
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
 
+pub use self::TestResult::*;
 use super::bench::BenchSamples;
 use super::options::ShouldPanic;
 use super::time;
 use super::types::TestDesc;
 
-pub use self::TestResult::*;
-
 // Return code for secondary process.
 // Start somewhere other than 0 so we know the return code means what we think
 // it means.
-pub const TR_OK: i32 = 50;
+pub(crate) const TR_OK: i32 = 50;
 
 // On Windows we use __fastfail to abort, which is documented to use this
 // exception code.
 #[cfg(windows)]
-const STATUS_ABORTED: i32 = 0xC0000409u32 as i32;
+const STATUS_FAIL_FAST_EXCEPTION: i32 = 0xC0000409u32 as i32;
+
+// On Zircon (the Fuchsia kernel), an abort from userspace calls the
+// LLVM implementation of __builtin_trap(), e.g., ud2 on x86, which
+// raises a kernel exception. If a userspace process does not
+// otherwise arrange exception handling, the kernel kills the process
+// with this return code.
+#[cfg(target_os = "fuchsia")]
+const ZX_TASK_RETCODE_EXCEPTION_KILL: i32 = -1028;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TestResult {
@@ -33,15 +39,18 @@ pub enum TestResult {
 
 /// Creates a `TestResult` depending on the raw result of test execution
 /// and associated data.
-pub fn calc_result<'a>(
+pub(crate) fn calc_result(
     desc: &TestDesc,
-    task_result: Result<(), &'a (dyn Any + 'static + Send)>,
-    time_opts: &Option<time::TestTimeOptions>,
-    exec_time: &Option<time::TestExecTime>,
+    panic_payload: Option<&(dyn Any + Send)>,
+    time_opts: Option<&time::TestTimeOptions>,
+    exec_time: Option<&time::TestExecTime>,
 ) -> TestResult {
-    let result = match (&desc.should_panic, task_result) {
-        (&ShouldPanic::No, Ok(())) | (&ShouldPanic::Yes, Err(_)) => TestResult::TrOk,
-        (&ShouldPanic::YesWithMessage(msg), Err(err)) => {
+    let result = match (desc.should_panic, panic_payload) {
+        // The test did or didn't panic, as expected.
+        (ShouldPanic::No, None) | (ShouldPanic::Yes, Some(_)) => TestResult::TrOk,
+
+        // Check the actual panic message against the expected message.
+        (ShouldPanic::YesWithMessage(msg), Some(err)) => {
             let maybe_panic_str = err
                 .downcast_ref::<String>()
                 .map(|e| &**e)
@@ -52,23 +61,31 @@ pub fn calc_result<'a>(
             } else if let Some(panic_str) = maybe_panic_str {
                 TestResult::TrFailedMsg(format!(
                     r#"panic did not contain expected string
-      panic message: `{panic_str:?}`,
- expected substring: `{msg:?}`"#
+      panic message: {panic_str:?}
+ expected substring: {msg:?}"#
                 ))
             } else {
                 TestResult::TrFailedMsg(format!(
                     r#"expected panic with string value,
  found non-string value: `{:?}`
-     expected substring: `{:?}`"#,
-                    (*err).type_id(),
-                    msg
+     expected substring: {msg:?}"#,
+                    (*err).type_id()
                 ))
             }
         }
-        (&ShouldPanic::Yes, Ok(())) | (&ShouldPanic::YesWithMessage(_), Ok(())) => {
-            TestResult::TrFailedMsg("test did not panic as expected".to_string())
+
+        // The test should have panicked, but didn't panic.
+        (ShouldPanic::Yes, None) | (ShouldPanic::YesWithMessage(_), None) => {
+            let fn_location = if !desc.source_file.is_empty() {
+                &format!(" at {}:{}:{}", desc.source_file, desc.start_line, desc.start_col)
+            } else {
+                ""
+            };
+            TestResult::TrFailedMsg(format!("test did not panic as expected{}", fn_location))
         }
-        _ => TestResult::TrFailed,
+
+        // The test should not have panicked, but did panic.
+        (ShouldPanic::No, Some(_)) => TestResult::TrFailed,
     };
 
     // If test is already failed (or allowed to fail), do not change the result.
@@ -87,16 +104,16 @@ pub fn calc_result<'a>(
 }
 
 /// Creates a `TestResult` depending on the exit code of test subprocess.
-pub fn get_result_from_exit_code(
+pub(crate) fn get_result_from_exit_code(
     desc: &TestDesc,
     status: ExitStatus,
-    time_opts: &Option<time::TestTimeOptions>,
-    exec_time: &Option<time::TestExecTime>,
+    time_opts: Option<&time::TestTimeOptions>,
+    exec_time: Option<&time::TestExecTime>,
 ) -> TestResult {
     let result = match status.code() {
         Some(TR_OK) => TestResult::TrOk,
         #[cfg(windows)]
-        Some(STATUS_ABORTED) => TestResult::TrFailed,
+        Some(STATUS_FAIL_FAST_EXCEPTION) => TestResult::TrFailed,
         #[cfg(unix)]
         None => match status.signal() {
             Some(libc::SIGABRT) => TestResult::TrFailed,
@@ -105,6 +122,9 @@ pub fn get_result_from_exit_code(
             }
             None => unreachable!("status.code() returned None but status.signal() was None"),
         },
+        // Upon an abort, Fuchsia returns the status code ZX_TASK_RETCODE_EXCEPTION_KILL.
+        #[cfg(target_os = "fuchsia")]
+        Some(ZX_TASK_RETCODE_EXCEPTION_KILL) => TestResult::TrFailed,
         #[cfg(not(unix))]
         None => TestResult::TrFailedMsg(format!("unknown return code")),
         #[cfg(any(windows, unix))]

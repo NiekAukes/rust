@@ -10,11 +10,15 @@ use parser::SyntaxKind;
 use rowan::{GreenNodeData, GreenTokenData};
 
 use crate::{
-    ast::{self, support, AstNode, AstToken, HasAttrs, HasGenericParams, HasName, SyntaxNode},
-    ted, NodeOrToken, SmolStr, SyntaxElement, SyntaxToken, TokenText, T,
+    NodeOrToken, SmolStr, SyntaxElement, SyntaxToken, T, TokenText,
+    ast::{
+        self, AstNode, AstToken, HasAttrs, HasGenericArgs, HasGenericParams, HasName, SyntaxNode,
+        support,
+    },
+    ted,
 };
 
-use super::{RangeItem, RangeOp};
+use super::{GenericParam, RangeItem, RangeOp};
 
 impl ast::Lifetime {
     pub fn text(&self) -> TokenText<'_> {
@@ -26,11 +30,31 @@ impl ast::Name {
     pub fn text(&self) -> TokenText<'_> {
         text_of_first_token(self.syntax())
     }
+    pub fn text_non_mutable(&self) -> &str {
+        fn first_token(green_ref: &GreenNodeData) -> &GreenTokenData {
+            green_ref.children().next().and_then(NodeOrToken::into_token).unwrap()
+        }
+
+        match self.syntax().green() {
+            Cow::Borrowed(green_ref) => first_token(green_ref).text(),
+            Cow::Owned(_) => unreachable!(),
+        }
+    }
 }
 
 impl ast::NameRef {
     pub fn text(&self) -> TokenText<'_> {
         text_of_first_token(self.syntax())
+    }
+    pub fn text_non_mutable(&self) -> &str {
+        fn first_token(green_ref: &GreenNodeData) -> &GreenTokenData {
+            green_ref.children().next().and_then(NodeOrToken::into_token).unwrap()
+        }
+
+        match self.syntax().green() {
+            Cow::Borrowed(green_ref) => first_token(green_ref).text(),
+            Cow::Owned(_) => unreachable!(),
+        }
     }
 
     pub fn as_tuple_field(&self) -> Option<usize> {
@@ -182,6 +206,14 @@ impl ast::Attr {
         Some((self.simple_name()?, tt))
     }
 
+    pub fn as_simple_path(&self) -> Option<ast::Path> {
+        let meta = self.meta()?;
+        if meta.eq_token().is_some() || meta.token_tree().is_some() {
+            return None;
+        }
+        self.path()
+    }
+
     pub fn simple_name(&self) -> Option<SmolStr> {
         let path = self.meta()?.path()?;
         match (path.segment(), path.qualifier()) {
@@ -254,18 +286,15 @@ impl ast::PathSegment {
                 _ => PathSegmentKind::Name(name_ref),
             }
         } else {
-            match self.syntax().first_child_or_token()?.kind() {
-                T![<] => {
-                    // <T> or <T as Trait>
-                    // T is any TypeRef, Trait has to be a PathType
-                    let mut type_refs =
-                        self.syntax().children().filter(|node| ast::Type::can_cast(node.kind()));
-                    let type_ref = type_refs.next().and_then(ast::Type::cast);
-                    let trait_ref = type_refs.next().and_then(ast::PathType::cast);
-                    PathSegmentKind::Type { type_ref, trait_ref }
-                }
-                _ => return None,
-            }
+            let anchor = self.type_anchor()?;
+            // FIXME: Move this over to `ast::TypeAnchor`
+            // <T> or <T as Trait>
+            // T is any TypeRef, Trait has to be a PathType
+            let mut type_refs =
+                anchor.syntax().children().filter(|node| ast::Type::can_cast(node.kind()));
+            let type_ref = type_refs.next().and_then(ast::Type::cast);
+            let trait_ref = type_refs.next().and_then(ast::PathType::cast);
+            PathSegmentKind::Type { type_ref, trait_ref }
         };
         Some(res)
     }
@@ -306,11 +335,7 @@ impl ast::Path {
         let path_range = self.syntax().text_range();
         successors(self.first_segment(), move |p| {
             p.parent_path().parent_path().and_then(|p| {
-                if path_range.contains_range(p.syntax().text_range()) {
-                    p.segment()
-                } else {
-                    None
-                }
+                if path_range.contains_range(p.syntax().text_range()) { p.segment() } else { None }
             })
         })
     }
@@ -330,7 +355,7 @@ impl ast::Path {
 
 impl ast::Use {
     pub fn is_simple_glob(&self) -> bool {
-        self.use_tree().map_or(false, |use_tree| {
+        self.use_tree().is_some_and(|use_tree| {
             use_tree.use_tree_list().is_none() && use_tree.star_token().is_some()
         })
     }
@@ -378,9 +403,26 @@ impl ast::UseTreeList {
 
     /// Remove the unnecessary braces in current `UseTreeList`
     pub fn remove_unnecessary_braces(mut self) {
+        // Returns true iff there is a single subtree and it is not the self keyword. The braces in
+        // `use x::{self};` are necessary and so we should not remove them.
+        let has_single_subtree_that_is_not_self = |u: &ast::UseTreeList| {
+            if let Some((single_subtree,)) = u.use_trees().collect_tuple() {
+                // We have a single subtree, check whether it is self.
+
+                let is_self = single_subtree.path().as_ref().is_some_and(|path| {
+                    path.segment().and_then(|seg| seg.self_token()).is_some()
+                        && path.qualifier().is_none()
+                });
+
+                !is_self
+            } else {
+                // Not a single subtree
+                false
+            }
+        };
+
         let remove_brace_in_use_tree_list = |u: &ast::UseTreeList| {
-            let use_tree_count = u.use_trees().count();
-            if use_tree_count == 1 {
+            if has_single_subtree_that_is_not_self(u) {
                 if let Some(a) = u.l_curly_token() {
                     ted::remove(a)
                 }
@@ -438,7 +480,7 @@ impl ast::Impl {
 // [#15778](https://github.com/rust-lang/rust-analyzer/issues/15778)
 impl ast::PathSegment {
     pub fn qualifying_trait(&self) -> Option<ast::PathType> {
-        let mut path_types = support::children(self.syntax());
+        let mut path_types = support::children(self.type_anchor()?.syntax());
         let first = path_types.next()?;
         path_types.next().or(Some(first))
     }
@@ -478,11 +520,7 @@ impl ast::Union {
 impl ast::RecordExprField {
     pub fn for_field_name(field_name: &ast::NameRef) -> Option<ast::RecordExprField> {
         let candidate = Self::for_name_ref(field_name)?;
-        if candidate.field_name().as_ref() == Some(field_name) {
-            Some(candidate)
-        } else {
-            None
-        }
+        if candidate.field_name().as_ref() == Some(field_name) { Some(candidate) } else { None }
     }
 
     pub fn for_name_ref(name_ref: &ast::NameRef) -> Option<ast::RecordExprField> {
@@ -757,11 +795,7 @@ pub enum SelfParamKind {
 impl ast::SelfParam {
     pub fn kind(&self) -> SelfParamKind {
         if self.amp_token().is_some() {
-            if self.mut_token().is_some() {
-                SelfParamKind::MutRef
-            } else {
-                SelfParamKind::Ref
-            }
+            if self.mut_token().is_some() { SelfParamKind::MutRef } else { SelfParamKind::Ref }
         } else {
             SelfParamKind::Owned
         }
@@ -774,6 +808,8 @@ pub enum TypeBoundKind {
     PathType(ast::PathType),
     /// for<'a> ...
     ForType(ast::ForType),
+    /// use
+    Use(ast::UseBoundGenericArgs),
     /// 'a
     Lifetime(ast::Lifetime),
 }
@@ -784,6 +820,8 @@ impl ast::TypeBound {
             TypeBoundKind::PathType(path_type)
         } else if let Some(for_type) = support::children(self.syntax()).next() {
             TypeBoundKind::ForType(for_type)
+        } else if let Some(args) = self.use_bound_generic_args() {
+            TypeBoundKind::Use(args)
         } else if let Some(lifetime) = self.lifetime() {
             TypeBoundKind::Lifetime(lifetime)
         } else {
@@ -796,6 +834,15 @@ impl ast::TypeBound {
 pub enum TypeOrConstParam {
     Type(ast::TypeParam),
     Const(ast::ConstParam),
+}
+
+impl From<TypeOrConstParam> for GenericParam {
+    fn from(value: TypeOrConstParam) -> Self {
+        match value {
+            TypeOrConstParam::Type(it) => GenericParam::TypeParam(it),
+            TypeOrConstParam::Const(it) => GenericParam::ConstParam(it),
+        }
+    }
 }
 
 impl TypeOrConstParam {
@@ -1025,7 +1072,7 @@ impl ast::GenericParamList {
             ast::GenericParam::TypeParam(_) | ast::GenericParam::ConstParam(_) => None,
         })
     }
-    pub fn type_or_const_params(&self) -> impl Iterator<Item = ast::TypeOrConstParam> {
+    pub fn type_or_const_params(&self) -> impl Iterator<Item = ast::TypeOrConstParam> + use<> {
         self.generic_params().filter_map(|param| match param {
             ast::GenericParam::TypeParam(it) => Some(ast::TypeOrConstParam::Type(it)),
             ast::GenericParam::LifetimeParam(_) => None,
@@ -1108,20 +1155,12 @@ impl From<ast::AssocItem> for ast::AnyHasAttrs {
     }
 }
 
-impl From<ast::Variant> for ast::AnyHasAttrs {
-    fn from(node: ast::Variant) -> Self {
-        Self::new(node)
-    }
-}
-
-impl From<ast::RecordField> for ast::AnyHasAttrs {
-    fn from(node: ast::RecordField) -> Self {
-        Self::new(node)
-    }
-}
-
-impl From<ast::TupleField> for ast::AnyHasAttrs {
-    fn from(node: ast::TupleField) -> Self {
-        Self::new(node)
+impl ast::OrPat {
+    pub fn leading_pipe(&self) -> Option<SyntaxToken> {
+        self.syntax
+            .children_with_tokens()
+            .find(|it| !it.kind().is_trivia())
+            .and_then(NodeOrToken::into_token)
+            .filter(|it| it.kind() == T![|])
     }
 }

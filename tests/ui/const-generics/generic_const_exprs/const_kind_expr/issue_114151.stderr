@@ -2,7 +2,7 @@ error[E0107]: function takes 1 generic argument but 2 generic arguments were sup
   --> $DIR/issue_114151.rs:17:5
    |
 LL |     foo::<_, L>([(); L + 1 + L]);
-   |     ^^^      - help: remove this generic argument
+   |     ^^^    --- help: remove the unnecessary generic argument
    |     |
    |     expected 1 generic argument
    |
@@ -27,7 +27,7 @@ LL |     foo::<_, L>([(); L + 1 + L]);
 help: try adding a `where` bound
    |
 LL |     [(); (L - 1) + 1 + L]:, [(); L + 1 + L]:
-   |                           ~~~~~~~~~~~~~~~~~~
+   |                             ++++++++++++++++
 
 error: unconstrained generic constant
   --> $DIR/issue_114151.rs:17:17

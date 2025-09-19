@@ -1,46 +1,14 @@
-use rustc_hir::def_id::{LocalDefId, LOCAL_CRATE};
+use rustc_abi::ExternAbi;
+use rustc_hir::def_id::{LOCAL_CRATE, LocalDefId};
 use rustc_middle::mir::*;
-use rustc_middle::query::LocalCrate;
-use rustc_middle::query::Providers;
-use rustc_middle::ty::layout;
-use rustc_middle::ty::{self, TyCtxt};
+use rustc_middle::query::{LocalCrate, Providers};
+use rustc_middle::ty::{self, TyCtxt, layout};
+use rustc_middle::{bug, span_bug};
 use rustc_session::lint::builtin::FFI_UNWIND_CALLS;
-use rustc_target::spec::abi::Abi;
 use rustc_target::spec::PanicStrategy;
+use tracing::debug;
 
 use crate::errors;
-
-/// Some of the functions declared as "may unwind" by `fn_can_unwind` can't actually unwind. In
-/// particular, `extern "C"` is still considered as can-unwind on stable, but we need to consider
-/// it cannot-unwind here. So below we check `fn_can_unwind() && abi_can_unwind()` before concluding
-/// that a function call can unwind.
-fn abi_can_unwind(abi: Abi) -> bool {
-    use Abi::*;
-    match abi {
-        C { unwind }
-        | System { unwind }
-        | Cdecl { unwind }
-        | Stdcall { unwind }
-        | Fastcall { unwind }
-        | Vectorcall { unwind }
-        | Thiscall { unwind }
-        | Aapcs { unwind }
-        | Win64 { unwind }
-        | SysV64 { unwind } => unwind,
-        PtxKernel
-        | Msp430Interrupt
-        | X86Interrupt
-        | EfiApi
-        | AvrInterrupt
-        | AvrNonBlockingInterrupt
-        | RiscvInterruptM
-        | RiscvInterruptS
-        | CCmseNonSecureCall
-        | Wasm
-        | Unadjusted => false,
-        RustIntrinsic | Rust | RustCall | RustCold => unreachable!(), // these ABIs are already skipped earlier
-    }
-}
 
 // Check if the body of this def_id can possibly leak a foreign unwind into Rust code.
 fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
@@ -60,9 +28,9 @@ fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
     // IMPORTANT: due to kernels, the DefKind may be fn_like, but the Ty can be something else
     let body_abi = match body_ty.kind() {
         ty::FnDef(..) => body_ty.fn_sig(tcx).abi(),
-        ty::Closure(..) => Abi::RustCall,
-        ty::CoroutineClosure(..) => Abi::RustCall,
-        ty::Coroutine(..) => Abi::Rust,
+        ty::Closure(..) => ExternAbi::RustCall,
+        ty::CoroutineClosure(..) => ExternAbi::RustCall,
+        ty::Coroutine(..) => ExternAbi::Rust,
         ty::Error(_) => return false,
         _ if tcx.is_kernel(def_id) => return false, // if the function is a kernel, return false
         _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
@@ -88,15 +56,16 @@ fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
 
         // Rust calls cannot themselves create foreign unwinds.
         // We assume this is true for intrinsics as well.
-        if let Abi::RustIntrinsic | Abi::Rust | Abi::RustCall | Abi::RustCold = sig.abi() {
+        if sig.abi().is_rustic_abi() {
             continue;
         };
 
         let fn_def_id = match ty.kind() {
-            ty::FnPtr(_) => None,
+            ty::FnPtr(..) => None,
             &ty::FnDef(def_id, _) => {
-                // Rust calls cannot themselves create foreign unwinds (even if they use a non-Rust ABI).
-                // So the leak of the foreign unwind into Rust can only be elsewhere, not here.
+                // Rust calls cannot themselves create foreign unwinds (even if they use a non-Rust
+                // ABI). So the leak of the foreign unwind into Rust can only be elsewhere, not
+                // here.
                 if !tcx.is_foreign_item(def_id) {
                     continue;
                 }
@@ -105,7 +74,7 @@ fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
             _ => bug!("invalid callee of type {:?}", ty),
         };
 
-        if layout::fn_can_unwind(tcx, fn_def_id, sig.abi()) && abi_can_unwind(sig.abi()) {
+        if layout::fn_can_unwind(tcx, fn_def_id, sig.abi()) {
             // We have detected a call that can possibly leak foreign unwind.
             //
             // Because the function body itself can unwind, we are not aborting this function call
@@ -115,7 +84,7 @@ fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
             let lint_root = body.source_scopes[terminator.source_info.scope]
                 .local_data
                 .as_ref()
-                .assert_crate_local()
+                .unwrap_crate_local()
                 .lint_root;
             let span = terminator.source_info.span;
 
@@ -143,7 +112,7 @@ fn required_panic_strategy(tcx: TyCtxt<'_>, _: LocalCrate) -> Option<PanicStrate
         return Some(PanicStrategy::Abort);
     }
 
-    for def_id in tcx.hir().body_owners() {
+    for def_id in tcx.hir_body_owners() {
         if tcx.has_ffi_unwind_calls(def_id) {
             // Given that this crate is compiled in `-C panic=unwind`, the `AbortUnwindingCalls`
             // MIR pass will not be run on FFI-unwind call sites, therefore a foreign exception

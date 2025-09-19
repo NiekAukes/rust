@@ -4,9 +4,9 @@
 #![rustc_coherence_is_core]
 #![crate_type = "rlib"]
 
-// @has prim_methods_local/index.html
-// @has - '//*[@id="main-content"]//a[@href="primitive.char.html"]' 'char'
-// @has - '//*[@id="main-content"]//a[@href="primitive.char.html#method.len_utf8"]' 'char::len_utf8'
+//@ has prim_methods_local/index.html
+//@ has - '//*[@id="main-content"]//a[@href="primitive.char.html"]' 'char'
+//@ has - '//*[@id="main-content"]//a[@href="primitive.char.html#method.len_utf8"]' 'char::len_utf8'
 
 //! A [prim@`char`] and its [`char::len_utf8`].
 
@@ -19,8 +19,14 @@ impl char {
     }
 }
 
+#[lang = "pointee_sized"]
+pub trait PointeeSized {}
+
+#[lang = "meta_sized"]
+pub trait MetaSized: PointeeSized {}
+
 #[lang = "sized"]
-pub trait Sized {}
+pub trait Sized: MetaSized {}
 
 #[lang = "clone"]
 pub trait Clone: Sized {}

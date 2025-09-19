@@ -1,10 +1,8 @@
-use crate::error;
-use crate::fmt;
 use crate::io::{
-    self, ErrorKind, IntoInnerError, IoSlice, Seek, SeekFrom, Write, DEFAULT_BUF_SIZE,
+    self, DEFAULT_BUF_SIZE, ErrorKind, IntoInnerError, IoSlice, Seek, SeekFrom, Write,
 };
-use crate::mem;
-use crate::ptr;
+use crate::mem::{self, ManuallyDrop};
+use crate::{error, fmt, ptr};
 
 /// Wraps a writer and buffers its output.
 ///
@@ -96,6 +94,16 @@ impl<W: Write> BufWriter<W> {
         BufWriter::with_capacity(DEFAULT_BUF_SIZE, inner)
     }
 
+    pub(crate) fn try_new_buffer() -> io::Result<Vec<u8>> {
+        Vec::try_with_capacity(DEFAULT_BUF_SIZE).map_err(|_| {
+            io::const_error!(ErrorKind::OutOfMemory, "failed to allocate write buffer")
+        })
+    }
+
+    pub(crate) fn with_buffer(inner: W, buf: Vec<u8>) -> Self {
+        Self { inner, buf, panicked: false }
+    }
+
     /// Creates a new `BufWriter<W>` with at least the specified buffer capacity.
     ///
     /// # Examples
@@ -164,13 +172,13 @@ impl<W: Write> BufWriter<W> {
     /// assert_eq!(&buffered_data.unwrap(), b"ata");
     /// ```
     #[stable(feature = "bufwriter_into_parts", since = "1.56.0")]
-    pub fn into_parts(mut self) -> (W, Result<Vec<u8>, WriterPanicked>) {
-        let buf = mem::take(&mut self.buf);
-        let buf = if !self.panicked { Ok(buf) } else { Err(WriterPanicked { buf }) };
+    pub fn into_parts(self) -> (W, Result<Vec<u8>, WriterPanicked>) {
+        let mut this = ManuallyDrop::new(self);
+        let buf = mem::take(&mut this.buf);
+        let buf = if !this.panicked { Ok(buf) } else { Err(WriterPanicked { buf }) };
 
-        // SAFETY: forget(self) prevents double dropping inner
-        let inner = unsafe { ptr::read(&self.inner) };
-        mem::forget(self);
+        // SAFETY: double-drops are prevented by putting `this` in a ManuallyDrop that is never dropped
+        let inner = unsafe { ptr::read(&this.inner) };
 
         (inner, buf)
     }
@@ -230,7 +238,7 @@ impl<W: ?Sized + Write> BufWriter<W> {
 
             match r {
                 Ok(0) => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         ErrorKind::WriteZero,
                         "failed to write the buffered data",
                     ));
@@ -433,9 +441,11 @@ impl<W: ?Sized + Write> BufWriter<W> {
         let old_len = self.buf.len();
         let buf_len = buf.len();
         let src = buf.as_ptr();
-        let dst = self.buf.as_mut_ptr().add(old_len);
-        ptr::copy_nonoverlapping(src, dst, buf_len);
-        self.buf.set_len(old_len + buf_len);
+        unsafe {
+            let dst = self.buf.as_mut_ptr().add(old_len);
+            ptr::copy_nonoverlapping(src, dst, buf_len);
+            self.buf.set_len(old_len + buf_len);
+        }
     }
 
     #[inline]

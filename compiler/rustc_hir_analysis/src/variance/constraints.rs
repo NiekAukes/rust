@@ -6,13 +6,14 @@
 use hir::def_id::{DefId, LocalDefId};
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
-use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_middle::ty::{GenericArgKind, GenericArgsRef};
+use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
+use tracing::{debug, instrument};
 
 use super::terms::VarianceTerm::*;
 use super::terms::*;
 
-pub struct ConstraintContext<'a, 'tcx> {
+pub(crate) struct ConstraintContext<'a, 'tcx> {
     pub terms_cx: TermsContext<'a, 'tcx>,
 
     // These are pointers to common `ConstantTerm` instances
@@ -27,7 +28,7 @@ pub struct ConstraintContext<'a, 'tcx> {
 /// Declares that the variable `decl_id` appears in a location with
 /// variance `variance`.
 #[derive(Copy, Clone)]
-pub struct Constraint<'a> {
+pub(crate) struct Constraint<'a> {
     pub inferred: InferredIndex,
     pub variance: &'a VarianceTerm<'a>,
 }
@@ -41,11 +42,11 @@ pub struct Constraint<'a> {
 /// ```
 /// then while we are visiting `Bar<T>`, the `CurrentItem` would have
 /// the `DefId` and the start of `Foo`'s inferreds.
-pub struct CurrentItem {
+struct CurrentItem {
     inferred_start: InferredIndex,
 }
 
-pub fn add_constraints_from_crate<'a, 'tcx>(
+pub(crate) fn add_constraints_from_crate<'a, 'tcx>(
     terms_cx: TermsContext<'a, 'tcx>,
 ) -> ConstraintContext<'a, 'tcx> {
     let tcx = terms_cx.tcx;
@@ -98,7 +99,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         debug!("build_constraints_for_item({})", tcx.def_path_str(def_id));
 
         // Skip items with no generics - there's nothing to infer in them.
-        if tcx.generics_of(def_id).count() == 0 {
+        if tcx.generics_of(def_id).is_empty() {
             return;
         }
 
@@ -106,7 +107,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         let current_item = &CurrentItem { inferred_start };
         let ty = tcx.type_of(def_id).instantiate_identity();
 
-        // The type as returned by `type_of` is the underlying type and generally not a weak projection.
+        // The type as returned by `type_of` is the underlying type and generally not a free alias.
         // Therefore we need to check the `DefKind` first.
         if let DefKind::TyAlias = tcx.def_kind(def_id)
             && tcx.type_alias_is_lazy(def_id)
@@ -199,8 +200,8 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         // Trait are always invariant so we can take advantage of that.
         let variance_i = self.invariant(variance);
 
-        for k in args {
-            match k.unpack() {
+        for arg in args {
+            match arg.kind() {
                 GenericArgKind::Lifetime(lt) => {
                     self.add_constraints_from_region(current, lt, variance_i)
                 }
@@ -250,16 +251,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
             }
 
             ty::Pat(typ, pat) => {
-                match *pat {
-                    ty::PatternKind::Range { start, end, include_end: _ } => {
-                        if let Some(start) = start {
-                            self.add_constraints_from_const(current, start, variance);
-                        }
-                        if let Some(end) = end {
-                            self.add_constraints_from_const(current, end, variance);
-                        }
-                    }
-                }
+                self.add_constraints_from_pat(current, variance, pat);
                 self.add_constraints_from_ty(current, typ, variance);
             }
 
@@ -285,7 +277,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 self.add_constraints_from_invariant_args(current, data.args, variance);
             }
 
-            ty::Alias(ty::Weak, ref data) => {
+            ty::Alias(ty::Free, ref data) => {
                 self.add_constraints_from_args(current, data.def_id, data.args, variance);
             }
 
@@ -302,7 +294,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 }
 
                 for projection in data.projection_bounds() {
-                    match projection.skip_binder().term.unpack() {
+                    match projection.skip_binder().term.kind() {
                         ty::TermKind::Ty(ty) => {
                             self.add_constraints_from_ty(current, ty, self.invariant);
                         }
@@ -317,8 +309,13 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 self.add_constraint(current, data.index, variance);
             }
 
-            ty::FnPtr(sig) => {
-                self.add_constraints_from_sig(current, sig, variance);
+            ty::FnPtr(sig_tys, hdr) => {
+                self.add_constraints_from_sig(current, sig_tys.with(hdr), variance);
+            }
+
+            ty::UnsafeBinder(ty) => {
+                // FIXME(unsafe_binders): This is covariant, right?
+                self.add_constraints_from_ty(current, ty.skip_binder(), variance);
             }
 
             ty::Error(_) => {
@@ -328,6 +325,25 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
 
             ty::Placeholder(..) | ty::CoroutineWitness(..) | ty::Bound(..) | ty::Infer(..) => {
                 bug!("unexpected type encountered in variance inference: {}", ty);
+            }
+        }
+    }
+
+    fn add_constraints_from_pat(
+        &mut self,
+        current: &CurrentItem,
+        variance: VarianceTermPtr<'a>,
+        pat: ty::Pattern<'tcx>,
+    ) {
+        match *pat {
+            ty::PatternKind::Range { start, end } => {
+                self.add_constraints_from_const(current, start, variance);
+                self.add_constraints_from_const(current, end, variance);
+            }
+            ty::PatternKind::Or(patterns) => {
+                for pat in patterns {
+                    self.add_constraints_from_pat(current, variance, pat)
+                }
             }
         }
     }
@@ -357,7 +373,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
             (None, Some(self.tcx().variances_of(def_id)))
         };
 
-        for (i, k) in args.iter().enumerate() {
+        for (i, arg) in args.iter().enumerate() {
             let variance_decl = if let Some(InferredIndex(start)) = local {
                 // Parameter on an item defined within current crate:
                 // variance not yet inferred, so return a symbolic
@@ -373,7 +389,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 "add_constraints_from_args: variance_decl={:?} variance_i={:?}",
                 variance_decl, variance_i
             );
-            match k.unpack() {
+            match arg.kind() {
                 GenericArgKind::Lifetime(lt) => {
                     self.add_constraints_from_region(current, lt, variance_i)
                 }
@@ -426,7 +442,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         region: ty::Region<'tcx>,
         variance: VarianceTermPtr<'a>,
     ) {
-        match *region {
+        match region.kind() {
             ty::ReEarlyParam(ref data) => {
                 self.add_constraint(current, data.index, variance);
             }

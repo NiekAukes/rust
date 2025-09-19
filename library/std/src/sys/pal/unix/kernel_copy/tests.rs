@@ -1,10 +1,8 @@
 use crate::fs::OpenOptions;
 use crate::io;
-use crate::io::Result;
-use crate::io::SeekFrom;
-use crate::io::{BufRead, Read, Seek, Write};
+use crate::io::{BufRead, Read, Result, Seek, SeekFrom, Write};
 use crate::os::unix::io::AsRawFd;
-use crate::sys_common::io::test::tmpdir;
+use crate::test_helpers::tmpdir;
 
 #[test]
 fn copy_specialization() -> Result<()> {

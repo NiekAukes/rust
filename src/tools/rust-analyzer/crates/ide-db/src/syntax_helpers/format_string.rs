@@ -1,7 +1,7 @@
 //! Tools to work with format string literals for the `format_args!` family of macros.
 use syntax::{
-    ast::{self, IsString},
     AstNode, AstToken, TextRange, TextSize,
+    ast::{self, IsString},
 };
 
 // FIXME: This can probably be re-implemented via the HIR?
@@ -41,6 +41,7 @@ pub enum FormatSpecifier {
     Escape,
 }
 
+// FIXME: Remove this, we can use rustc_format_parse instead
 pub fn lex_format_specifiers(
     string: &ast::String,
     mut callback: &mut dyn FnMut(TextRange, FormatSpecifier),

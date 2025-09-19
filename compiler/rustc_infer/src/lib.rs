@@ -12,27 +12,18 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![doc(rust_logo)]
-#![feature(rustdoc_internals)]
+// tidy-alphabetical-start
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![feature(box_patterns)]
-#![feature(control_flow_enum)]
+#![cfg_attr(not(bootstrap), allow(rustc::direct_use_of_rustc_type_ir))]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
+#![feature(assert_matches)]
 #![feature(extend_one)]
-#![feature(let_chains)]
-#![feature(if_let_guard)]
-#![feature(iter_intersperse)]
-#![feature(iterator_try_collect)]
-#![feature(try_blocks)]
-#![feature(yeet_expr)]
+#![feature(rustdoc_internals)]
 #![recursion_limit = "512"] // For rustdoc
-
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
+// tidy-alphabetical-end
 
 mod errors;
 pub mod infer;

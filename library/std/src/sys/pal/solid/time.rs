@@ -1,7 +1,8 @@
-use super::{abi, error::expect_success};
-use crate::{mem::MaybeUninit, time::Duration};
-
+use super::abi;
+use super::error::expect_success;
 pub use super::itron::time::Instant;
+use crate::mem::MaybeUninit;
+use crate::time::Duration;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct SystemTime(abi::time_t);
@@ -34,7 +35,7 @@ impl SystemTime {
         SystemTime(t)
     }
 
-    pub(super) fn from_time_t(t: abi::time_t) -> Self {
+    pub fn from_time_t(t: abi::time_t) -> Self {
         Self(t)
     }
 

@@ -1,4 +1,4 @@
-//@ compile-flags: --crate-type=lib -O -Cdebuginfo=2 -Cno-prepopulate-passes -Zmir-enable-passes=-ScalarReplacementOfAggregates
+//@ compile-flags: --crate-type=lib -Copt-level=3 -Cdebuginfo=2 -Cno-prepopulate-passes -Zmir-enable-passes=-ScalarReplacementOfAggregates
 // MIR SROA will decompose the closure
 #![feature(stmt_expr_attributes)]
 
@@ -6,7 +6,8 @@ pub struct S([usize; 8]);
 
 #[no_mangle]
 pub fn outer_function(x: S, y: S) -> usize {
-    (#[inline(always)]|| {
+    (#[inline(always)]
+    || {
         let _z = x;
         y.0[0]
     })()

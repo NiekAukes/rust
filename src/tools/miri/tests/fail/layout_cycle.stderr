@@ -8,17 +8,17 @@ error: post-monomorphization error: a cycle occurred during layout computation
   --> RUSTLIB/core/src/mem/mod.rs:LL:CC
    |
 LL |     intrinsics::size_of::<T>()
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ a cycle occurred during layout computation
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ post-monomorphization error occurred here
    |
    = note: BACKTRACE:
    = note: inside `std::mem::size_of::<S<S<()>>>` at RUSTLIB/core/src/mem/mod.rs:LL:CC
 note: inside `foo::<S<()>>`
-  --> $DIR/layout_cycle.rs:LL:CC
+  --> tests/fail/layout_cycle.rs:LL:CC
    |
 LL |     mem::size_of::<S<T>>()
    |     ^^^^^^^^^^^^^^^^^^^^^^
 note: inside `main`
-  --> $DIR/layout_cycle.rs:LL:CC
+  --> tests/fail/layout_cycle.rs:LL:CC
    |
 LL |     println!("{}", foo::<S<()>>());
    |                    ^^^^^^^^^^^^^^

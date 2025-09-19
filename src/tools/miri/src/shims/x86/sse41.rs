@@ -1,19 +1,19 @@
+use rustc_abi::CanonAbi;
+use rustc_middle::ty::Ty;
 use rustc_span::Symbol;
-use rustc_target::spec::abi::Abi;
+use rustc_target::callconv::FnAbi;
 
 use super::{conditional_dot_product, mpsadbw, packusdw, round_all, round_first, test_bits_masked};
 use crate::*;
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
-    crate::MiriInterpCxExt<'mir, 'tcx>
-{
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn emulate_x86_sse41_intrinsic(
         &mut self,
         link_name: Symbol,
-        abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
         this.expect_target_feature_for_intrinsic(link_name, "sse4.1")?;
@@ -28,12 +28,11 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // bits `4..=5` if `imm`, and `i`th bit specifies whether element
             // `i` is zeroed.
             "insertps" => {
-                let [left, right, imm] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, imm] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (left, left_len) = this.operand_to_simd(left)?;
-                let (right, right_len) = this.operand_to_simd(right)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (left, left_len) = this.project_to_simd(left)?;
+                let (right, right_len) = this.project_to_simd(right)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 assert_eq!(dest_len, left_len);
                 assert_eq!(dest_len, right_len);
@@ -64,8 +63,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Concatenates two 32-bit signed integer vectors and converts
             // the result to a 16-bit unsigned integer vector with saturation.
             "packusdw" => {
-                let [left, right] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 packusdw(this, left, right, dest)?;
             }
@@ -75,8 +73,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // products, and conditionally stores the sum in `dest` using the low
             // 4 bits of `imm`.
             "dpps" | "dppd" => {
-                let [left, right, imm] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, imm] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 conditional_dot_product(this, left, right, imm, dest)?;
             }
@@ -84,16 +81,14 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // functions. Rounds the first element of `right` according to `rounding`
             // and copies the remaining elements from `left`.
             "round.ss" => {
-                let [left, right, rounding] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, rounding] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 round_first::<rustc_apfloat::ieee::Single>(this, left, right, rounding, dest)?;
             }
             // Used to implement the _mm_floor_ps, _mm_ceil_ps and _mm_round_ps
             // functions. Rounds the elements of `op` according to `rounding`.
             "round.ps" => {
-                let [op, rounding] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [op, rounding] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 round_all::<rustc_apfloat::ieee::Single>(this, op, rounding, dest)?;
             }
@@ -101,16 +96,14 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // functions. Rounds the first element of `right` according to `rounding`
             // and copies the remaining elements from `left`.
             "round.sd" => {
-                let [left, right, rounding] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, rounding] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 round_first::<rustc_apfloat::ieee::Double>(this, left, right, rounding, dest)?;
             }
             // Used to implement the _mm_floor_pd, _mm_ceil_pd and _mm_round_pd
             // functions. Rounds the elements of `op` according to `rounding`.
             "round.pd" => {
-                let [op, rounding] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [op, rounding] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 round_all::<rustc_apfloat::ieee::Double>(this, op, rounding, dest)?;
             }
@@ -118,10 +111,10 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Find the minimum unsinged 16-bit integer in `op` and
             // returns its value and position.
             "phminposuw" => {
-                let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [op] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
-                let (op, op_len) = this.operand_to_simd(op)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+                let (op, op_len) = this.project_to_simd(op)?;
+                let (dest, dest_len) = this.project_to_simd(dest)?;
 
                 // Find minimum
                 let mut min_value = u16::MAX;
@@ -152,8 +145,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // offsets specified in `imm`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_mpsadbw_epu8
             "mpsadbw" => {
-                let [left, right, imm] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [left, right, imm] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 mpsadbw(this, left, right, imm, dest)?;
             }
@@ -162,7 +154,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             // Tests `(op & mask) == 0`, `(op & mask) == mask` or
             // `(op & mask) != 0 && (op & mask) != mask`
             "ptestz" | "ptestc" | "ptestnzc" => {
-                let [op, mask] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let [op, mask] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
 
                 let (all_zero, masked_set) = test_bits_masked(this, op, mask)?;
                 let res = match unprefixed_name {
@@ -174,8 +166,8 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
 
                 this.write_scalar(Scalar::from_i32(res.into()), dest)?;
             }
-            _ => return Ok(EmulateItemResult::NotSupported),
+            _ => return interp_ok(EmulateItemResult::NotSupported),
         }
-        Ok(EmulateItemResult::NeedsJumping)
+        interp_ok(EmulateItemResult::NeedsReturn)
     }
 }

@@ -4,11 +4,12 @@
 //! def-path. This is used for unit testing the code that generates
 //! paths etc in all kinds of annoying scenarios.
 
-use crate::errors::{Kind, TestOutput};
 use rustc_hir::def_id::LocalDefId;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{GenericArgs, Instance, TyCtxt};
-use rustc_span::symbol::{sym, Symbol};
+use rustc_span::{Symbol, sym};
+
+use crate::errors::{Kind, TestOutput};
 
 const SYMBOL_NAME: Symbol = sym::rustc_symbol_name;
 const DEF_PATH: Symbol = sym::rustc_def_path;
@@ -17,7 +18,7 @@ pub fn report_symbol_names(tcx: TyCtxt<'_>) {
     // if the `rustc_attrs` feature is not enabled, then the
     // attributes we are interested in cannot be present anyway, so
     // skip the walk.
-    if !tcx.features().rustc_attrs {
+    if !tcx.features().rustc_attrs() {
         return;
     }
 
@@ -55,24 +56,24 @@ impl SymbolNamesTest<'_> {
         // some subset.
         for attr in tcx.get_attrs(def_id, SYMBOL_NAME) {
             let def_id = def_id.to_def_id();
-            let instance = Instance::new(
+            let instance = Instance::new_raw(
                 def_id,
                 tcx.erase_regions(GenericArgs::identity_for_item(tcx, def_id)),
             );
             let mangled = tcx.symbol_name(instance);
             tcx.dcx().emit_err(TestOutput {
-                span: attr.span,
+                span: attr.span(),
                 kind: Kind::SymbolName,
                 content: format!("{mangled}"),
             });
             if let Ok(demangling) = rustc_demangle::try_demangle(mangled.name) {
                 tcx.dcx().emit_err(TestOutput {
-                    span: attr.span,
+                    span: attr.span(),
                     kind: Kind::Demangling,
                     content: format!("{demangling}"),
                 });
                 tcx.dcx().emit_err(TestOutput {
-                    span: attr.span,
+                    span: attr.span(),
                     kind: Kind::DemanglingAlt,
                     content: format!("{demangling:#}"),
                 });
@@ -81,7 +82,7 @@ impl SymbolNamesTest<'_> {
 
         for attr in tcx.get_attrs(def_id, DEF_PATH) {
             tcx.dcx().emit_err(TestOutput {
-                span: attr.span,
+                span: attr.span(),
                 kind: Kind::DefPath,
                 content: with_no_trimmed_paths!(tcx.def_path_str(def_id)),
             });

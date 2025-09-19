@@ -1,3 +1,4 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::{is_from_proc_macro, is_in_test_function};
 use rustc_data_structures::fx::{FxIndexMap, IndexEntry};
@@ -5,7 +6,6 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::{Expr, ExprKind, HirId, Node};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_session::impl_lint_pass;
 use rustc_span::Span;
 
@@ -13,13 +13,20 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for functions that are only used once. Does not lint tests.
     ///
-    /// ### Why is this bad?
-    /// It's usually not, splitting a function into multiple parts often improves readability and in
-    /// the case of generics, can prevent the compiler from duplicating the function dozens of
-    /// time; instead, only duplicating a thunk. But this can prevent segmentation across a
-    /// codebase, where many small functions are used only once.
+    /// ### Why restrict this?
+    /// If a function is only used once (perhaps because it used to be used more widely),
+    /// then the code could be simplified by moving that function's code into its caller.
     ///
-    /// Note: If this lint is used, prepare to allow this a lot.
+    /// However, there are reasons not to do this everywhere:
+    ///
+    /// * Splitting a large function into multiple parts often improves readability
+    ///   by giving names to its parts.
+    /// * A function’s signature might serve a necessary purpose, such as constraining
+    ///   the type of a closure passed to it.
+    /// * Generic functions might call non-generic functions to reduce duplication
+    ///   in the produced machine code.
+    ///
+    /// If this lint is used, prepare to `#[allow]` it a lot.
     ///
     /// ### Example
     /// ```no_run
@@ -59,13 +66,19 @@ pub enum CallState {
     Multiple,
 }
 
-#[derive(Clone)]
 pub struct SingleCallFn {
-    pub avoid_breaking_exported_api: bool,
-    pub def_id_to_usage: FxIndexMap<LocalDefId, CallState>,
+    avoid_breaking_exported_api: bool,
+    def_id_to_usage: FxIndexMap<LocalDefId, CallState>,
 }
 
 impl SingleCallFn {
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            avoid_breaking_exported_api: conf.avoid_breaking_exported_api,
+            def_id_to_usage: FxIndexMap::default(),
+        }
+    }
+
     fn is_function_allowed(
         &self,
         cx: &LateContext<'_>,
@@ -74,13 +87,11 @@ impl SingleCallFn {
         fn_span: Span,
     ) -> bool {
         (self.avoid_breaking_exported_api && cx.effective_visibilities.is_exported(fn_def_id))
-            || in_external_macro(cx.sess(), fn_span)
+            || fn_span.in_external_macro(cx.sess().source_map())
             || cx
                 .tcx
-                .hir()
-                .maybe_body_owned_by(fn_def_id)
-                .map(|body| cx.tcx.hir().body(body))
-                .map_or(true, |body| is_in_test_function(cx.tcx, body.value.hir_id))
+                .hir_maybe_body_owned_by(fn_def_id)
+                .is_none_or(|body| is_in_test_function(cx.tcx, body.value.hir_id))
             || match cx.tcx.hir_node(fn_hir_id) {
                 Node::Item(item) => is_from_proc_macro(cx, item),
                 Node::ImplItem(item) => is_from_proc_macro(cx, item),
@@ -126,7 +137,7 @@ impl<'tcx> LateLintPass<'tcx> for SingleCallFn {
         for (&def_id, usage) in &self.def_id_to_usage {
             if let CallState::Once { call_site } = *usage
                 && let fn_hir_id = cx.tcx.local_def_id_to_hir_id(def_id)
-                && let fn_span = cx.tcx.hir().span_with_body(fn_hir_id)
+                && let fn_span = cx.tcx.hir_span_with_body(fn_hir_id)
                 && !self.is_function_allowed(cx, def_id, fn_hir_id, fn_span)
             {
                 span_lint_hir_and_then(

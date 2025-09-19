@@ -1,10 +1,8 @@
 #![feature(type_alias_impl_trait)]
 
 type FooArg<'a> = &'a dyn ToString;
-type FooRet = impl std::fmt::Debug;
 
 type FooItem = Box<dyn Fn(FooArg) -> FooRet>;
-type Foo = impl Iterator<Item = FooItem>;
 
 #[repr(C)]
 struct Bar(u8);
@@ -17,20 +15,27 @@ impl Iterator for Bar {
     }
 }
 
-fn quux(st: FooArg) -> FooRet {
+pub type FooRet = impl std::fmt::Debug;
+#[define_opaque(FooRet)]
+pub fn quux(st: FooArg) -> FooRet {
     Some(st.to_string())
 }
-
-fn ham() -> Foo {
+pub type Foo = impl Iterator<Item = FooItem>;
+#[define_opaque(Foo)]
+pub fn ham() -> Foo {
+    //~^ ERROR: item does not constrain `FooRet::{opaque#0}`
     Bar(1)
 }
-
-fn oof(_: Foo) -> impl std::fmt::Debug {
+#[define_opaque(Foo)]
+pub fn oof() -> impl std::fmt::Debug {
+    //~^ ERROR: item does not constrain `FooRet::{opaque#0}`
+    //~| ERROR: item does not constrain `Foo::{opaque#0}`
     let mut bar = ham();
     let func = bar.next().unwrap();
-    return func(&"oof"); //~ ERROR opaque type's hidden type cannot be another opaque type
+    return func(&"oof");
+    //~^ ERROR: opaque type's hidden type cannot be another opaque type
 }
 
 fn main() {
-    let _ = oof(ham());
+    let _ = oof();
 }

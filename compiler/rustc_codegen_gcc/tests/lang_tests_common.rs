@@ -1,9 +1,10 @@
 //! The common code for `tests/lang_tests_*.rs`
-use std::{
-    env::{self, current_dir},
-    path::{Path, PathBuf},
-    process::Command,
-};
+
+#![allow(clippy::uninlined_format_args)]
+
+use std::env::{self, current_dir};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use boml::Toml;
 use lang_tester::LangTester;
@@ -21,21 +22,29 @@ pub fn main_inner(profile: Profile) {
     let tempdir = TempDir::new().expect("temp dir");
     let current_dir = current_dir().expect("current dir");
     let current_dir = current_dir.to_str().expect("current dir").to_string();
-    let toml = Toml::parse(include_str!("../config.toml")).expect("Failed to parse `config.toml`");
-    let gcc_path = if let Ok(gcc_path) = toml.get_string("gcc-path") {
-        PathBuf::from(gcc_path.to_string())
-    } else {
-        // then we try to retrieve it from the `target` folder.
-        let commit = include_str!("../libgccjit.version").trim();
-        Path::new("build/libgccjit").join(commit)
-    };
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let gcc_path = std::fs::read_to_string(manifest_dir.join("config.toml"))
+        .ok()
+        .and_then(|v| {
+            let toml = Toml::parse(&v).expect("Failed to parse `config.toml`");
+            toml.get_string("gcc-path").map(PathBuf::from).ok()
+        })
+        .unwrap_or_else(|| {
+            // then we try to retrieve it from the `target` folder.
+            let commit = include_str!("../libgccjit.version").trim();
+            Path::new("build/libgccjit").join(commit)
+        });
 
     let gcc_path = Path::new(&gcc_path)
         .canonicalize()
         .expect("failed to get absolute path of `gcc-path`")
         .display()
         .to_string();
-    env::set_var("LD_LIBRARY_PATH", gcc_path);
+    unsafe {
+        env::set_var("LD_LIBRARY_PATH", gcc_path);
+    }
 
     fn rust_filter(path: &Path) -> bool {
         path.is_file() && path.extension().expect("extension").to_str().expect("to_str") == "rs"
@@ -48,10 +57,10 @@ pub fn main_inner(profile: Profile) {
 
     #[cfg(not(feature = "master"))]
     fn filter(filename: &Path) -> bool {
-        if let Some(filename) = filename.to_str() {
-            if filename.ends_with("gep.rs") {
-                return false;
-            }
+        if let Some(filename) = filename.to_str()
+            && filename.ends_with("gep.rs")
+        {
+            return false;
         }
         rust_filter(filename)
     }
@@ -60,15 +69,14 @@ pub fn main_inner(profile: Profile) {
         .test_dir("tests/run")
         .test_path_filter(filter)
         .test_extract(|path| {
-            let lines = std::fs::read_to_string(path)
+            std::fs::read_to_string(path)
                 .expect("read file")
                 .lines()
                 .skip_while(|l| !l.starts_with("//"))
                 .take_while(|l| l.starts_with("//"))
                 .map(|l| &l[2..])
                 .collect::<Vec<_>>()
-                .join("\n");
-            lines
+                .join("\n")
         })
         .test_cmds(move |path| {
             // Test command 1: Compile `x.rs` into `tempdir/x`.
@@ -79,10 +87,11 @@ pub fn main_inner(profile: Profile) {
             compiler.args([
                 &format!("-Zcodegen-backend={}/target/debug/librustc_codegen_gcc.so", current_dir),
                 "--sysroot",
-                &format!("{}/build_sysroot/sysroot/", current_dir),
-                "-Zno-parallel-llvm",
+                &format!("{}/build/build_sysroot/sysroot/", current_dir),
                 "-C",
                 "link-arg=-lc",
+                "--extern",
+                "mini_core=target/out/libmini_core.rlib",
                 "-o",
                 exe.to_str().expect("to_str"),
                 path.to_str().expect("to_str"),

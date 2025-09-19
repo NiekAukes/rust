@@ -13,21 +13,26 @@
 //! See also a neighboring `body` module.
 
 pub mod format_args;
+pub mod generics;
 pub mod type_ref;
 
 use std::fmt;
 
-use hir_expand::name::Name;
-use intern::Interned;
-use la_arena::{Idx, RawIdx};
-use smallvec::SmallVec;
+use hir_expand::{MacroDefId, name::Name};
+use intern::Symbol;
+use la_arena::Idx;
+use rustc_apfloat::ieee::{Half as f16, Quad as f128};
 use syntax::ast;
+use type_ref::TypeRefId;
 
 use crate::{
+    BlockId,
     builtin_type::{BuiltinFloat, BuiltinInt, BuiltinUint},
-    path::{GenericArgs, Path},
-    type_ref::{Mutability, Rawness, TypeRef},
-    BlockId, ConstBlockId,
+    expr_store::{
+        HygieneId,
+        path::{GenericArgs, Path},
+    },
+    type_ref::{Mutability, Rawness},
 };
 
 pub use syntax::ast::{ArithOp, BinaryOp, CmpOp, LogicOp, Ordering, RangeOp, UnaryOp};
@@ -36,17 +41,38 @@ pub type BindingId = Idx<Binding>;
 
 pub type ExprId = Idx<Expr>;
 
-/// FIXME: this is a hacky function which should be removed
-pub(crate) fn dummy_expr_id() -> ExprId {
-    ExprId::from_raw(RawIdx::from(u32::MAX))
-}
-
 pub type PatId = Idx<Pat>;
 
+// FIXME: Encode this as a single u32, we won't ever reach all 32 bits especially given these counts
+// are local to the body.
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum ExprOrPatId {
     ExprId(ExprId),
     PatId(PatId),
+}
+
+impl ExprOrPatId {
+    pub fn as_expr(self) -> Option<ExprId> {
+        match self {
+            Self::ExprId(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn is_expr(&self) -> bool {
+        matches!(self, Self::ExprId(_))
+    }
+
+    pub fn as_pat(self) -> Option<PatId> {
+        match self {
+            Self::PatId(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn is_pat(&self) -> bool {
+        matches!(self, Self::PatId(_))
+    }
 }
 stdx::impl_from!(ExprId, PatId for ExprOrPatId);
 
@@ -56,42 +82,51 @@ pub struct Label {
 }
 pub type LabelId = Idx<Label>;
 
-// We convert float values into bits and that's how we don't need to deal with f32 and f64.
-// For PartialEq, bits comparison should work, as ordering is not important
+// We leave float values as a string to avoid double rounding.
+// For PartialEq, string comparison should work, as ordering is not important
 // https://github.com/rust-lang/rust-analyzer/issues/12380#issuecomment-1137284360
-#[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
-pub struct FloatTypeWrapper(u64);
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FloatTypeWrapper(Symbol);
 
+// FIXME(#17451): Use builtin types once stabilised.
 impl FloatTypeWrapper {
-    pub fn new(value: f64) -> Self {
-        Self(value.to_bits())
+    pub fn new(sym: Symbol) -> Self {
+        Self(sym)
     }
 
-    pub fn into_f64(self) -> f64 {
-        f64::from_bits(self.0)
+    pub fn to_f128(&self) -> f128 {
+        self.0.as_str().parse().unwrap_or_default()
     }
 
-    pub fn into_f32(self) -> f32 {
-        f64::from_bits(self.0) as f32
+    pub fn to_f64(&self) -> f64 {
+        self.0.as_str().parse().unwrap_or_default()
+    }
+
+    pub fn to_f32(&self) -> f32 {
+        self.0.as_str().parse().unwrap_or_default()
+    }
+
+    pub fn to_f16(&self) -> f16 {
+        self.0.as_str().parse().unwrap_or_default()
     }
 }
 
 impl fmt::Display for FloatTypeWrapper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", f64::from_bits(self.0))
+        f.write_str(self.0.as_str())
     }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Literal {
-    String(Box<str>),
+    String(Symbol),
     ByteString(Box<[u8]>),
     CString(Box<[u8]>),
     Char(char),
     Bool(bool),
     Int(i128, Option<BuiltinInt>),
     Uint(u128, Option<BuiltinUint>),
-    // Here we are using a wrapper around float because f32 and f64 do not implement Eq, so they
+    // Here we are using a wrapper around float because float primitives do not implement Eq, so they
     // could not be used directly here, to understand how the wrapper works go to definition of
     // FloatTypeWrapper
     Float(FloatTypeWrapper, Option<BuiltinFloat>),
@@ -106,11 +141,7 @@ pub enum LiteralOrConst {
 
 impl Literal {
     pub fn negate(self) -> Option<Self> {
-        if let Literal::Int(i, k) = self {
-            Some(Literal::Int(-i, k))
-        } else {
-            None
-        }
+        if let Literal::Int(i, k) = self { Some(Literal::Int(-i, k)) } else { None }
     }
 }
 
@@ -121,7 +152,7 @@ impl From<ast::LiteralKind> for Literal {
             LiteralKind::IntNumber(lit) => {
                 if let builtin @ Some(_) = lit.suffix().and_then(BuiltinFloat::from_suffix) {
                     Literal::Float(
-                        FloatTypeWrapper::new(lit.float_value().unwrap_or(Default::default())),
+                        FloatTypeWrapper::new(Symbol::intern(&lit.value_string())),
                         builtin,
                     )
                 } else if let builtin @ Some(_) = lit.suffix().and_then(BuiltinUint::from_suffix) {
@@ -133,18 +164,18 @@ impl From<ast::LiteralKind> for Literal {
             }
             LiteralKind::FloatNumber(lit) => {
                 let ty = lit.suffix().and_then(BuiltinFloat::from_suffix);
-                Literal::Float(FloatTypeWrapper::new(lit.value().unwrap_or(Default::default())), ty)
+                Literal::Float(FloatTypeWrapper::new(Symbol::intern(&lit.value_string())), ty)
             }
             LiteralKind::ByteString(bs) => {
-                let text = bs.value().map(Box::from).unwrap_or_else(Default::default);
+                let text = bs.value().map_or_else(|_| Default::default(), Box::from);
                 Literal::ByteString(text)
             }
             LiteralKind::String(s) => {
-                let text = s.value().map(Box::from).unwrap_or_else(Default::default);
+                let text = s.value().map_or_else(|_| Symbol::empty(), |it| Symbol::intern(&it));
                 Literal::String(text)
             }
             LiteralKind::CString(s) => {
-                let text = s.value().map(Box::from).unwrap_or_else(Default::default);
+                let text = s.value().map_or_else(|_| Default::default(), Box::from);
                 Literal::CString(text)
             }
             LiteralKind::Byte(b) => {
@@ -181,7 +212,7 @@ pub enum Expr {
         statements: Box<[Statement]>,
         tail: Option<ExprId>,
     },
-    Const(ConstBlockId),
+    Const(ExprId),
     // FIXME: Fold this into Block with an unsafe flag?
     Unsafe {
         id: Option<BlockId>,
@@ -195,7 +226,6 @@ pub enum Expr {
     Call {
         callee: ExprId,
         args: Box<[ExprId]>,
-        is_assignee_expr: bool,
     },
     MethodCall {
         receiver: ExprId,
@@ -230,8 +260,6 @@ pub enum Expr {
         path: Option<Box<Path>>,
         fields: Box<[RecordLitField]>,
         spread: Option<ExprId>,
-        ellipsis: bool,
-        is_assignee_expr: bool,
     },
     Field {
         expr: ExprId,
@@ -242,7 +270,7 @@ pub enum Expr {
     },
     Cast {
         expr: ExprId,
-        type_ref: Interned<TypeRef>,
+        type_ref: TypeRefId,
     },
     Ref {
         expr: ExprId,
@@ -256,10 +284,16 @@ pub enum Expr {
         expr: ExprId,
         op: UnaryOp,
     },
+    /// `op` cannot be bare `=` (but can be `op=`), these are lowered to `Assignment` instead.
     BinaryOp {
         lhs: ExprId,
         rhs: ExprId,
         op: Option<BinaryOp>,
+    },
+    // Assignments need a special treatment because of destructuring assignment.
+    Assignment {
+        target: PatId,
+        value: ExprId,
     },
     Range {
         lhs: Option<ExprId>,
@@ -269,19 +303,17 @@ pub enum Expr {
     Index {
         base: ExprId,
         index: ExprId,
-        is_assignee_expr: bool,
     },
     Closure {
         args: Box<[PatId]>,
-        arg_types: Box<[Option<Interned<TypeRef>>]>,
-        ret_type: Option<Interned<TypeRef>>,
+        arg_types: Box<[Option<TypeRefId>]>,
+        ret_type: Option<TypeRefId>,
         body: ExprId,
         closure_kind: ClosureKind,
         capture_by: CaptureBy,
     },
     Tuple {
         exprs: Box<[ExprId]>,
-        is_assignee_expr: bool,
     },
     Array(Array),
     Literal(Literal),
@@ -292,13 +324,126 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetOf {
-    pub container: Interned<TypeRef>,
+    pub container: TypeRefId,
     pub fields: Box<[Name]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineAsm {
-    pub e: ExprId,
+    pub operands: Box<[(Option<Name>, AsmOperand)]>,
+    pub options: AsmOptions,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AsmOptions(u16);
+bitflags::bitflags! {
+    impl AsmOptions: u16 {
+        const PURE            = 1 << 0;
+        const NOMEM           = 1 << 1;
+        const READONLY        = 1 << 2;
+        const PRESERVES_FLAGS = 1 << 3;
+        const NORETURN        = 1 << 4;
+        const NOSTACK         = 1 << 5;
+        const ATT_SYNTAX      = 1 << 6;
+        const RAW             = 1 << 7;
+        const MAY_UNWIND      = 1 << 8;
+    }
+}
+
+impl AsmOptions {
+    pub const COUNT: usize = Self::all().bits().count_ones() as usize;
+
+    pub const GLOBAL_OPTIONS: Self = Self::ATT_SYNTAX.union(Self::RAW);
+    pub const NAKED_OPTIONS: Self = Self::ATT_SYNTAX.union(Self::RAW).union(Self::NORETURN);
+
+    pub fn human_readable_names(&self) -> Vec<&'static str> {
+        let mut options = vec![];
+
+        if self.contains(AsmOptions::PURE) {
+            options.push("pure");
+        }
+        if self.contains(AsmOptions::NOMEM) {
+            options.push("nomem");
+        }
+        if self.contains(AsmOptions::READONLY) {
+            options.push("readonly");
+        }
+        if self.contains(AsmOptions::PRESERVES_FLAGS) {
+            options.push("preserves_flags");
+        }
+        if self.contains(AsmOptions::NORETURN) {
+            options.push("noreturn");
+        }
+        if self.contains(AsmOptions::NOSTACK) {
+            options.push("nostack");
+        }
+        if self.contains(AsmOptions::ATT_SYNTAX) {
+            options.push("att_syntax");
+        }
+        if self.contains(AsmOptions::RAW) {
+            options.push("raw");
+        }
+        if self.contains(AsmOptions::MAY_UNWIND) {
+            options.push("may_unwind");
+        }
+
+        options
+    }
+}
+
+impl std::fmt::Debug for AsmOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        bitflags::parser::to_writer(self, f)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum AsmOperand {
+    In {
+        reg: InlineAsmRegOrRegClass,
+        expr: ExprId,
+    },
+    Out {
+        reg: InlineAsmRegOrRegClass,
+        expr: Option<ExprId>,
+        late: bool,
+    },
+    InOut {
+        reg: InlineAsmRegOrRegClass,
+        expr: ExprId,
+        late: bool,
+    },
+    SplitInOut {
+        reg: InlineAsmRegOrRegClass,
+        in_expr: ExprId,
+        out_expr: Option<ExprId>,
+        late: bool,
+    },
+    Label(ExprId),
+    Const(ExprId),
+    Sym(Path),
+}
+
+impl AsmOperand {
+    pub fn reg(&self) -> Option<&InlineAsmRegOrRegClass> {
+        match self {
+            Self::In { reg, .. }
+            | Self::Out { reg, .. }
+            | Self::InOut { reg, .. }
+            | Self::SplitInOut { reg, .. } => Some(reg),
+            Self::Const { .. } | Self::Sym { .. } | Self::Label { .. } => None,
+        }
+    }
+
+    pub fn is_clobber(&self) -> bool {
+        matches!(self, AsmOperand::Out { reg: InlineAsmRegOrRegClass::Reg(_), late: _, expr: None })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum InlineAsmRegOrRegClass {
+    Reg(Symbol),
+    RegClass(Symbol),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,7 +469,7 @@ pub enum Movability {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Array {
-    ElementList { elements: Box<[ExprId]>, is_assignee_expr: bool },
+    ElementList { elements: Box<[ExprId]> },
     Repeat { initializer: ExprId, repeat: ExprId },
 }
 
@@ -345,7 +490,7 @@ pub struct RecordLitField {
 pub enum Statement {
     Let {
         pat: PatId,
-        type_ref: Option<Interned<TypeRef>>,
+        type_ref: Option<TypeRefId>,
         initializer: Option<ExprId>,
         else_branch: Option<ExprId>,
     },
@@ -353,119 +498,13 @@ pub enum Statement {
         expr: ExprId,
         has_semi: bool,
     },
-    // At the moment, we only use this to figure out if a return expression
-    // is really the last statement of a block. See #16566
-    Item,
+    Item(Item),
 }
 
-impl Expr {
-    pub fn walk_child_exprs(&self, mut f: impl FnMut(ExprId)) {
-        match self {
-            Expr::Missing => {}
-            Expr::Path(_) | Expr::OffsetOf(_) => {}
-            Expr::InlineAsm(it) => f(it.e),
-            Expr::If { condition, then_branch, else_branch } => {
-                f(*condition);
-                f(*then_branch);
-                if let &Some(else_branch) = else_branch {
-                    f(else_branch);
-                }
-            }
-            Expr::Let { expr, .. } => {
-                f(*expr);
-            }
-            Expr::Const(_) => (),
-            Expr::Block { statements, tail, .. }
-            | Expr::Unsafe { statements, tail, .. }
-            | Expr::Async { statements, tail, .. } => {
-                for stmt in statements.iter() {
-                    match stmt {
-                        Statement::Let { initializer, else_branch, .. } => {
-                            if let &Some(expr) = initializer {
-                                f(expr);
-                            }
-                            if let &Some(expr) = else_branch {
-                                f(expr);
-                            }
-                        }
-                        Statement::Expr { expr: expression, .. } => f(*expression),
-                        Statement::Item => (),
-                    }
-                }
-                if let &Some(expr) = tail {
-                    f(expr);
-                }
-            }
-            Expr::Loop { body, .. } => f(*body),
-            Expr::Call { callee, args, .. } => {
-                f(*callee);
-                args.iter().copied().for_each(f);
-            }
-            Expr::MethodCall { receiver, args, .. } => {
-                f(*receiver);
-                args.iter().copied().for_each(f);
-            }
-            Expr::Match { expr, arms } => {
-                f(*expr);
-                arms.iter().map(|arm| arm.expr).for_each(f);
-            }
-            Expr::Continue { .. } => {}
-            Expr::Break { expr, .. }
-            | Expr::Return { expr }
-            | Expr::Yield { expr }
-            | Expr::Yeet { expr } => {
-                if let &Some(expr) = expr {
-                    f(expr);
-                }
-            }
-            Expr::Become { expr } => f(*expr),
-            Expr::RecordLit { fields, spread, .. } => {
-                for field in fields.iter() {
-                    f(field.expr);
-                }
-                if let &Some(expr) = spread {
-                    f(expr);
-                }
-            }
-            Expr::Closure { body, .. } => {
-                f(*body);
-            }
-            Expr::BinaryOp { lhs, rhs, .. } => {
-                f(*lhs);
-                f(*rhs);
-            }
-            Expr::Range { lhs, rhs, .. } => {
-                if let &Some(lhs) = rhs {
-                    f(lhs);
-                }
-                if let &Some(rhs) = lhs {
-                    f(rhs);
-                }
-            }
-            Expr::Index { base, index, .. } => {
-                f(*base);
-                f(*index);
-            }
-            Expr::Field { expr, .. }
-            | Expr::Await { expr }
-            | Expr::Cast { expr, .. }
-            | Expr::Ref { expr, .. }
-            | Expr::UnaryOp { expr, .. }
-            | Expr::Box { expr } => {
-                f(*expr);
-            }
-            Expr::Tuple { exprs, .. } => exprs.iter().copied().for_each(f),
-            Expr::Array(a) => match a {
-                Array::ElementList { elements, .. } => elements.iter().copied().for_each(f),
-                Array::Repeat { initializer, repeat } => {
-                    f(*initializer);
-                    f(*repeat)
-                }
-            },
-            Expr::Literal(_) => {}
-            Expr::Underscore => {}
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Item {
+    MacroDef(Box<MacroDefId>),
+    Other,
 }
 
 /// Explicit binding annotations given in the HIR for a binding. Note
@@ -503,11 +542,11 @@ impl BindingAnnotation {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum BindingProblems {
-    /// https://doc.rust-lang.org/stable/error_codes/E0416.html
+    /// <https://doc.rust-lang.org/stable/error_codes/E0416.html>
     BoundMoreThanOnce,
-    /// https://doc.rust-lang.org/stable/error_codes/E0409.html
+    /// <https://doc.rust-lang.org/stable/error_codes/E0409.html>
     BoundInconsistently,
-    /// https://doc.rust-lang.org/stable/error_codes/E0408.html
+    /// <https://doc.rust-lang.org/stable/error_codes/E0408.html>
     NotBoundAcrossAll,
 }
 
@@ -515,8 +554,10 @@ pub enum BindingProblems {
 pub struct Binding {
     pub name: Name,
     pub mode: BindingAnnotation,
-    pub definitions: SmallVec<[PatId; 1]>,
     pub problems: Option<BindingProblems>,
+    /// Note that this may not be the direct `SyntaxContextId` of the binding's expansion, because transparent
+    /// expansions are attributed to their parent expansion (recursively).
+    pub hygiene: HygieneId,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -530,18 +571,49 @@ pub struct RecordFieldPat {
 pub enum Pat {
     Missing,
     Wild,
-    Tuple { args: Box<[PatId]>, ellipsis: Option<usize> },
+    Tuple {
+        args: Box<[PatId]>,
+        ellipsis: Option<u32>,
+    },
     Or(Box<[PatId]>),
-    Record { path: Option<Box<Path>>, args: Box<[RecordFieldPat]>, ellipsis: bool },
-    Range { start: Option<Box<LiteralOrConst>>, end: Option<Box<LiteralOrConst>> },
-    Slice { prefix: Box<[PatId]>, slice: Option<PatId>, suffix: Box<[PatId]> },
-    Path(Box<Path>),
+    Record {
+        path: Option<Box<Path>>,
+        args: Box<[RecordFieldPat]>,
+        ellipsis: bool,
+    },
+    Range {
+        start: Option<ExprId>,
+        end: Option<ExprId>,
+    },
+    Slice {
+        prefix: Box<[PatId]>,
+        slice: Option<PatId>,
+        suffix: Box<[PatId]>,
+    },
+    /// This might refer to a variable if a single segment path (specifically, on destructuring assignment).
+    Path(Path),
     Lit(ExprId),
-    Bind { id: BindingId, subpat: Option<PatId> },
-    TupleStruct { path: Option<Box<Path>>, args: Box<[PatId]>, ellipsis: Option<usize> },
-    Ref { pat: PatId, mutability: Mutability },
-    Box { inner: PatId },
+    Bind {
+        id: BindingId,
+        subpat: Option<PatId>,
+    },
+    TupleStruct {
+        path: Option<Box<Path>>,
+        args: Box<[PatId]>,
+        ellipsis: Option<u32>,
+    },
+    Ref {
+        pat: PatId,
+        mutability: Mutability,
+    },
+    Box {
+        inner: PatId,
+    },
     ConstBlock(ExprId),
+    /// An expression inside a pattern. That can only occur inside assignments.
+    ///
+    /// E.g. in `(a, *b) = (1, &mut 2)`, `*b` is an expression.
+    Expr(ExprId),
 }
 
 impl Pat {
@@ -552,7 +624,8 @@ impl Pat {
             | Pat::Path(..)
             | Pat::ConstBlock(..)
             | Pat::Wild
-            | Pat::Missing => {}
+            | Pat::Missing
+            | Pat::Expr(_) => {}
             Pat::Bind { subpat, .. } => {
                 subpat.iter().copied().for_each(f);
             }

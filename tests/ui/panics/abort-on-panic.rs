@@ -4,13 +4,11 @@
 //@[next] compile-flags: -Znext-solver
 
 #![allow(unused_must_use)]
-#![feature(c_unwind)]
 #![feature(panic_always_abort)]
 // Since we mark some ABIs as "nounwind" to LLVM, we must make sure that
 // we never unwind through them.
 
-//@ ignore-wasm32 no processes
-//@ ignore-sgx no processes
+//@ needs-subprocess
 
 use std::io;
 use std::io::prelude::*;

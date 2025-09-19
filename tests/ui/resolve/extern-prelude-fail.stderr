@@ -1,18 +1,24 @@
 error[E0432]: unresolved import `extern_prelude`
-  --> $DIR/extern-prelude-fail.rs:7:9
+  --> $DIR/extern-prelude-fail.rs:8:9
    |
 LL |     use extern_prelude::S;
-   |         ^^^^^^^^^^^^^^ maybe a missing crate `extern_prelude`?
+   |         ^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `extern_prelude`
    |
-   = help: consider adding `extern crate extern_prelude` to use the `extern_prelude` crate
+help: you might be missing a crate named `extern_prelude`, add it to your project and import it in your code
+   |
+LL + extern crate extern_prelude;
+   |
 
-error[E0433]: failed to resolve: maybe a missing crate `extern_prelude`?
-  --> $DIR/extern-prelude-fail.rs:8:15
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `extern_prelude`
+  --> $DIR/extern-prelude-fail.rs:9:15
    |
 LL |     let s = ::extern_prelude::S;
-   |               ^^^^^^^^^^^^^^ maybe a missing crate `extern_prelude`?
+   |               ^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `extern_prelude`
    |
-   = help: consider adding `extern crate extern_prelude` to use the `extern_prelude` crate
+help: you might be missing a crate named `extern_prelude`, add it to your project and import it in your code
+   |
+LL + extern crate extern_prelude;
+   |
 
 error: aborting due to 2 previous errors
 

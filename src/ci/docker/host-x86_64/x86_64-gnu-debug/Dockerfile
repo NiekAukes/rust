@@ -30,7 +30,6 @@ COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
 
 ENV RUSTBUILD_FORCE_CLANG_BASED_TESTS 1
-ENV RUN_CHECK_WITH_PARALLEL_QUERIES 1
 
 # llvm.use-linker conflicts with downloading CI LLVM
 ENV NO_DOWNLOAD_CI_LLVM 1
@@ -44,6 +43,12 @@ ENV RUST_CONFIGURE_ARGS \
       --set target.x86_64-unknown-linux-gnu.cc=clang \
       --set target.x86_64-unknown-linux-gnu.cxx=clang++
 
+# This job appears to be checking two separate things:
+# - That we can build the compiler with `--enable-debug`
+#   (without necessarily testing the result).
+# - That the tests with `//@ needs-force-clang-based-tests` pass, since they
+#   don't run by default unless RUSTBUILD_FORCE_CLANG_BASED_TESTS is set.
+
 ENV SCRIPT \
   python3 ../x.py --stage 2 build && \
-  python3 ../x.py --stage 2 test tests/run-make-fulldeps --test-args clang
+  python3 ../x.py --stage 2 test tests/run-make

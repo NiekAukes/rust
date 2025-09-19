@@ -20,25 +20,21 @@ mod pending;
 mod poll_fn;
 mod ready;
 
-#[stable(feature = "futures_api", since = "1.36.0")]
-pub use self::future::Future;
-
-#[unstable(feature = "future_join", issue = "91642")]
-pub use self::join::join;
-
+#[unstable(feature = "async_drop", issue = "126482")]
+pub use async_drop::{AsyncDrop, async_drop_in_place};
 #[stable(feature = "into_future", since = "1.64.0")]
 pub use into_future::IntoFuture;
-
 #[stable(feature = "future_readiness_fns", since = "1.48.0")]
-pub use pending::{pending, Pending};
-#[stable(feature = "future_readiness_fns", since = "1.48.0")]
-pub use ready::{ready, Ready};
-
+pub use pending::{Pending, pending};
 #[stable(feature = "future_poll_fn", since = "1.64.0")]
-pub use poll_fn::{poll_fn, PollFn};
+pub use poll_fn::{PollFn, poll_fn};
+#[stable(feature = "future_readiness_fns", since = "1.48.0")]
+pub use ready::{Ready, ready};
 
-#[unstable(feature = "async_drop", issue = "none")]
-pub use async_drop::{async_drop, async_drop_in_place, AsyncDrop, AsyncDropInPlace};
+#[stable(feature = "futures_api", since = "1.36.0")]
+pub use self::future::Future;
+#[unstable(feature = "future_join", issue = "91642")]
+pub use self::join::join;
 
 /// This type is needed because:
 ///
@@ -50,19 +46,19 @@ pub use async_drop::{async_drop, async_drop_in_place, AsyncDrop, AsyncDropInPlac
 /// It also simplifies the HIR lowering of `.await`.
 #[lang = "ResumeTy"]
 #[doc(hidden)]
-#[unstable(feature = "gen_future", issue = "50547")]
+#[unstable(feature = "gen_future", issue = "none")]
 #[derive(Debug, Copy, Clone)]
 pub struct ResumeTy(NonNull<Context<'static>>);
 
-#[unstable(feature = "gen_future", issue = "50547")]
+#[unstable(feature = "gen_future", issue = "none")]
 unsafe impl Send for ResumeTy {}
 
-#[unstable(feature = "gen_future", issue = "50547")]
+#[unstable(feature = "gen_future", issue = "none")]
 unsafe impl Sync for ResumeTy {}
 
 #[lang = "get_context"]
 #[doc(hidden)]
-#[unstable(feature = "gen_future", issue = "50547")]
+#[unstable(feature = "gen_future", issue = "none")]
 #[must_use]
 #[inline]
 pub unsafe fn get_context<'a, 'b>(cx: ResumeTy) -> &'a mut Context<'b> {

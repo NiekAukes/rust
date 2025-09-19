@@ -1,19 +1,19 @@
 #![allow(clippy::similar_names)] // `expr` and `expn`
 
-use crate::visitors::{for_each_expr, Descend};
+use std::sync::{Arc, OnceLock};
+
+use crate::visitors::{Descend, for_each_expr_without_closures};
+use crate::{get_unique_attr, sym};
 
 use arrayvec::ArrayVec;
 use rustc_ast::{FormatArgs, FormatArgument, FormatPlaceholder};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::{self as hir, Expr, ExprKind, HirId, Node, QPath};
-use rustc_lint::LateContext;
+use rustc_lint::{LateContext, LintContext};
 use rustc_span::def_id::DefId;
 use rustc_span::hygiene::{self, MacroKind, SyntaxContext};
-use rustc_span::{sym, BytePos, ExpnData, ExpnId, ExpnKind, Span, SpanData, Symbol};
-use std::cell::OnceCell;
+use rustc_span::{BytePos, ExpnData, ExpnId, ExpnKind, Span, SpanData, Symbol};
 use std::ops::ControlFlow;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const FORMAT_MACRO_DIAG_ITEMS: &[Symbol] = &[
     sym::assert_eq_macro,
@@ -29,6 +29,8 @@ const FORMAT_MACRO_DIAG_ITEMS: &[Symbol] = &[
     sym::print_macro,
     sym::println_macro,
     sym::std_panic_macro,
+    sym::todo_macro,
+    sym::unimplemented_macro,
     sym::write_macro,
     sym::writeln_macro,
 ];
@@ -38,7 +40,9 @@ pub fn is_format_macro(cx: &LateContext<'_>, macro_def_id: DefId) -> bool {
     if let Some(name) = cx.tcx.get_diagnostic_name(macro_def_id) {
         FORMAT_MACRO_DIAG_ITEMS.contains(&name)
     } else {
-        false
+        // Allow users to tag any macro as being format!-like
+        // TODO: consider deleting FORMAT_MACRO_DIAG_ITEMS and using just this method
+        get_unique_attr(cx.sess(), cx.tcx.get_attrs_unchecked(macro_def_id), sym::format_args).is_some()
     }
 }
 
@@ -95,7 +99,7 @@ pub fn expn_is_local(expn: ExpnId) -> bool {
     std::iter::once((expn, data))
         .chain(backtrace)
         .find_map(|(_, data)| data.macro_def_id)
-        .map_or(true, DefId::is_local)
+        .is_none_or(DefId::is_local)
 }
 
 /// Returns an iterator of macro expansions that created the given span.
@@ -152,10 +156,11 @@ pub fn first_node_macro_backtrace(cx: &LateContext<'_>, node: &impl HirNode) -> 
 }
 
 /// If `node` is the "first node" in a macro expansion, returns `Some` with the `ExpnId` of the
-/// macro call site (i.e. the parent of the macro expansion). This generally means that `node`
-/// is the outermost node of an entire macro expansion, but there are some caveats noted below.
-/// This is useful for finding macro calls while visiting the HIR without processing the macro call
-/// at every node within its expansion.
+/// macro call site (i.e. the parent of the macro expansion).
+///
+/// This generally means that `node` is the outermost node of an entire macro expansion, but there
+/// are some caveats noted below. This is useful for finding macro calls while visiting the HIR
+/// without processing the macro call at every node within its expansion.
 ///
 /// If you already have immediate access to the parent node, it is simpler to
 /// just check the context of that span directly (e.g. `parent.span.from_expansion()`).
@@ -173,8 +178,7 @@ pub fn first_node_in_macro(cx: &LateContext<'_>, node: &impl HirNode) -> Option<
 
     // get the parent node, possibly skipping over a statement
     // if the parent is not found, it is sensible to return `Some(root)`
-    let hir = cx.tcx.hir();
-    let mut parent_iter = hir.parent_iter(node.hir_id());
+    let mut parent_iter = cx.tcx.hir_parent_iter(node.hir_id());
     let (parent_id, _) = match parent_iter.next() {
         None => return Some(ExpnId::root()),
         Some((_, Node::Stmt(_))) => match parent_iter.next() {
@@ -185,7 +189,7 @@ pub fn first_node_in_macro(cx: &LateContext<'_>, node: &impl HirNode) -> Option<
     };
 
     // get the macro expansion of the parent node
-    let parent_span = hir.span(parent_id);
+    let parent_span = cx.tcx.hir_span(parent_id);
     let Some(parent_macro_call) = macro_backtrace(parent_span).next() else {
         // the parent node is not in a macro
         return Some(ExpnId::root());
@@ -244,29 +248,29 @@ impl<'a> PanicExpn<'a> {
         let ExprKind::Path(QPath::Resolved(_, path)) = &callee.kind else {
             return None;
         };
-        let name = path.segments.last().unwrap().ident.as_str();
+        let name = path.segments.last().unwrap().ident.name;
 
         // This has no argument
-        if name == "panic_cold_explicit" {
+        if name == sym::panic_cold_explicit {
             return Some(Self::Empty);
-        };
+        }
 
         let [arg, rest @ ..] = args else {
             return None;
         };
         let result = match name {
-            "panic" if arg.span.eq_ctxt(expr.span) => Self::Empty,
-            "panic" | "panic_str" => Self::Str(arg),
-            "panic_display" | "panic_cold_display" => {
+            sym::panic if arg.span.eq_ctxt(expr.span) => Self::Empty,
+            sym::panic | sym::panic_str => Self::Str(arg),
+            sym::panic_display | sym::panic_cold_display => {
                 let ExprKind::AddrOf(_, _, e) = &arg.kind else {
                     return None;
                 };
                 Self::Display(e)
             },
-            "panic_fmt" => Self::Format(arg),
+            sym::panic_fmt => Self::Format(arg),
             // Since Rust 1.52, `assert_{eq,ne}` macros expand to use:
             // `core::panicking::assert_failed(.., left_val, right_val, None | Some(format_args!(..)));`
-            "assert_failed" => {
+            sym::assert_failed => {
                 // It should have 4 arguments in total (we already matched with the first argument,
                 // so we're just checking for 3)
                 if rest.len() != 3 {
@@ -325,7 +329,7 @@ fn find_assert_args_inner<'a, const N: usize>(
         Some(inner_name) => find_assert_within_debug_assert(cx, expr, expn, Symbol::intern(inner_name))?,
     };
     let mut args = ArrayVec::new();
-    let panic_expn = for_each_expr(expr, |e| {
+    let panic_expn = for_each_expr_without_closures(expr, |e| {
         if args.is_full() {
             match PanicExpn::parse(e) {
                 Some(expn) => ControlFlow::Break(expn),
@@ -351,7 +355,7 @@ fn find_assert_within_debug_assert<'a>(
     expn: ExpnId,
     assert_name: Symbol,
 ) -> Option<(&'a Expr<'a>, ExpnId)> {
-    for_each_expr(expr, |e| {
+    for_each_expr_without_closures(expr, |e| {
         if !e.span.from_expansion() {
             return ControlFlow::Continue(Descend::No);
         }
@@ -388,58 +392,48 @@ fn is_assert_arg(cx: &LateContext<'_>, expr: &Expr<'_>, assert_expn: ExpnId) -> 
     }
 }
 
-thread_local! {
-    /// We preserve the [`FormatArgs`] structs from the early pass for use in the late pass to be
-    /// able to access the many features of a [`LateContext`].
+/// Stores AST [`FormatArgs`] nodes for use in late lint passes, as they are in a desugared form in
+/// the HIR
+#[derive(Default, Clone)]
+pub struct FormatArgsStorage(Arc<OnceLock<FxHashMap<Span, FormatArgs>>>);
+
+impl FormatArgsStorage {
+    /// Returns an AST [`FormatArgs`] node if a `format_args` expansion is found as a descendant of
+    /// `expn_id`
     ///
-    /// A thread local is used because [`FormatArgs`] is `!Send` and `!Sync`, we are making an
-    /// assumption that the early pass that populates the map and the later late passes will all be
-    /// running on the same thread.
-    #[doc(hidden)]
-    pub static AST_FORMAT_ARGS: OnceCell<FxHashMap<Span, Rc<FormatArgs>>> = {
-        static CALLED: AtomicBool = AtomicBool::new(false);
-        debug_assert!(
-            !CALLED.swap(true, Ordering::SeqCst),
-            "incorrect assumption: `AST_FORMAT_ARGS` should only be accessed by a single thread",
-        );
-
-        OnceCell::new()
-    };
-}
-
-/// Returns an AST [`FormatArgs`] node if a `format_args` expansion is found as a descendant of
-/// `expn_id`
-pub fn find_format_args(cx: &LateContext<'_>, start: &Expr<'_>, expn_id: ExpnId) -> Option<Rc<FormatArgs>> {
-    let format_args_expr = for_each_expr(start, |expr| {
-        let ctxt = expr.span.ctxt();
-        if ctxt.outer_expn().is_descendant_of(expn_id) {
-            if macro_backtrace(expr.span)
-                .map(|macro_call| cx.tcx.item_name(macro_call.def_id))
-                .any(|name| matches!(name, sym::const_format_args | sym::format_args | sym::format_args_nl))
-            {
-                ControlFlow::Break(expr)
+    /// See also [`find_format_arg_expr`]
+    pub fn get(&self, cx: &LateContext<'_>, start: &Expr<'_>, expn_id: ExpnId) -> Option<&FormatArgs> {
+        let format_args_expr = for_each_expr_without_closures(start, |expr| {
+            let ctxt = expr.span.ctxt();
+            if ctxt.outer_expn().is_descendant_of(expn_id) {
+                if macro_backtrace(expr.span)
+                    .map(|macro_call| cx.tcx.item_name(macro_call.def_id))
+                    .any(|name| matches!(name, sym::const_format_args | sym::format_args | sym::format_args_nl))
+                {
+                    ControlFlow::Break(expr)
+                } else {
+                    ControlFlow::Continue(Descend::Yes)
+                }
             } else {
-                ControlFlow::Continue(Descend::Yes)
+                ControlFlow::Continue(Descend::No)
             }
-        } else {
-            ControlFlow::Continue(Descend::No)
-        }
-    })?;
+        })?;
 
-    AST_FORMAT_ARGS.with(|ast_format_args| {
-        ast_format_args
-            .get()?
-            .get(&format_args_expr.span.with_parent(None))
-            .cloned()
-    })
+        debug_assert!(self.0.get().is_some(), "`FormatArgsStorage` not yet populated");
+
+        self.0.get()?.get(&format_args_expr.span.with_parent(None))
+    }
+
+    /// Should only be called by `FormatArgsCollector`
+    pub fn set(&self, format_args: FxHashMap<Span, FormatArgs>) {
+        self.0
+            .set(format_args)
+            .expect("`FormatArgsStorage::set` should only be called once");
+    }
 }
 
-/// Attempt to find the [`rustc_hir::Expr`] that corresponds to the [`FormatArgument`]'s value, if
-/// it cannot be found it will return the [`rustc_ast::Expr`].
-pub fn find_format_arg_expr<'hir, 'ast>(
-    start: &'hir Expr<'hir>,
-    target: &'ast FormatArgument,
-) -> Result<&'hir Expr<'hir>, &'ast rustc_ast::Expr> {
+/// Attempt to find the [`rustc_hir::Expr`] that corresponds to the [`FormatArgument`]'s value
+pub fn find_format_arg_expr<'hir>(start: &'hir Expr<'hir>, target: &FormatArgument) -> Option<&'hir Expr<'hir>> {
     let SpanData {
         lo,
         hi,
@@ -447,7 +441,7 @@ pub fn find_format_arg_expr<'hir, 'ast>(
         parent: _,
     } = target.expr.span.data();
 
-    for_each_expr(start, |expr| {
+    for_each_expr_without_closures(start, |expr| {
         // When incremental compilation is enabled spans gain a parent during AST to HIR lowering,
         // since we're comparing an AST span to a HIR one we need to ignore the parent field
         let data = expr.span.data();
@@ -457,7 +451,6 @@ pub fn find_format_arg_expr<'hir, 'ast>(
             ControlFlow::Continue(())
         }
     })
-    .ok_or(&target.expr)
 }
 
 /// Span of the `:` and format specifiers

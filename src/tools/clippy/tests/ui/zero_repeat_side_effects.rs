@@ -16,32 +16,41 @@ fn main() {
 
     // on arrays
     let a = [f(); 0];
-    let a = [f(); N];
+    //~^ zero_repeat_side_effects
     let mut b;
     b = [f(); 0];
-    b = [f(); N];
+    //~^ zero_repeat_side_effects
 
     // on vecs
-    // vecs dont support infering value of consts
+    // vecs dont support inferring value of consts
     let c = vec![f(); 0];
+    //~^ zero_repeat_side_effects
     let d;
     d = vec![f(); 0];
+    //~^ zero_repeat_side_effects
 
     // for macros
     let e = [println!("side effect"); 0];
+    //~^ zero_repeat_side_effects
 
     // for nested calls
     let g = [{ f() }; 0];
+    //~^ zero_repeat_side_effects
 
     // as function param
     drop(vec![f(); 0]);
+    //~^ zero_repeat_side_effects
 
     // when singled out/not part of assignment/local
     vec![f(); 0];
+    //~^ zero_repeat_side_effects
     [f(); 0];
-    [f(); N];
+    //~^ zero_repeat_side_effects
 
     // should not trigger
+    let a = [f(); N];
+    b = [f(); N];
+    [f(); N];
 
     // on arrays with > 0 repeat
     let a = [f(); 1];
@@ -57,4 +66,16 @@ fn main() {
 
     // as function param
     drop(vec![f(); 1]);
+}
+
+macro_rules! LEN {
+    () => {
+        0
+    };
+}
+
+fn issue_13110() {
+    let _data = [f(); LEN!()];
+    const LENGTH: usize = LEN!();
+    let _data = [f(); LENGTH];
 }

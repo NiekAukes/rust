@@ -1,14 +1,15 @@
+//@ add-core-stubs
 //@ needs-llvm-components: x86
 //@ compile-flags: --target=i686-pc-windows-msvc --crate-type=rlib
 #![no_core]
 #![feature(no_core, lang_items)]
-#[lang="sized"]
-trait Sized { }
+
+extern crate minicore;
+use minicore::*;
 
 extern "stdcall" {
     fn printf(_: *const u8, ...);
-    //~^ ERROR: C-variadic function must have a compatible calling convention,
-    // like C, cdecl, win64, sysv64 or efiapi
+    //~^ ERROR: C-variadic functions with the "stdcall" calling convention are not supported
 }
 
 extern "C" {

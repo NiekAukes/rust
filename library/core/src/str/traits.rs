@@ -1,13 +1,11 @@
 //! Trait implementations for `str`.
 
+use super::ParseBoolError;
 use crate::cmp::Ordering;
 use crate::intrinsics::unchecked_sub;
-use crate::ops;
-use crate::ptr;
 use crate::slice::SliceIndex;
 use crate::ub_checks::assert_unsafe_precondition;
-
-use super::ParseBoolError;
+use crate::{ops, ptr, range};
 
 /// Implements ordering of strings.
 ///
@@ -94,7 +92,6 @@ const fn str_index_overflow_fail() -> ! {
 ///
 /// Equivalent to `&self[0 .. len]` or `&mut self[0 .. len]`.
 #[stable(feature = "str_checked_slicing", since = "1.20.0")]
-#[rustc_const_unstable(feature = "const_slice_index", issue = "none")]
 unsafe impl SliceIndex<str> for ops::RangeFull {
     type Output = str;
     #[inline]
@@ -159,7 +156,6 @@ unsafe impl SliceIndex<str> for ops::RangeFull {
 /// // &s[3 .. 100];
 /// ```
 #[stable(feature = "str_checked_slicing", since = "1.20.0")]
-#[rustc_const_unstable(feature = "const_slice_index", issue = "none")]
 unsafe impl SliceIndex<str> for ops::Range<usize> {
     type Output = str;
     #[inline]
@@ -190,6 +186,7 @@ unsafe impl SliceIndex<str> for ops::Range<usize> {
         }
     }
     #[inline]
+    #[track_caller]
     unsafe fn get_unchecked(self, slice: *const str) -> *const Self::Output {
         let slice = slice as *const [u8];
 
@@ -217,6 +214,111 @@ unsafe impl SliceIndex<str> for ops::Range<usize> {
         }
     }
     #[inline]
+    #[track_caller]
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut Self::Output {
+        let slice = slice as *mut [u8];
+
+        assert_unsafe_precondition!(
+            check_library_ub,
+            "str::get_unchecked_mut requires that the range is within the string slice",
+            (
+                start: usize = self.start,
+                end: usize = self.end,
+                len: usize = slice.len()
+            ) => end >= start && end <= len,
+        );
+
+        // SAFETY: see comments for `get_unchecked`.
+        unsafe {
+            let new_len = unchecked_sub(self.end, self.start);
+            ptr::slice_from_raw_parts_mut(slice.as_mut_ptr().add(self.start), new_len) as *mut str
+        }
+    }
+    #[inline]
+    fn index(self, slice: &str) -> &Self::Output {
+        let (start, end) = (self.start, self.end);
+        match self.get(slice) {
+            Some(s) => s,
+            None => super::slice_error_fail(slice, start, end),
+        }
+    }
+    #[inline]
+    fn index_mut(self, slice: &mut str) -> &mut Self::Output {
+        // is_char_boundary checks that the index is in [0, .len()]
+        // cannot reuse `get` as above, because of NLL trouble
+        if self.start <= self.end
+            && slice.is_char_boundary(self.start)
+            && slice.is_char_boundary(self.end)
+        {
+            // SAFETY: just checked that `start` and `end` are on a char boundary,
+            // and we are passing in a safe reference, so the return value will also be one.
+            unsafe { &mut *self.get_unchecked_mut(slice) }
+        } else {
+            super::slice_error_fail(slice, self.start, self.end)
+        }
+    }
+}
+
+#[unstable(feature = "new_range_api", issue = "125687")]
+unsafe impl SliceIndex<str> for range::Range<usize> {
+    type Output = str;
+    #[inline]
+    fn get(self, slice: &str) -> Option<&Self::Output> {
+        if self.start <= self.end
+            && slice.is_char_boundary(self.start)
+            && slice.is_char_boundary(self.end)
+        {
+            // SAFETY: just checked that `start` and `end` are on a char boundary,
+            // and we are passing in a safe reference, so the return value will also be one.
+            // We also checked char boundaries, so this is valid UTF-8.
+            Some(unsafe { &*self.get_unchecked(slice) })
+        } else {
+            None
+        }
+    }
+    #[inline]
+    fn get_mut(self, slice: &mut str) -> Option<&mut Self::Output> {
+        if self.start <= self.end
+            && slice.is_char_boundary(self.start)
+            && slice.is_char_boundary(self.end)
+        {
+            // SAFETY: just checked that `start` and `end` are on a char boundary.
+            // We know the pointer is unique because we got it from `slice`.
+            Some(unsafe { &mut *self.get_unchecked_mut(slice) })
+        } else {
+            None
+        }
+    }
+    #[inline]
+    #[track_caller]
+    unsafe fn get_unchecked(self, slice: *const str) -> *const Self::Output {
+        let slice = slice as *const [u8];
+
+        assert_unsafe_precondition!(
+            // We'd like to check that the bounds are on char boundaries,
+            // but there's not really a way to do so without reading
+            // behind the pointer, which has aliasing implications.
+            // It's also not possible to move this check up to
+            // `str::get_unchecked` without adding a special function
+            // to `SliceIndex` just for this.
+            check_library_ub,
+            "str::get_unchecked requires that the range is within the string slice",
+            (
+                start: usize = self.start,
+                end: usize = self.end,
+                len: usize = slice.len()
+            ) => end >= start && end <= len,
+        );
+
+        // SAFETY: the caller guarantees that `self` is in bounds of `slice`
+        // which satisfies all the conditions for `add`.
+        unsafe {
+            let new_len = unchecked_sub(self.end, self.start);
+            ptr::slice_from_raw_parts(slice.as_ptr().add(self.start), new_len) as *const str
+        }
+    }
+    #[inline]
+    #[track_caller]
     unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut Self::Output {
         let slice = slice as *mut [u8];
 
@@ -329,7 +431,6 @@ unsafe impl SliceIndex<str> for (ops::Bound<usize>, ops::Bound<usize>) {
 /// Panics if `end` does not point to the starting byte offset of a
 /// character (as defined by `is_char_boundary`), or if `end > len`.
 #[stable(feature = "str_checked_slicing", since = "1.20.0")]
-#[rustc_const_unstable(feature = "const_slice_index", issue = "none")]
 unsafe impl SliceIndex<str> for ops::RangeTo<usize> {
     type Output = str;
     #[inline]
@@ -398,8 +499,62 @@ unsafe impl SliceIndex<str> for ops::RangeTo<usize> {
 /// Panics if `begin` does not point to the starting byte offset of
 /// a character (as defined by `is_char_boundary`), or if `begin > len`.
 #[stable(feature = "str_checked_slicing", since = "1.20.0")]
-#[rustc_const_unstable(feature = "const_slice_index", issue = "none")]
 unsafe impl SliceIndex<str> for ops::RangeFrom<usize> {
+    type Output = str;
+    #[inline]
+    fn get(self, slice: &str) -> Option<&Self::Output> {
+        if slice.is_char_boundary(self.start) {
+            // SAFETY: just checked that `start` is on a char boundary,
+            // and we are passing in a safe reference, so the return value will also be one.
+            Some(unsafe { &*self.get_unchecked(slice) })
+        } else {
+            None
+        }
+    }
+    #[inline]
+    fn get_mut(self, slice: &mut str) -> Option<&mut Self::Output> {
+        if slice.is_char_boundary(self.start) {
+            // SAFETY: just checked that `start` is on a char boundary,
+            // and we are passing in a safe reference, so the return value will also be one.
+            Some(unsafe { &mut *self.get_unchecked_mut(slice) })
+        } else {
+            None
+        }
+    }
+    #[inline]
+    unsafe fn get_unchecked(self, slice: *const str) -> *const Self::Output {
+        let len = (slice as *const [u8]).len();
+        // SAFETY: the caller has to uphold the safety contract for `get_unchecked`.
+        unsafe { (self.start..len).get_unchecked(slice) }
+    }
+    #[inline]
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut Self::Output {
+        let len = (slice as *mut [u8]).len();
+        // SAFETY: the caller has to uphold the safety contract for `get_unchecked_mut`.
+        unsafe { (self.start..len).get_unchecked_mut(slice) }
+    }
+    #[inline]
+    fn index(self, slice: &str) -> &Self::Output {
+        let (start, end) = (self.start, slice.len());
+        match self.get(slice) {
+            Some(s) => s,
+            None => super::slice_error_fail(slice, start, end),
+        }
+    }
+    #[inline]
+    fn index_mut(self, slice: &mut str) -> &mut Self::Output {
+        if slice.is_char_boundary(self.start) {
+            // SAFETY: just checked that `start` is on a char boundary,
+            // and we are passing in a safe reference, so the return value will also be one.
+            unsafe { &mut *self.get_unchecked_mut(slice) }
+        } else {
+            super::slice_error_fail(slice, self.start, slice.len())
+        }
+    }
+}
+
+#[unstable(feature = "new_range_api", issue = "125687")]
+unsafe impl SliceIndex<str> for range::RangeFrom<usize> {
     type Output = str;
     #[inline]
     fn get(self, slice: &str) -> Option<&Self::Output> {
@@ -470,7 +625,6 @@ unsafe impl SliceIndex<str> for ops::RangeFrom<usize> {
 /// to the ending byte offset of a character (`end + 1` is either a starting
 /// byte offset or equal to `len`), if `begin > end`, or if `end >= len`.
 #[stable(feature = "inclusive_range", since = "1.26.0")]
-#[rustc_const_unstable(feature = "const_slice_index", issue = "none")]
 unsafe impl SliceIndex<str> for ops::RangeInclusive<usize> {
     type Output = str;
     #[inline]
@@ -507,6 +661,43 @@ unsafe impl SliceIndex<str> for ops::RangeInclusive<usize> {
     }
 }
 
+#[unstable(feature = "new_range_api", issue = "125687")]
+unsafe impl SliceIndex<str> for range::RangeInclusive<usize> {
+    type Output = str;
+    #[inline]
+    fn get(self, slice: &str) -> Option<&Self::Output> {
+        if self.end == usize::MAX { None } else { self.into_slice_range().get(slice) }
+    }
+    #[inline]
+    fn get_mut(self, slice: &mut str) -> Option<&mut Self::Output> {
+        if self.end == usize::MAX { None } else { self.into_slice_range().get_mut(slice) }
+    }
+    #[inline]
+    unsafe fn get_unchecked(self, slice: *const str) -> *const Self::Output {
+        // SAFETY: the caller must uphold the safety contract for `get_unchecked`.
+        unsafe { self.into_slice_range().get_unchecked(slice) }
+    }
+    #[inline]
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut Self::Output {
+        // SAFETY: the caller must uphold the safety contract for `get_unchecked_mut`.
+        unsafe { self.into_slice_range().get_unchecked_mut(slice) }
+    }
+    #[inline]
+    fn index(self, slice: &str) -> &Self::Output {
+        if self.end == usize::MAX {
+            str_index_overflow_fail();
+        }
+        self.into_slice_range().index(slice)
+    }
+    #[inline]
+    fn index_mut(self, slice: &mut str) -> &mut Self::Output {
+        if self.end == usize::MAX {
+            str_index_overflow_fail();
+        }
+        self.into_slice_range().index_mut(slice)
+    }
+}
+
 /// Implements substring slicing with syntax `&self[..= end]` or `&mut
 /// self[..= end]`.
 ///
@@ -522,7 +713,6 @@ unsafe impl SliceIndex<str> for ops::RangeInclusive<usize> {
 /// (`end + 1` is either a starting byte offset as defined by
 /// `is_char_boundary`, or equal to `len`), or if `end >= len`.
 #[stable(feature = "inclusive_range", since = "1.26.0")]
-#[rustc_const_unstable(feature = "const_slice_index", issue = "none")]
 unsafe impl SliceIndex<str> for ops::RangeToInclusive<usize> {
     type Output = str;
     #[inline]
@@ -565,6 +755,20 @@ unsafe impl SliceIndex<str> for ops::RangeToInclusive<usize> {
 /// that do not contain a lifetime parameter themselves. In other words, you can
 /// parse an `i32` with `FromStr`, but not a `&i32`. You can parse a struct that
 /// contains an `i32`, but not one that contains an `&i32`.
+///
+/// # Input format and round-tripping
+///
+/// The input format expected by a type's `FromStr` implementation depends on the type. Check the
+/// type's documentation for the input formats it knows how to parse. Note that the input format of
+/// a type's `FromStr` implementation might not necessarily accept the output format of its
+/// `Display` implementation, and even if it does, the `Display` implementation may not be lossless
+/// so the round-trip may lose information.
+///
+/// However, if a type has a lossless `Display` implementation whose output is meant to be
+/// conveniently machine-parseable and not just meant for human consumption, then the type may wish
+/// to accept the same format in `FromStr`, and document that usage. Having both `Display` and
+/// `FromStr` implementations where the result of `Display` cannot be parsed with `FromStr` may
+/// surprise users.
 ///
 /// # Examples
 ///

@@ -1,6 +1,5 @@
 #![feature(fn_traits, unboxed_closures)]
 #![warn(clippy::no_effect_underscore_binding)]
-#![allow(dead_code, path_statements)]
 #![allow(
     clippy::deref_addrof,
     clippy::redundant_field_names,
@@ -33,7 +32,6 @@ impl Neg for Cout {
     }
 }
 
-struct Unit;
 struct Tuple(i32);
 struct Struct {
     field: i32,
@@ -41,10 +39,6 @@ struct Struct {
 enum Enum {
     Tuple(i32),
     Struct { field: i32 },
-}
-struct DropUnit;
-impl Drop for DropUnit {
-    fn drop(&mut self) {}
 }
 struct DropStruct {
     field: i32,
@@ -117,70 +111,90 @@ impl FnOnce<(&str,)> for GreetStruct3 {
 
 fn main() {
     let s = get_struct();
-    let s2 = get_struct();
 
     0;
-    //~^ ERROR: statement with no effect
-    //~| NOTE: `-D clippy::no-effect` implied by `-D warnings`
-    s2;
-    //~^ ERROR: statement with no effect
-    Unit;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     Tuple(0);
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     Struct { field: 0 };
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     Struct { ..s };
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     Union { a: 0 };
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     Enum::Tuple(0);
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     Enum::Struct { field: 0 };
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     5 + 6;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     *&42;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     &6;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     (5, 6, 7);
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     ..;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     5..;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     ..5;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     5..6;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     5..=6;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     [42, 55];
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     [42, 55][1];
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     (42, 55).1;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     [42; 55];
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     [42; 55][13];
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     let mut x = 0;
     || x += 5;
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     let s: String = "foo".into();
     FooString { s: s };
-    //~^ ERROR: statement with no effect
+    //~^ no_effect
+
     let _unused = 1;
-    //~^ ERROR: binding to `_` prefixed variable with no side-effect
-    //~| NOTE: `-D clippy::no-effect-underscore-binding` implied by `-D warnings`
+    //~^ no_effect_underscore_binding
+
     let _penguin = || println!("Some helpful closure");
-    //~^ ERROR: binding to `_` prefixed variable with no side-effect
+    //~^ no_effect_underscore_binding
+
     let _duck = Struct { field: 0 };
-    //~^ ERROR: binding to `_` prefixed variable with no side-effect
+    //~^ no_effect_underscore_binding
+
     let _cat = [2, 4, 6, 8][2];
-    //~^ ERROR: binding to `_` prefixed variable with no side-effect
+    //~^ no_effect_underscore_binding
+
     let _issue_12166 = 42;
     let underscore_variable_above_can_be_used_dont_lint = _issue_12166;
 
@@ -192,7 +206,6 @@ fn main() {
     unsafe { unsafe_fn() };
     let _used = get_struct();
     let _x = vec![1];
-    DropUnit;
     DropStruct { field: 0 };
     DropTuple(0);
     DropEnum::Tuple(0);
@@ -207,4 +220,57 @@ fn main() {
 
     Cout << 142;
     -Cout;
+}
+
+fn issue14592() {
+    struct MyStruct {
+        _inner: MyInner,
+    }
+    struct MyInner {}
+
+    impl Drop for MyInner {
+        fn drop(&mut self) {
+            println!("dropping");
+        }
+    }
+
+    let x = MyStruct { _inner: MyInner {} };
+
+    let closure = || {
+        // Do not lint: dropping the assignment or assigning to `_` would
+        // change the output.
+        let _x = x;
+    };
+
+    println!("1");
+    closure();
+    println!("2");
+
+    struct Innocuous {
+        a: i32,
+    }
+
+    // Do not lint: one of the fields has a side effect.
+    let x = MyInner {};
+    let closure = || {
+        let _x = Innocuous {
+            a: {
+                x;
+                10
+            },
+        };
+    };
+
+    // Do not lint: the base has a side effect.
+    let x = MyInner {};
+    let closure = || {
+        let _x = Innocuous {
+            ..Innocuous {
+                a: {
+                    x;
+                    10
+                },
+            }
+        };
+    };
 }

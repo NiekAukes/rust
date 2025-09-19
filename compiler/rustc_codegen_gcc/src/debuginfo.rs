@@ -1,17 +1,17 @@
-use crate::rustc_index::Idx;
+use std::ops::Range;
+use std::sync::Arc;
+
 use gccjit::{Location, RValue};
+use rustc_abi::Size;
 use rustc_codegen_ssa::mir::debuginfo::{DebugScope, FunctionDebugContext, VariableKind};
-use rustc_codegen_ssa::traits::{DebugInfoBuilderMethods, DebugInfoMethods};
-use rustc_data_structures::sync::Lrc;
-use rustc_index::bit_set::BitSet;
-use rustc_index::IndexVec;
+use rustc_codegen_ssa::traits::{DebugInfoBuilderMethods, DebugInfoCodegenMethods};
+use rustc_index::bit_set::DenseBitSet;
+use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::{self, Body, SourceScope};
-use rustc_middle::ty::{Instance, PolyExistentialTraitRef, Ty};
+use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty};
 use rustc_session::config::DebugInfo;
 use rustc_span::{BytePos, Pos, SourceFile, SourceFileAndLine, Span, Symbol};
-use rustc_target::abi::call::FnAbi;
-use rustc_target::abi::Size;
-use std::ops::Range;
+use rustc_target::callconv::FnAbi;
 
 use crate::builder::Builder;
 use crate::context::CodegenCx;
@@ -48,10 +48,14 @@ impl<'a, 'gcc, 'tcx> DebugInfoBuilderMethods for Builder<'a, 'gcc, 'tcx> {
     fn set_dbg_loc(&mut self, dbg_loc: Self::DILocation) {
         self.location = Some(dbg_loc);
     }
+
+    fn clear_dbg_loc(&mut self) {
+        self.location = None;
+    }
 }
 
 /// Generate the `debug_context` in an MIR Body.
-/// # Souce of Origin
+/// # Source of Origin
 /// Copied from `create_scope_map.rs` of rustc_codegen_llvm
 fn compute_mir_scopes<'gcc, 'tcx>(
     cx: &CodegenCx<'gcc, 'tcx>,
@@ -61,7 +65,7 @@ fn compute_mir_scopes<'gcc, 'tcx>(
 ) {
     // Find all scopes with variables defined in them.
     let variables = if cx.sess().opts.debuginfo == DebugInfo::Full {
-        let mut vars = BitSet::new_empty(mir.source_scopes.len());
+        let mut vars = DenseBitSet::new_empty(mir.source_scopes.len());
         // FIXME(eddyb) take into account that arguments always have debuginfo,
         // irrespective of their name (assuming full debuginfo is enabled).
         // NOTE(eddyb) actually, on second thought, those are always in the
@@ -74,7 +78,7 @@ fn compute_mir_scopes<'gcc, 'tcx>(
         // Nothing to emit, of course.
         None
     };
-    let mut instantiated = BitSet::new_empty(mir.source_scopes.len());
+    let mut instantiated = DenseBitSet::new_empty(mir.source_scopes.len());
     // Instantiate all scopes.
     for idx in 0..mir.source_scopes.len() {
         let scope = SourceScope::new(idx);
@@ -86,16 +90,16 @@ fn compute_mir_scopes<'gcc, 'tcx>(
 /// Update the `debug_context`, adding new scope to it,
 /// if it's not added as is denoted in `instantiated`.
 ///
-/// # Souce of Origin
+/// # Source of Origin
 /// Copied from `create_scope_map.rs` of rustc_codegen_llvm
 /// FIXME(tempdragon/?): Add Scope Support Here.
 fn make_mir_scope<'gcc, 'tcx>(
     cx: &CodegenCx<'gcc, 'tcx>,
-    instance: Instance<'tcx>,
+    _instance: Instance<'tcx>,
     mir: &Body<'tcx>,
-    variables: &Option<BitSet<SourceScope>>,
+    variables: &Option<DenseBitSet<SourceScope>>,
     debug_context: &mut FunctionDebugContext<'tcx, (), Location<'gcc>>,
-    instantiated: &mut BitSet<SourceScope>,
+    instantiated: &mut DenseBitSet<SourceScope>,
     scope: SourceScope,
 ) {
     if instantiated.contains(scope) {
@@ -104,7 +108,7 @@ fn make_mir_scope<'gcc, 'tcx>(
 
     let scope_data = &mir.source_scopes[scope];
     let parent_scope = if let Some(parent) = scope_data.parent_scope {
-        make_mir_scope(cx, instance, mir, variables, debug_context, instantiated, parent);
+        make_mir_scope(cx, _instance, mir, variables, debug_context, instantiated, parent);
         debug_context.scopes[parent]
     } else {
         // The root is the function itself.
@@ -118,14 +122,15 @@ fn make_mir_scope<'gcc, 'tcx>(
         return;
     };
 
-    if let Some(vars) = variables {
-        if !vars.contains(scope) && scope_data.inlined.is_none() {
-            // Do not create a DIScope if there are no variables defined in this
-            // MIR `SourceScope`, and it's not `inlined`, to avoid debuginfo bloat.
-            debug_context.scopes[scope] = parent_scope;
-            instantiated.insert(scope);
-            return;
-        }
+    if let Some(ref vars) = *variables
+        && !vars.contains(scope)
+        && scope_data.inlined.is_none()
+    {
+        // Do not create a DIScope if there are no variables defined in this
+        // MIR `SourceScope`, and it's not `inlined`, to avoid debuginfo bloat.
+        debug_context.scopes[scope] = parent_scope;
+        instantiated.insert(scope);
+        return;
     }
 
     let loc = cx.lookup_debug_loc(scope_data.span.lo());
@@ -136,8 +141,14 @@ fn make_mir_scope<'gcc, 'tcx>(
     let inlined_at = scope_data.inlined.map(|(_, callsite_span)| {
         // FIXME(eddyb) this doesn't account for the macro-related
         // `Span` fixups that `rustc_codegen_ssa::mir::debuginfo` does.
-        let callsite_scope = parent_scope.adjust_dbg_scope_for_span(cx, callsite_span);
-        cx.dbg_loc(callsite_scope, parent_scope.inlined_at, callsite_span)
+
+        // TODO(tempdragon): Add scope support and then revert to cg_llvm version of this closure
+        // NOTE: These variables passed () here.
+        // Changed to comply to clippy.
+
+        /* let callsite_scope =  */
+        parent_scope.adjust_dbg_scope_for_span(cx, callsite_span);
+        cx.dbg_loc(/* callsite_scope */ (), parent_scope.inlined_at, callsite_span)
     });
     let p_inlined_at = parent_scope.inlined_at;
     // TODO(tempdragon): dbg_scope: Add support for scope extension here.
@@ -158,7 +169,7 @@ fn make_mir_scope<'gcc, 'tcx>(
 // `lookup_char_pos` return the right information instead.
 pub struct DebugLoc {
     /// Information about the original source file.
-    pub file: Lrc<SourceFile>,
+    pub file: Arc<SourceFile>,
     /// The (1-based) line number.
     pub line: u32,
     /// The (1-based) column number.
@@ -196,11 +207,11 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
     }
 }
 
-impl<'gcc, 'tcx> DebugInfoMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
+impl<'gcc, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
     fn create_vtable_debuginfo(
         &self,
         _ty: Ty<'tcx>,
-        _trait_ref: Option<PolyExistentialTraitRef<'tcx>>,
+        _trait_ref: Option<ExistentialTraitRef<'tcx>>,
         _vtable: Self::Value,
     ) {
         // TODO(antoyo)
@@ -225,7 +236,7 @@ impl<'gcc, 'tcx> DebugInfoMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
             file_end_pos: BytePos(0),
         };
         let mut fn_debug_context = FunctionDebugContext {
-            scopes: IndexVec::from_elem(empty_scope, &mir.source_scopes.as_slice()),
+            scopes: IndexVec::from_elem(empty_scope, mir.source_scopes.as_slice()),
             inlined_function_scopes: Default::default(),
         };
 
@@ -274,16 +285,19 @@ impl<'gcc, 'tcx> DebugInfoMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
     ) -> Self::DILocation {
         let pos = span.lo();
         let DebugLoc { file, line, col } = self.lookup_debug_loc(pos);
-        let loc = match &file.name {
-            rustc_span::FileName::Real(name) => match name {
-                rustc_span::RealFileName::LocalPath(name) => {
+        match file.name {
+            rustc_span::FileName::Real(ref name) => match *name {
+                rustc_span::RealFileName::LocalPath(ref name) => {
                     if let Some(name) = name.to_str() {
                         self.context.new_location(name, line as i32, col as i32)
                     } else {
                         Location::null()
                     }
                 }
-                rustc_span::RealFileName::Remapped { local_path, virtual_name: _ } => {
+                rustc_span::RealFileName::Remapped {
+                    ref local_path,
+                    virtual_name: ref _unused,
+                } => {
                     if let Some(name) = local_path.as_ref() {
                         if let Some(name) = name.to_str() {
                             self.context.new_location(name, line as i32, col as i32)
@@ -296,7 +310,6 @@ impl<'gcc, 'tcx> DebugInfoMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
                 }
             },
             _ => Location::null(),
-        };
-        loc
+        }
     }
 }

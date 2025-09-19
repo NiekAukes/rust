@@ -1,6 +1,5 @@
-use rustc_errors::{Diag, EmissionGuarantee, SubdiagMessageOp, Subdiagnostic};
-use rustc_macros::{LintDiagnostic, Subdiagnostic};
-use rustc_middle::thir::Pat;
+use rustc_errors::{Diag, EmissionGuarantee, Subdiagnostic};
+use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::Ty;
 use rustc_span::Span;
 
@@ -8,18 +7,18 @@ use crate::rustc::{RustcPatCtxt, WitnessPat};
 
 #[derive(Subdiagnostic)]
 #[label(pattern_analysis_uncovered)]
-pub struct Uncovered<'tcx> {
+pub struct Uncovered {
     #[primary_span]
     span: Span,
     count: usize,
-    witness_1: Pat<'tcx>,
-    witness_2: Pat<'tcx>,
-    witness_3: Pat<'tcx>,
+    witness_1: String, // a printed pattern
+    witness_2: String, // a printed pattern
+    witness_3: String, // a printed pattern
     remainder: usize,
 }
 
-impl<'tcx> Uncovered<'tcx> {
-    pub fn new<'p>(
+impl Uncovered {
+    pub fn new<'p, 'tcx>(
         span: Span,
         cx: &RustcPatCtxt<'p, 'tcx>,
         witnesses: Vec<WitnessPat<'p, 'tcx>>,
@@ -27,19 +26,13 @@ impl<'tcx> Uncovered<'tcx> {
     where
         'tcx: 'p,
     {
-        let witness_1 = cx.hoist_witness_pat(witnesses.get(0).unwrap());
+        let witness_1 = cx.print_witness_pat(witnesses.get(0).unwrap());
         Self {
             span,
             count: witnesses.len(),
             // Substitute dummy values if witnesses is smaller than 3. These will never be read.
-            witness_2: witnesses
-                .get(1)
-                .map(|w| cx.hoist_witness_pat(w))
-                .unwrap_or_else(|| witness_1.clone()),
-            witness_3: witnesses
-                .get(2)
-                .map(|w| cx.hoist_witness_pat(w))
-                .unwrap_or_else(|| witness_1.clone()),
+            witness_2: witnesses.get(1).map(|w| cx.print_witness_pat(w)).unwrap_or_default(),
+            witness_3: witnesses.get(2).map(|w| cx.print_witness_pat(w)).unwrap_or_default(),
             witness_1,
             remainder: witnesses.len().saturating_sub(3),
         }
@@ -49,24 +42,20 @@ impl<'tcx> Uncovered<'tcx> {
 #[derive(LintDiagnostic)]
 #[diag(pattern_analysis_overlapping_range_endpoints)]
 #[note]
-pub struct OverlappingRangeEndpoints<'tcx> {
+pub struct OverlappingRangeEndpoints {
     #[label]
     pub range: Span,
     #[subdiagnostic]
-    pub overlap: Vec<Overlap<'tcx>>,
+    pub overlap: Vec<Overlap>,
 }
 
-pub struct Overlap<'tcx> {
+pub struct Overlap {
     pub span: Span,
-    pub range: Pat<'tcx>,
+    pub range: String, // a printed pattern
 }
 
-impl<'tcx> Subdiagnostic for Overlap<'tcx> {
-    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
-        self,
-        diag: &mut Diag<'_, G>,
-        _: &F,
-    ) {
+impl Subdiagnostic for Overlap {
+    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         let Overlap { span, range } = self;
 
         // FIXME(mejrs) unfortunately `#[derive(LintDiagnostic)]`
@@ -78,43 +67,39 @@ impl<'tcx> Subdiagnostic for Overlap<'tcx> {
 
 #[derive(LintDiagnostic)]
 #[diag(pattern_analysis_excluside_range_missing_max)]
-pub struct ExclusiveRangeMissingMax<'tcx> {
+pub struct ExclusiveRangeMissingMax {
     #[label]
     #[suggestion(code = "{suggestion}", applicability = "maybe-incorrect")]
     /// This is an exclusive range that looks like `lo..max` (i.e. doesn't match `max`).
     pub first_range: Span,
     /// Suggest `lo..=max` instead.
     pub suggestion: String,
-    pub max: Pat<'tcx>,
+    pub max: String, // a printed pattern
 }
 
 #[derive(LintDiagnostic)]
 #[diag(pattern_analysis_excluside_range_missing_gap)]
-pub struct ExclusiveRangeMissingGap<'tcx> {
+pub struct ExclusiveRangeMissingGap {
     #[label]
     #[suggestion(code = "{suggestion}", applicability = "maybe-incorrect")]
     /// This is an exclusive range that looks like `lo..gap` (i.e. doesn't match `gap`).
     pub first_range: Span,
-    pub gap: Pat<'tcx>,
+    pub gap: String, // a printed pattern
     /// Suggest `lo..=gap` instead.
     pub suggestion: String,
     #[subdiagnostic]
     /// All these ranges skipped over `gap` which we think is probably a mistake.
-    pub gap_with: Vec<GappedRange<'tcx>>,
+    pub gap_with: Vec<GappedRange>,
 }
 
-pub struct GappedRange<'tcx> {
+pub struct GappedRange {
     pub span: Span,
-    pub gap: Pat<'tcx>,
-    pub first_range: Pat<'tcx>,
+    pub gap: String,         // a printed pattern
+    pub first_range: String, // a printed pattern
 }
 
-impl<'tcx> Subdiagnostic for GappedRange<'tcx> {
-    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
-        self,
-        diag: &mut Diag<'_, G>,
-        _: &F,
-    ) {
+impl Subdiagnostic for GappedRange {
+    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         let GappedRange { span, gap, first_range } = self;
 
         // FIXME(mejrs) unfortunately `#[derive(LintDiagnostic)]`
@@ -134,7 +119,7 @@ impl<'tcx> Subdiagnostic for GappedRange<'tcx> {
 pub(crate) struct NonExhaustiveOmittedPattern<'tcx> {
     pub scrut_ty: Ty<'tcx>,
     #[subdiagnostic]
-    pub uncovered: Uncovered<'tcx>,
+    pub uncovered: Uncovered,
 }
 
 #[derive(LintDiagnostic)]
@@ -147,4 +132,16 @@ pub(crate) struct NonExhaustiveOmittedPatternLintOnArm {
     pub suggest_lint_on_match: Option<Span>,
     pub lint_level: &'static str,
     pub lint_name: &'static str,
+}
+
+#[derive(Diagnostic)]
+#[diag(pattern_analysis_mixed_deref_pattern_constructors)]
+pub(crate) struct MixedDerefPatternConstructors<'tcx> {
+    #[primary_span]
+    pub spans: Vec<Span>,
+    pub smart_pointer_ty: Ty<'tcx>,
+    #[label(pattern_analysis_deref_pattern_label)]
+    pub deref_pattern_label: Span,
+    #[label(pattern_analysis_normal_constructor_label)]
+    pub normal_constructor_label: Span,
 }

@@ -1,36 +1,42 @@
 //! This diagnostic provides an assist for creating a struct definition from a JSON
 //! example.
 
-use hir::{PathResolution, Semantics};
+use hir::{ImportPathConfig, PathResolution, Semantics};
+use ide_db::text_edit::TextEdit;
 use ide_db::{
-    base_db::{FileId, FileRange},
+    EditionedFileId, FileRange, FxHashMap, RootDatabase,
     helpers::mod_path_to_ast,
-    imports::insert_use::{insert_use, ImportScope},
+    imports::insert_use::{ImportScope, insert_use},
     source_change::SourceChangeBuilder,
-    RootDatabase,
 };
 use itertools::Itertools;
 use stdx::{format_to, never};
 use syntax::{
+    Edition, SyntaxKind, SyntaxNode,
     ast::{self, make},
-    SyntaxKind, SyntaxNode,
 };
-use text_edit::TextEdit;
 
-use crate::{fix, Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity, fix};
 
 #[derive(Default)]
 struct State {
     result: String,
-    struct_counts: usize,
     has_serialize: bool,
     has_deserialize: bool,
+    names: FxHashMap<String, usize>,
 }
 
 impl State {
-    fn generate_new_name(&mut self) -> ast::Name {
-        self.struct_counts += 1;
-        make::name(&format!("Struct{}", self.struct_counts))
+    fn generate_new_name(&mut self, name: &str) -> ast::Name {
+        let name = stdx::to_camel_case(name);
+        let count = if let Some(count) = self.names.get_mut(&name) {
+            *count += 1;
+            *count
+        } else {
+            self.names.insert(name.clone(), 1);
+            1
+        };
+        make::name(&format!("{name}{count}"))
     }
 
     fn serde_derive(&self) -> String {
@@ -52,15 +58,21 @@ impl State {
         }
     }
 
-    fn build_struct(&mut self, value: &serde_json::Map<String, serde_json::Value>) -> ast::Type {
-        let name = self.generate_new_name();
+    fn build_struct(
+        &mut self,
+        name: &str,
+        value: &serde_json::Map<String, serde_json::Value>,
+    ) -> ast::Type {
+        let name = self.generate_new_name(name);
         let ty = make::ty(&name.to_string());
         let strukt = make::struct_(
             None,
             name,
             None,
             make::record_field_list(value.iter().sorted_unstable_by_key(|x| x.0).map(
-                |(name, value)| make::record_field(None, make::name(name), self.type_of(value)),
+                |(name, value)| {
+                    make::record_field(None, make::name(name), self.type_of(name, value))
+                },
             ))
             .into(),
         );
@@ -68,7 +80,7 @@ impl State {
         ty
     }
 
-    fn type_of(&mut self, value: &serde_json::Value) -> ast::Type {
+    fn type_of(&mut self, name: &str, value: &serde_json::Value) -> ast::Type {
         match value {
             serde_json::Value::Null => make::ty_unit(),
             serde_json::Value::Bool(_) => make::ty("bool"),
@@ -76,12 +88,12 @@ impl State {
             serde_json::Value::String(_) => make::ty("String"),
             serde_json::Value::Array(it) => {
                 let ty = match it.iter().next() {
-                    Some(x) => self.type_of(x),
+                    Some(x) => self.type_of(name, x),
                     None => make::ty_placeholder(),
                 };
                 make::ty(&format!("Vec<{ty}>"))
             }
-            serde_json::Value::Object(x) => self.build_struct(x),
+            serde_json::Value::Object(x) => self.build_struct(name, x),
         }
     }
 }
@@ -89,9 +101,10 @@ impl State {
 pub(crate) fn json_in_items(
     sema: &Semantics<'_, RootDatabase>,
     acc: &mut Vec<Diagnostic>,
-    file_id: FileId,
+    file_id: EditionedFileId,
     node: &SyntaxNode,
     config: &DiagnosticsConfig,
+    edition: Edition,
 ) {
     (|| {
         if node.kind() == SyntaxKind::ERROR
@@ -113,50 +126,62 @@ pub(crate) fn json_in_items(
                 let serialize_resolved = scope_resolve("::serde::Serialize");
                 state.has_deserialize = deserialize_resolved.is_some();
                 state.has_serialize = serialize_resolved.is_some();
-                state.build_struct(&it);
+                state.build_struct("Root", &it);
                 edit.insert(range.start(), state.result);
+                let vfs_file_id = file_id.file_id(sema.db);
                 acc.push(
                     Diagnostic::new(
                         DiagnosticCode::Ra("json-is-not-rust", Severity::WeakWarning),
                         "JSON syntax is not valid as a Rust item",
-                        FileRange { file_id, range },
+                        FileRange { file_id: vfs_file_id, range },
                     )
+                    .stable()
                     .with_fixes(Some(vec![{
-                        let mut scb = SourceChangeBuilder::new(file_id);
-                        let scope = match import_scope {
-                            ImportScope::File(it) => ImportScope::File(scb.make_mut(it)),
-                            ImportScope::Module(it) => ImportScope::Module(scb.make_mut(it)),
-                            ImportScope::Block(it) => ImportScope::Block(scb.make_mut(it)),
-                        };
+                        let mut scb = SourceChangeBuilder::new(vfs_file_id);
+                        let scope = scb.make_import_scope_mut(import_scope);
                         let current_module = semantics_scope.module();
+
+                        let cfg = ImportPathConfig {
+                            prefer_no_std: config.prefer_no_std,
+                            prefer_prelude: config.prefer_prelude,
+                            prefer_absolute: config.prefer_absolute,
+                            allow_unstable: true,
+                        };
+
                         if !scope_has("Serialize") {
                             if let Some(PathResolution::Def(it)) = serialize_resolved {
-                                if let Some(it) = current_module.find_use_path_prefixed(
+                                if let Some(it) = current_module.find_use_path(
                                     sema.db,
                                     it,
                                     config.insert_use.prefix_kind,
-                                    config.prefer_no_std,
-                                    config.prefer_prelude,
+                                    cfg,
                                 ) {
-                                    insert_use(&scope, mod_path_to_ast(&it), &config.insert_use);
+                                    insert_use(
+                                        &scope,
+                                        mod_path_to_ast(&it, edition),
+                                        &config.insert_use,
+                                    );
                                 }
                             }
                         }
                         if !scope_has("Deserialize") {
                             if let Some(PathResolution::Def(it)) = deserialize_resolved {
-                                if let Some(it) = current_module.find_use_path_prefixed(
+                                if let Some(it) = current_module.find_use_path(
                                     sema.db,
                                     it,
                                     config.insert_use.prefix_kind,
-                                    config.prefer_no_std,
-                                    config.prefer_prelude,
+                                    cfg,
                                 ) {
-                                    insert_use(&scope, mod_path_to_ast(&it), &config.insert_use);
+                                    insert_use(
+                                        &scope,
+                                        mod_path_to_ast(&it, edition),
+                                        &config.insert_use,
+                                    );
                                 }
                             }
                         }
                         let mut sc = scb.finish();
-                        sc.insert_source_edit(file_id, edit.finish());
+                        sc.insert_source_edit(vfs_file_id, edit.finish());
                         fix("convert_json_to_struct", "Convert JSON to struct", sc, range)
                     }])),
                 );
@@ -169,8 +194,8 @@ pub(crate) fn json_in_items(
 #[cfg(test)]
 mod tests {
     use crate::{
-        tests::{check_diagnostics_with_config, check_fix, check_no_fix},
         DiagnosticsConfig,
+        tests::{check_diagnostics_with_config, check_fix, check_no_fix},
     };
 
     #[test]
@@ -218,7 +243,7 @@ mod tests {
             }
 
             #[derive(Serialize)]
-            struct Struct1{ bar: f64, bay: i64, baz: (), r#box: bool, foo: String }
+            struct Root1{ bar: f64, bay: i64, baz: (), r#box: bool, foo: String }
 
             "#,
         );
@@ -237,9 +262,44 @@ mod tests {
             }
             "#,
             r#"
-            struct Struct3{  }
-            struct Struct2{ kind: String, value: Struct3 }
-            struct Struct1{ bar: Struct2, foo: String }
+            struct Value1{  }
+            struct Bar1{ kind: String, value: Value1 }
+            struct Root1{ bar: Bar1, foo: String }
+
+            "#,
+        );
+    }
+
+    #[test]
+    fn naming() {
+        check_fix(
+            r#"
+            {$0
+                "user": {
+                    "address": {
+                        "street": "Main St",
+                        "house": 3
+                    },
+                    "email": "example@example.com"
+                },
+                "another_user": {
+                    "user": {
+                        "address": {
+                            "street": "Main St",
+                            "house": 3
+                        },
+                        "email": "example@example.com"
+                    }
+                }
+            }
+            "#,
+            r#"
+            struct Address1{ house: i64, street: String }
+            struct User1{ address: Address1, email: String }
+            struct AnotherUser1{ user: User1 }
+            struct Address2{ house: i64, street: String }
+            struct User2{ address: Address2, email: String }
+            struct Root1{ another_user: AnotherUser1, user: User2 }
 
             "#,
         );
@@ -276,9 +336,9 @@ mod tests {
             use serde::Deserialize;
 
             #[derive(Serialize, Deserialize)]
-            struct Struct2{ x: i64, y: i64 }
+            struct OfObject1{ x: i64, y: i64 }
             #[derive(Serialize, Deserialize)]
-            struct Struct1{ empty: Vec<_>, nested: Vec<Vec<Vec<i64>>>, of_object: Vec<Struct2>, of_string: Vec<String> }
+            struct Root1{ empty: Vec<_>, nested: Vec<Vec<Vec<i64>>>, of_object: Vec<OfObject1>, of_string: Vec<String> }
 
             "#,
         );

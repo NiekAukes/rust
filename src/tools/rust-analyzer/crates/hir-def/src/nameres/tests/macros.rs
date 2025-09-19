@@ -1,6 +1,7 @@
 use expect_test::expect;
 
 use itertools::Itertools;
+use span::Edition;
 
 use super::*;
 
@@ -96,9 +97,9 @@ macro_rules! structs {
             bar: t
 
             crate::bar
-            Bar: t
-            Foo: t
-            bar: t
+            Bar: tg
+            Foo: tg
+            bar: tg
         "#]],
     );
 }
@@ -129,9 +130,9 @@ macro_rules! structs {
             bar: t
 
             crate::bar
-            Bar: t
-            Foo: t
-            bar: t
+            Bar: tg
+            Foo: tg
+            bar: tg
         "#]],
     );
 }
@@ -168,9 +169,9 @@ macro_rules! inner {
             bar: t
 
             crate::bar
-            Bar: t
-            Foo: t
-            bar: t
+            Bar: tg
+            Foo: tg
+            bar: tg
         "#]],
     );
 }
@@ -735,7 +736,7 @@ pub struct bar;
 
 #[test]
 fn macro_dollar_crate_is_correct_in_derive_meta() {
-    let map = compute_crate_def_map(
+    compute_crate_def_map(
         r#"
 //- minicore: derive, clone
 //- /main.rs crate:main deps:lib
@@ -752,13 +753,13 @@ macro_rules! foo {
 
 pub use core::clone::Clone;
 "#,
+        |map| assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 1),
     );
-    assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 1);
 }
 
 #[test]
 fn expand_derive() {
-    let map = compute_crate_def_map(
+    compute_crate_def_map(
         r#"
 //- /main.rs crate:main deps:core
 use core::Copy;
@@ -774,8 +775,8 @@ pub macro Copy {}
 #[rustc_builtin_macro]
 pub macro Clone {}
 "#,
+        |map| assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 2),
     );
-    assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 2);
 }
 
 #[test]
@@ -793,7 +794,7 @@ pub trait Clone {}
 "#,
         expect![[r#"
             crate
-            Clone: t m
+            Clone: tg mg
         "#]],
     );
 }
@@ -802,7 +803,7 @@ pub trait Clone {}
 fn builtin_derive_with_unresolved_attributes_fall_back() {
     // Tests that we still resolve derives after ignoring an unresolved attribute.
     cov_mark::check!(unresolved_attribute_fallback);
-    let map = compute_crate_def_map(
+    compute_crate_def_map(
         r#"
 //- /main.rs crate:main deps:core
 use core::{Clone, derive};
@@ -817,8 +818,8 @@ pub macro derive($item:item) {}
 #[rustc_builtin_macro]
 pub macro Clone {}
 "#,
+        |map| assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 1),
     );
-    assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 1);
 }
 
 #[test]
@@ -1074,9 +1075,9 @@ macro_rules! mbe {
 "#,
         expect![[r#"
             crate
-            DummyTrait: m
-            attribute_macro: m
-            function_like_macro: m
+            DummyTrait: mg
+            attribute_macro: mg
+            function_like_macro: mg
         "#]],
     );
 }
@@ -1094,13 +1095,13 @@ pub fn derive_macro_2(_item: TokenStream) -> TokenStream {
 }
 "#,
     );
-    let krate = db.crate_graph().iter().next().unwrap();
-    let def_map = db.crate_def_map(krate);
+    let krate = *db.all_crates().last().expect("no crate graph present");
+    let def_map = crate_def_map(&db, krate);
 
     assert_eq!(def_map.data.exported_derives.len(), 1);
     match def_map.data.exported_derives.values().next() {
         Some(helpers) => match &**helpers {
-            [attr] => assert_eq!(attr.display(&db).to_string(), "helper_attr"),
+            [attr] => assert_eq!(attr.display(&db, Edition::CURRENT).to_string(), "helper_attr"),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -1310,6 +1311,116 @@ pub mod ip_address {
 }
 
 #[test]
+fn include_with_submod_file() {
+    check(
+        r#"
+//- minicore: include
+//- /lib.rs
+include!("out_dir/includes.rs");
+
+//- /out_dir/includes.rs
+pub mod company_name {
+    pub mod network {
+        pub mod v1;
+    }
+}
+//- /out_dir/company_name/network/v1.rs
+pub struct IpAddress {
+    pub ip_type: &'static str,
+}
+/// Nested message and enum types in `IpAddress`.
+pub mod ip_address {
+    pub enum IpType {
+        IpV4(u32),
+    }
+}
+
+"#,
+        expect![[r#"
+            crate
+            company_name: t
+
+            crate::company_name
+            network: t
+
+            crate::company_name::network
+            v1: t
+
+            crate::company_name::network::v1
+            IpAddress: t
+            ip_address: t
+
+            crate::company_name::network::v1::ip_address
+            IpType: t
+        "#]],
+    );
+}
+
+#[test]
+fn include_many_mods() {
+    check(
+        r#"
+//- /lib.rs
+#[rustc_builtin_macro]
+macro_rules! include { () => {} }
+
+mod nested {
+    include!("out_dir/includes.rs");
+
+    mod different_company {
+        include!("out_dir/different_company/mod.rs");
+    }
+
+    mod util;
+}
+
+//- /nested/util.rs
+pub struct Helper {}
+//- /out_dir/includes.rs
+pub mod company_name {
+    pub mod network {
+        pub mod v1;
+    }
+}
+//- /out_dir/company_name/network/v1.rs
+pub struct IpAddress {}
+//- /out_dir/different_company/mod.rs
+pub mod network;
+//- /out_dir/different_company/network.rs
+pub struct Url {}
+
+"#,
+        expect![[r#"
+            crate
+            nested: t
+
+            crate::nested
+            company_name: t
+            different_company: t
+            util: t
+
+            crate::nested::company_name
+            network: t
+
+            crate::nested::company_name::network
+            v1: t
+
+            crate::nested::company_name::network::v1
+            IpAddress: t
+
+            crate::nested::different_company
+            network: t
+
+            crate::nested::different_company::network
+            Url: t
+
+            crate::nested::util
+            Helper: t
+        "#]],
+    );
+}
+
+#[test]
 fn macro_use_imports_all_macro_types() {
     let db = TestDB::with_files(
         r#"
@@ -1334,8 +1445,8 @@ struct TokenStream;
 fn proc_attr(a: TokenStream, b: TokenStream) -> TokenStream { a }
     "#,
     );
-    let krate = db.crate_graph().iter().next().unwrap();
-    let def_map = db.crate_def_map(krate);
+    let krate = *db.all_crates().last().expect("no crate graph present");
+    let def_map = crate_def_map(&db, krate);
 
     let root_module = &def_map[DefMap::ROOT].scope;
     assert!(
@@ -1346,7 +1457,7 @@ fn proc_attr(a: TokenStream, b: TokenStream) -> TokenStream { a }
     let actual = def_map
         .macro_use_prelude
         .keys()
-        .map(|name| name.display(&db).to_string())
+        .map(|name| name.display(&db, Edition::CURRENT).to_string())
         .sorted()
         .join("\n");
 
@@ -1433,7 +1544,7 @@ macro_rules! mk_foo {
 
 #[test]
 fn macro_sub_namespace() {
-    let map = compute_crate_def_map(
+    compute_crate_def_map(
         r#"
 //- minicore: derive, clone
 macro_rules! Clone { () => {} }
@@ -1442,8 +1553,8 @@ macro_rules! derive { () => {} }
 #[derive(Clone)]
 struct S;
     "#,
+        |map| assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 1),
     );
-    assert_eq!(map.modules[DefMap::ROOT].scope.impls().len(), 1);
 }
 
 #[test]

@@ -8,7 +8,7 @@ use core::intrinsics::mir::*;
 
 #[custom_mir(dialect = "built")]
 pub fn f(a: bool) {
-    mir!(
+    mir! {
         let b: ();
         {
             match a { true => bb1, _ => bb2 }
@@ -21,10 +21,10 @@ pub fn f(a: bool) {
             Goto(bb3)
         }
         bb3 = {
-            b = ();
+            b = (); //~ ERROR broken MIR
             RET = b;
             StorageDead(b);
             Return()
         }
-    )
+    }
 }

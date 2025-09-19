@@ -35,9 +35,9 @@ macro_rules! f {
     };
 }
 
-struct#0:1@58..64#1# MyTraitMap2#0:2@31..42#0# {#0:1@72..73#1#
-    map#0:1@86..89#1#:#0:1@89..90#1# #0:1@89..90#1#::#0:1@91..92#1#std#0:1@93..96#1#::#0:1@96..97#1#collections#0:1@98..109#1#::#0:1@109..110#1#HashSet#0:1@111..118#1#<#0:1@118..119#1#(#0:1@119..120#1#)#0:1@120..121#1#>#0:1@121..122#1#,#0:1@122..123#1#
-}#0:1@132..133#1#
+struct#0:MacroRules[8C8E, 0]@58..64#14336# MyTraitMap2#0:MacroCall[D499, 0]@31..42#ROOT2024# {#0:MacroRules[8C8E, 0]@72..73#14336#
+    map#0:MacroRules[8C8E, 0]@86..89#14336#:#0:MacroRules[8C8E, 0]@89..90#14336# #0:MacroRules[8C8E, 0]@89..90#14336#::#0:MacroRules[8C8E, 0]@91..93#14336#std#0:MacroRules[8C8E, 0]@93..96#14336#::#0:MacroRules[8C8E, 0]@96..98#14336#collections#0:MacroRules[8C8E, 0]@98..109#14336#::#0:MacroRules[8C8E, 0]@109..111#14336#HashSet#0:MacroRules[8C8E, 0]@111..118#14336#<#0:MacroRules[8C8E, 0]@118..119#14336#(#0:MacroRules[8C8E, 0]@119..120#14336#)#0:MacroRules[8C8E, 0]@120..121#14336#>#0:MacroRules[8C8E, 0]@121..122#14336#,#0:MacroRules[8C8E, 0]@122..123#14336#
+}#0:MacroRules[8C8E, 0]@132..133#14336#
 "#]],
     );
 }
@@ -75,12 +75,12 @@ macro_rules! f {
     };
 }
 
-fn#0:2@30..32#0# main#0:2@33..37#0#(#0:2@37..38#0#)#0:2@38..39#0# {#0:2@40..41#0#
-    1#0:2@50..51#0#;#0:2@51..52#0#
-    1.0#0:2@61..64#0#;#0:2@64..65#0#
-    (#0:2@74..75#0#(#0:2@75..76#0#1#0:2@76..77#0#,#0:2@77..78#0# )#0:2@78..79#0#,#0:2@79..80#0# )#0:2@80..81#0#.#0:2@81..82#0#0#0:2@82..85#0#.#0:2@82..85#0#0#0:2@82..85#0#;#0:2@85..86#0#
-    let#0:2@95..98#0# x#0:2@99..100#0# =#0:2@101..102#0# 1#0:2@103..104#0#;#0:2@104..105#0#
-}#0:2@110..111#0#
+fn#0:MacroCall[D499, 0]@30..32#ROOT2024# main#0:MacroCall[D499, 0]@33..37#ROOT2024#(#0:MacroCall[D499, 0]@37..38#ROOT2024#)#0:MacroCall[D499, 0]@38..39#ROOT2024# {#0:MacroCall[D499, 0]@40..41#ROOT2024#
+    1#0:MacroCall[D499, 0]@50..51#ROOT2024#;#0:MacroCall[D499, 0]@51..52#ROOT2024#
+    1.0#0:MacroCall[D499, 0]@61..64#ROOT2024#;#0:MacroCall[D499, 0]@64..65#ROOT2024#
+    (#0:MacroCall[D499, 0]@74..75#ROOT2024#(#0:MacroCall[D499, 0]@75..76#ROOT2024#1#0:MacroCall[D499, 0]@76..77#ROOT2024#,#0:MacroCall[D499, 0]@77..78#ROOT2024# )#0:MacroCall[D499, 0]@78..79#ROOT2024#,#0:MacroCall[D499, 0]@79..80#ROOT2024# )#0:MacroCall[D499, 0]@80..81#ROOT2024#.#0:MacroCall[D499, 0]@81..82#ROOT2024#0#0:MacroCall[D499, 0]@82..85#ROOT2024#.#0:MacroCall[D499, 0]@82..85#ROOT2024#0#0:MacroCall[D499, 0]@82..85#ROOT2024#;#0:MacroCall[D499, 0]@85..86#ROOT2024#
+    let#0:MacroCall[D499, 0]@95..98#ROOT2024# x#0:MacroCall[D499, 0]@99..100#ROOT2024# =#0:MacroCall[D499, 0]@101..102#ROOT2024# 1#0:MacroCall[D499, 0]@103..104#ROOT2024#;#0:MacroCall[D499, 0]@104..105#ROOT2024#
+}#0:MacroCall[D499, 0]@110..111#ROOT2024#
 
 
 "#]],
@@ -171,7 +171,7 @@ fn main(foo: ()) {
     }
 
     fn main(foo: ()) {
-        /* error: unresolved macro unresolved */"helloworld!"#0:3@236..321#0#;
+        /* error: unresolved macro unresolved */"helloworld!"#0:Fn[B9C7, 0]@236..321#ROOT2024#;
     }
 }
 
@@ -197,7 +197,7 @@ macro_rules! mk_struct {
 #[macro_use]
 mod foo;
 
-struct#1:1@59..65#1# Foo#0:2@32..35#0#(#1:1@70..71#1#u32#0:2@41..44#0#)#1:1@74..75#1#;#1:1@75..76#1#
+struct#1:MacroRules[E572, 0]@59..65#14336# Foo#0:MacroCall[BDD3, 0]@32..35#ROOT2024#(#1:MacroRules[E572, 0]@70..71#14336#u32#0:MacroCall[BDD3, 0]@41..44#ROOT2024#)#1:MacroRules[E572, 0]@74..75#14336#;#1:MacroRules[E572, 0]@75..76#14336#
 "#]],
     );
 }
@@ -389,7 +389,7 @@ m! { foo# bar }
 
 m! { Foo,# Bar }
 "#,
-        expect![[r##"
+        expect![[r#"
 macro_rules! m {
     ($($i:ident),*) => ($(mod $i {} )*);
     ($($i:ident)#*) => ($(fn $i() {} )*);
@@ -404,27 +404,29 @@ fn bar() {}
 
 struct Foo;
 struct Bar;
-"##]],
+"#]],
     );
 }
 
 #[test]
 fn test_match_group_pattern_with_multiple_defs() {
+    // FIXME: The pretty printer breaks by leaving whitespace here, +syntaxctxt is used to avoid that
     check(
         r#"
 macro_rules! m {
     ($($i:ident),*) => ( impl Bar { $(fn $i() {})* } );
 }
+// +syntaxctxt
 m! { foo, bar }
 "#,
         expect![[r#"
 macro_rules! m {
     ($($i:ident),*) => ( impl Bar { $(fn $i() {})* } );
 }
-impl Bar {
-    fn foo() {}
-    fn bar() {}
-}
+impl#\14336# Bar#\14336# {#\14336#
+    fn#\14336# foo#\ROOT2024#(#\14336#)#\14336# {#\14336#}#\14336#
+    fn#\14336# bar#\ROOT2024#(#\14336#)#\14336# {#\14336#}#\14336#
+}#\14336#
 "#]],
     );
 }
@@ -480,12 +482,12 @@ macro_rules! m {
 }
 m!{#abc}
 "#,
-        expect![[r##"
+        expect![[r#"
 macro_rules! m {
     ($($i:ident)* #abc) => ( fn baz() { $($i ();)* } );
 }
 fn baz() {}
-"##]],
+"#]],
     )
 }
 
@@ -1189,19 +1191,18 @@ macro_rules! m {
 m! { cfg(target_os = "windows") }
 m! { hello::world }
 "#,
-        expect![[r##"
+        expect![[r#"
 macro_rules! m {
     ($m:meta) => ( #[$m] fn bar() {} )
 }
 #[cfg(target_os = "windows")] fn bar() {}
 #[hello::world] fn bar() {}
-"##]],
+"#]],
     );
 }
 
 #[test]
 fn test_meta_doc_comments() {
-    cov_mark::check!(test_meta_doc_comments);
     check(
         r#"
 macro_rules! m {
@@ -1214,7 +1215,7 @@ m! {
     */
 }
 "#,
-        expect![[r##"
+        expect![[r#"
 macro_rules! m {
     ($(#[$m:meta])+) => ( $(#[$m])+ fn bar() {} )
 }
@@ -1222,7 +1223,7 @@ macro_rules! m {
 #[doc = r"
         MultiLines Doc
     "] fn bar() {}
-"##]],
+"#]],
     );
 }
 
@@ -1235,12 +1236,12 @@ macro_rules! m {
 }
 m! { #[doc = concat!("The `", "bla", "` lang item.")] }
 "#,
-        expect![[r##"
+        expect![[r#"
 macro_rules! m {
     (#[$m:meta]) => ( #[$m] fn bar() {} )
 }
 #[doc = concat!("The `", "bla", "` lang item.")] fn bar() {}
-"##]],
+"#]],
     );
 }
 
@@ -1258,7 +1259,7 @@ m! {
     */
 }
 "#,
-        expect![[r##"
+        expect![[r#"
 macro_rules! m {
     ($(#[$ m:meta])+) => ( $(#[$m])+ fn bar() {} )
 }
@@ -1266,7 +1267,7 @@ macro_rules! m {
 #[doc = r"
         莊生曉夢迷蝴蝶，望帝春心託杜鵑。
     "] fn bar() {}
-"##]],
+"#]],
     );
 }
 
@@ -1343,10 +1344,10 @@ fn test_tt_composite2() {
 macro_rules! m { ($($tt:tt)*) => { abs!(=> $($tt)*); } }
 m! {#}
 "#,
-        expect![[r##"
+        expect![[r#"
 macro_rules! m { ($($tt:tt)*) => { abs!(=> $($tt)*); } }
 abs!( = > #);
-"##]],
+"#]],
     );
 }
 
@@ -1407,7 +1408,7 @@ ok!();
 macro_rules! m2 {
     ($($a:expr => $b:ident)* _ => $c:expr) => { ok!(); }
 }
-ok!();
+/* error: unexpected token in input */ok!();
 "#]],
     );
 }
@@ -1732,7 +1733,7 @@ m!(C("0"));
 macro_rules! m {
     ($k:expr) => { fn f() { K::$k; } }
 }
-/* parse error: expected identifier */
+/* parse error: expected identifier, `self`, `super`, `crate`, or `Self` */
 /* parse error: expected SEMICOLON */
 /* parse error: expected SEMICOLON */
 /* parse error: expected expression, item or let statement */
@@ -1758,8 +1759,9 @@ fn f() {
 //                   NAME_REF@6..7
 //                     IDENT@6..7 "K"
 //               COLON2@7..9 "::"
-//               ERROR@9..10
-//                 L_PAREN@9..10 "("
+//               PATH_SEGMENT@9..10
+//                 ERROR@9..10
+//                   L_PAREN@9..10 "("
 //         EXPR_STMT@10..16
 //           CALL_EXPR@10..16
 //             PATH_EXPR@10..11
@@ -1881,5 +1883,171 @@ fn test() {
     "2 2";
 }
 "#]],
+    );
+}
+
+#[test]
+fn test_pat_fragment_eof_17441() {
+    check(
+        r#"
+macro_rules! matches {
+    ($expression:expr, $pattern:pat $(if $guard:expr)? ) => {
+        match $expression {
+            $pattern $(if $guard)? => true,
+            _ => false
+        }
+    };
+}
+fn f() {
+    matches!(0, 10..);
+    matches!(0, 10.. if true);
+}
+ "#,
+        expect![[r#"
+macro_rules! matches {
+    ($expression:expr, $pattern:pat $(if $guard:expr)? ) => {
+        match $expression {
+            $pattern $(if $guard)? => true,
+            _ => false
+        }
+    };
+}
+fn f() {
+    match 0 {
+        10.. =>true , _=>false
+    };
+    match 0 {
+        10..if true =>true , _=>false
+    };
+}
+ "#]],
+    );
+}
+
+#[test]
+fn test_edition_handling_out() {
+    check(
+        r#"
+//- /main.rs crate:main deps:old edition:2021
+macro_rules! r#try {
+    ($it:expr) => {
+        $it?
+    };
+}
+fn f() {
+    old::invoke_bare_try!(0);
+}
+//- /old.rs crate:old edition:2015
+#[macro_export]
+macro_rules! invoke_bare_try {
+    ($it:expr) => {
+        try!($it)
+    };
+}
+ "#,
+        expect![[r#"
+macro_rules! r#try {
+    ($it:expr) => {
+        $it?
+    };
+}
+fn f() {
+    try!(0);
+}
+"#]],
+    );
+}
+
+#[test]
+fn test_edition_handling_in() {
+    check(
+        r#"
+//- /main.rs crate:main deps:old edition:2021
+fn f() {
+    old::parse_try_old!(try!{});
+}
+//- /old.rs crate:old edition:2015
+#[macro_export]
+macro_rules! parse_try_old {
+    ($it:expr) => {};
+}
+ "#,
+        expect![[r#"
+fn f() {
+    ;
+}
+"#]],
+    );
+}
+
+#[test]
+fn semicolon_does_not_glue() {
+    check(
+        r#"
+macro_rules! bug {
+    ($id: expr) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*; $norm: expr) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*;; $print: expr) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*; $norm: expr; $print: expr) => {
+        true
+    };
+}
+fn f() {
+    let _ = bug!(a;;;test);
+}
+    "#,
+        expect![[r#"
+macro_rules! bug {
+    ($id: expr) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*; $norm: expr) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*;; $print: expr) => {
+        true
+    };
+    ($id: expr; $($attr: ident),*; $norm: expr; $print: expr) => {
+        true
+    };
+}
+fn f() {
+    let _ = true;
+}
+    "#]],
+    );
+}
+
+#[test]
+fn lifetime_repeat() {
+    check(
+        r#"
+macro_rules! m {
+    ($($x:expr)'a*) => (stringify!($($x)'b*));
+}
+fn f() {
+    let _ = m!(0 'a 1 'a 2);
+}
+    "#,
+        expect![[r#"
+macro_rules! m {
+    ($($x:expr)'a*) => (stringify!($($x)'b*));
+}
+fn f() {
+    let _ = stringify!(0 'b 1 'b 2);
+}
+    "#]],
     );
 }

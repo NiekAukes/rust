@@ -1,13 +1,13 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::macros::{find_format_args, format_args_inputs_span};
+use clippy_utils::macros::{FormatArgsStorage, format_args_inputs_span};
 use clippy_utils::source::snippet_with_applicability;
-use clippy_utils::{is_expn_of, path_def_id};
+use clippy_utils::{is_expn_of, path_def_id, sym};
 use rustc_errors::Applicability;
 use rustc_hir::def::Res;
 use rustc_hir::{BindingMode, Block, BlockCheckMode, Expr, ExprKind, Node, PatKind, QPath, Stmt, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::declare_lint_pass;
-use rustc_span::{sym, ExpnId};
+use rustc_session::impl_lint_pass;
+use rustc_span::ExpnId;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -38,7 +38,17 @@ declare_clippy_lint! {
     "using the `write!()` family of functions instead of the `print!()` family of functions, when using the latter would work"
 }
 
-declare_lint_pass!(ExplicitWrite => [EXPLICIT_WRITE]);
+pub struct ExplicitWrite {
+    format_args: FormatArgsStorage,
+}
+
+impl ExplicitWrite {
+    pub fn new(format_args: FormatArgsStorage) -> Self {
+        Self { format_args }
+    }
+}
+
+impl_lint_pass!(ExplicitWrite => [EXPLICIT_WRITE]);
 
 impl<'tcx> LateLintPass<'tcx> for ExplicitWrite {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
@@ -47,8 +57,8 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitWrite {
             && unwrap_fun.ident.name == sym::unwrap
             // match call to write_fmt
             && let ExprKind::MethodCall(write_fun, write_recv, [write_arg], _) = *look_in_block(cx, &write_call.kind)
-            && let ExprKind::Call(write_recv_path, _) = write_recv.kind
-            && write_fun.ident.name == sym!(write_fmt)
+            && let ExprKind::Call(write_recv_path, []) = write_recv.kind
+            && write_fun.ident.name == sym::write_fmt
             && let Some(def_id) = path_def_id(cx, write_recv_path)
         {
             // match calls to std::io::stdout() / std::io::stderr ()
@@ -57,14 +67,14 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitWrite {
                 Some(sym::io_stderr) => ("stderr", "e"),
                 _ => return,
             };
-            let Some(format_args) = find_format_args(cx, write_arg, ExpnId::root()) else {
+            let Some(format_args) = self.format_args.get(cx, write_arg, ExpnId::root()) else {
                 return;
             };
 
             // ordering is important here, since `writeln!` uses `write!` internally
-            let calling_macro = if is_expn_of(write_call.span, "writeln").is_some() {
+            let calling_macro = if is_expn_of(write_call.span, sym::writeln).is_some() {
                 Some("writeln")
-            } else if is_expn_of(write_call.span, "write").is_some() {
+            } else if is_expn_of(write_call.span, sym::write).is_some() {
                 Some("write")
             } else {
                 None
@@ -83,7 +93,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitWrite {
             };
             let mut applicability = Applicability::MachineApplicable;
             let inputs_snippet =
-                snippet_with_applicability(cx, format_args_inputs_span(&format_args), "..", &mut applicability);
+                snippet_with_applicability(cx, format_args_inputs_span(format_args), "..", &mut applicability);
             span_lint_and_sugg(
                 cx,
                 EXPLICIT_WRITE,

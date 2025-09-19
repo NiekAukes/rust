@@ -12,6 +12,7 @@
 //! Some examples of the [`format!`] extension are:
 //!
 //! ```
+//! # #![allow(unused_must_use)]
 //! format!("Hello");                 // => "Hello"
 //! format!("Hello, {}!", "world");   // => "Hello, world!"
 //! format!("The number is {}", 1);   // => "The number is 1"
@@ -50,6 +51,7 @@
 //! the iterator advances. This leads to behavior like this:
 //!
 //! ```
+//! # #![allow(unused_must_use)]
 //! format!("{1} {} {0} {}", 1, 2); // => "2 1 1 2"
 //! ```
 //!
@@ -77,6 +79,7 @@
 //! For example, the following [`format!`] expressions all use named arguments:
 //!
 //! ```
+//! # #![allow(unused_must_use)]
 //! format!("{argument}", argument = "test");   // => "test"
 //! format!("{name} {}", 1, name = 2);          // => "2 1"
 //! format!("{a} {c} {b}", a="a", b='b', c=3);  // => "a 3 b"
@@ -86,6 +89,7 @@
 //! reference a variable with that name in the current scope.
 //!
 //! ```
+//! # #![allow(unused_must_use)]
 //! let argument = 2 + 2;
 //! format!("{argument}");   // => "4"
 //!
@@ -104,6 +108,16 @@
 //! Each argument being formatted can be transformed by a number of formatting
 //! parameters (corresponding to `format_spec` in [the syntax](#syntax)). These
 //! parameters affect the string representation of what's being formatted.
+//!
+//! The colon `:` in format syntax divides identifier of the input data and
+//! the formatting options, the colon itself does not change anything, only
+//! introduces the options.
+//!
+//! ```
+//! let a = 5;
+//! let b = &a;
+//! println!("{a:e} {b:p}"); // => 5e0 0x7ffe37b7273c
+//! ```
 //!
 //! ## Width
 //!
@@ -403,7 +417,7 @@
 //! is, a formatting implementation must and may only return an error if the
 //! passed-in [`Formatter`] returns an error. This is because, contrary to what
 //! the function signature might suggest, string formatting is an infallible
-//! operation. This function only returns a result because writing to the
+//! operation. This function only returns a [`Result`] because writing to the
 //! underlying stream might fail and it must provide a way to propagate the fact
 //! that an error has occurred back up the stack.
 //!
@@ -576,18 +590,20 @@
 pub use core::fmt::Alignment;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::Error;
-#[unstable(feature = "debug_closure_helpers", issue = "117729")]
-pub use core::fmt::FormatterFn;
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{write, Arguments};
+pub use core::fmt::{Arguments, write};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{Binary, Octal};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{Debug, Display};
+#[unstable(feature = "formatting_options", issue = "118117")]
+pub use core::fmt::{DebugAsHex, FormattingOptions, Sign};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{DebugList, DebugMap, DebugSet, DebugStruct, DebugTuple};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{Formatter, Result, Write};
+#[unstable(feature = "debug_closure_helpers", issue = "117729")]
+pub use core::fmt::{FromFn, from_fn};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{LowerExp, UpperExp};
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -596,8 +612,7 @@ pub use core::fmt::{LowerHex, Pointer, UpperHex};
 #[cfg(not(no_global_oom_handling))]
 use crate::string;
 
-/// The `format` function takes an [`Arguments`] struct and returns the resulting
-/// formatted string.
+/// Takes an [`Arguments`] struct and returns the resulting formatted string.
 ///
 /// The [`Arguments`] instance can be created with the [`format_args!`] macro.
 ///
@@ -630,7 +645,9 @@ pub fn format(args: Arguments<'_>) -> string::String {
     fn format_inner(args: Arguments<'_>) -> string::String {
         let capacity = args.estimated_capacity();
         let mut output = string::String::with_capacity(capacity);
-        output.write_fmt(args).expect("a formatting trait implementation returned an error");
+        output
+            .write_fmt(args)
+            .expect("a formatting trait implementation returned an error when the underlying stream did not");
         output
     }
 

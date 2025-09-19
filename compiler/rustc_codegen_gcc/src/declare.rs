@@ -1,10 +1,10 @@
 #[cfg(feature = "master")]
 use gccjit::{FnAttribute, ToRValue};
 use gccjit::{Function, FunctionType, GlobalKind, LValue, RValue, Type};
-use rustc_codegen_ssa::traits::BaseTypeMethods;
+use rustc_codegen_ssa::traits::BaseTypeCodegenMethods;
 use rustc_middle::ty::Ty;
 use rustc_span::Symbol;
-use rustc_target::abi::call::FnAbi;
+use rustc_target::callconv::FnAbi;
 
 use crate::abi::{FnAbiGcc, FnAbiGccExt};
 use crate::context::CodegenCx;
@@ -35,7 +35,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
 
     pub fn declare_unnamed_global(&self, ty: Type<'gcc>) -> LValue<'gcc> {
         let name = self.generate_local_symbol_name("global");
-        self.context.new_global(None, GlobalKind::Internal, ty, &name)
+        self.context.new_global(None, GlobalKind::Internal, ty, name)
     }
 
     pub fn declare_global_with_linkage(
@@ -58,7 +58,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         variadic: bool,
     ) -> Function<'gcc> {
         self.linkage.set(FunctionType::Extern);
-        declare_raw_fn(self, name, () /*llvm::CCallConv*/, return_type, params, variadic)
+        declare_raw_fn(self, name, None, return_type, params, variadic)
     }
 
     pub fn declare_global(
@@ -92,7 +92,8 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         &self,
         name: &str,
         _fn_type: Type<'gcc>,
-        callconv: (), /*llvm::CCallConv*/
+        #[cfg(feature = "master")] callconv: Option<FnAttribute<'gcc>>,
+        #[cfg(not(feature = "master"))] callconv: Option<()>,
     ) -> RValue<'gcc> {
         // TODO(antoyo): use the fn_type parameter.
         let const_string = self.context.new_type::<u8>().make_pointer().make_pointer();
@@ -123,14 +124,11 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             #[cfg(feature = "master")]
             fn_attributes,
         } = fn_abi.gcc_type(self);
-        let func = declare_raw_fn(
-            self,
-            name,
-            (), /*fn_abi.llvm_cconv()*/
-            return_type,
-            &arguments_type,
-            is_c_variadic,
-        );
+        #[cfg(feature = "master")]
+        let conv = fn_abi.gcc_cconv(self);
+        #[cfg(not(feature = "master"))]
+        let conv = None;
+        let func = declare_raw_fn(self, name, conv, return_type, &arguments_type, is_c_variadic);
         self.on_stack_function_params.borrow_mut().insert(func, on_stack_param_indices);
         #[cfg(feature = "master")]
         for fn_attr in fn_attributes {
@@ -159,16 +157,26 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
 ///
 /// If there’s a value with the same name already declared, the function will
 /// update the declaration and return existing Value instead.
+#[allow(clippy::let_and_return)]
 fn declare_raw_fn<'gcc>(
     cx: &CodegenCx<'gcc, '_>,
     name: &str,
-    _callconv: (), /*llvm::CallConv*/
+    #[cfg(feature = "master")] callconv: Option<FnAttribute<'gcc>>,
+    #[cfg(not(feature = "master"))] _callconv: Option<()>,
     return_type: Type<'gcc>,
     param_types: &[Type<'gcc>],
     variadic: bool,
 ) -> Function<'gcc> {
     if name.starts_with("llvm.") {
-        let intrinsic = llvm::intrinsic(name, cx);
+        let intrinsic = match name {
+            "llvm.fma.f16" => {
+                // fma is not a target builtin, but a normal builtin, so we handle it differently
+                // here.
+                cx.context.get_builtin_function("fma")
+            }
+            _ => llvm::intrinsic(name, cx),
+        };
+
         cx.intrinsics.borrow_mut().insert(name.to_string(), intrinsic);
         return intrinsic;
     }
@@ -176,16 +184,18 @@ fn declare_raw_fn<'gcc>(
         cx.functions.borrow()[name]
     } else {
         let params: Vec<_> = param_types
-            .into_iter()
+            .iter()
             .enumerate()
-            .map(|(index, param)| {
-                cx.context.new_parameter(None, *param, &format!("param{}", index))
-            }) // TODO(antoyo): set name.
+            .map(|(index, param)| cx.context.new_parameter(None, *param, format!("param{}", index))) // TODO(antoyo): set name.
             .collect();
         #[cfg(not(feature = "master"))]
-        let name = mangle_name(name);
+        let name = &mangle_name(name);
         let func =
-            cx.context.new_function(None, cx.linkage.get(), return_type, &params, &name, variadic);
+            cx.context.new_function(None, cx.linkage.get(), return_type, &params, name, variadic);
+        #[cfg(feature = "master")]
+        if let Some(attribute) = callconv {
+            func.add_attribute(attribute);
+        }
         cx.functions.borrow_mut().insert(name.to_string(), func);
 
         #[cfg(feature = "master")]
@@ -200,10 +210,10 @@ fn declare_raw_fn<'gcc>(
             // create a wrapper function that calls rust_eh_personality.
 
             let params: Vec<_> = param_types
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(|(index, param)| {
-                    cx.context.new_parameter(None, *param, &format!("param{}", index))
+                    cx.context.new_parameter(None, *param, format!("param{}", index))
                 }) // TODO(antoyo): set name.
                 .collect();
             let gcc_func = cx.context.new_function(

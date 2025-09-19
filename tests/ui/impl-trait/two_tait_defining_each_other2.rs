@@ -3,13 +3,14 @@
 //@[next] compile-flags: -Znext-solver
 #![feature(type_alias_impl_trait)]
 
-type A = impl Foo; //[current]~ ERROR unconstrained opaque type
+type A = impl Foo;
 type B = impl Foo;
 
 trait Foo {}
 
+#[define_opaque(A, B)]
 fn muh(x: A) -> B {
-    //[next]~^ ERROR type annotations needed: cannot satisfy `_ == A`
+    //[next]~^ ERROR: type annotations needed
     x // B's hidden type is A (opaquely)
     //[current]~^ ERROR opaque type's hidden type cannot be another opaque type
 }

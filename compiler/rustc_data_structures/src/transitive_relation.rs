@@ -1,10 +1,12 @@
-use crate::frozen::Frozen;
-use crate::fx::{FxHashSet, FxIndexSet};
-use rustc_index::bit_set::BitMatrix;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem;
 use std::ops::Deref;
+
+use rustc_index::bit_set::BitMatrix;
+
+use crate::frozen::Frozen;
+use crate::fx::{FxHashSet, FxIndexSet};
 
 #[cfg(test)]
 mod tests;
@@ -201,9 +203,9 @@ impl<T: Eq + Hash + Copy> TransitiveRelation<T> {
     /// exists). See `postdom_upper_bound` for details.
     pub fn mutual_immediate_postdominator(&self, mut mubs: Vec<T>) -> Option<T> {
         loop {
-            match mubs.len() {
-                0 => return None,
-                1 => return Some(mubs[0]),
+            match mubs[..] {
+                [] => return None,
+                [mub] => return Some(mub),
                 _ => {
                     let m = mubs.pop().unwrap();
                     let n = mubs.pop().unwrap();
@@ -352,6 +354,20 @@ impl<T: Eq + Hash + Copy> TransitiveRelation<T> {
             .collect()
     }
 
+    /// Given an element A, elements B with the lowest index such that `A R B`
+    /// and `B R A`, or `A` if no such element exists.
+    pub fn minimal_scc_representative(&self, a: T) -> T {
+        match self.index(a) {
+            Some(a_i) => self.with_closure(|closure| {
+                closure
+                    .iter(a_i.0)
+                    .find(|i| closure.contains(*i, a_i.0))
+                    .map_or(a, |i| self.elements[i])
+            }),
+            None => a,
+        }
+    }
+
     fn with_closure<OP, R>(&self, op: OP) -> R
     where
         OP: FnOnce(&BitMatrix<usize, usize>) -> R,
@@ -361,7 +377,7 @@ impl<T: Eq + Hash + Copy> TransitiveRelation<T> {
 
     /// Lists all the base edges in the graph: the initial _non-transitive_ set of element
     /// relations, which will be later used as the basis for the transitive closure computation.
-    pub fn base_edges(&self) -> impl Iterator<Item = (T, T)> + '_ {
+    pub fn base_edges(&self) -> impl Iterator<Item = (T, T)> {
         self.edges
             .iter()
             .map(move |edge| (self.elements[edge.source.0], self.elements[edge.target.0]))

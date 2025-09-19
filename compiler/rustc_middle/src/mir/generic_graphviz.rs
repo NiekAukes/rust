@@ -1,7 +1,9 @@
+use std::io::{self, Write};
+
 use rustc_data_structures::graph::{self, iterate};
 use rustc_graphviz as dot;
-use rustc_middle::ty::TyCtxt;
-use std::io::{self, Write};
+
+use crate::ty::TyCtxt;
 
 pub struct GraphvizWriter<
     'a,

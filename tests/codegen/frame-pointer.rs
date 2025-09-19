@@ -1,3 +1,4 @@
+//@ add-core-stubs
 //@ compile-flags: --crate-type=rlib -Copt-level=0
 //@ revisions: aarch64-apple aarch64-linux force x64-apple x64-linux
 //@ [aarch64-apple] needs-llvm-components: aarch64
@@ -13,12 +14,9 @@
 
 #![feature(no_core, lang_items)]
 #![no_core]
-#[lang="sized"]
-trait Sized { }
-#[lang="copy"]
-trait Copy { }
-impl Copy for u32 {}
 
+extern crate minicore;
+use minicore::*;
 
 // CHECK: define i32 @peach{{.*}}[[PEACH_ATTRS:\#[0-9]+]] {
 #[no_mangle]
@@ -28,8 +26,10 @@ pub fn peach(x: u32) -> u32 {
 
 // CHECK: attributes [[PEACH_ATTRS]] = {
 // x64-linux-NOT: {{.*}}"frame-pointer"{{.*}}
-// aarch64-linux-NOT: {{.*}}"frame-pointer"{{.*}}
 // x64-apple-SAME: {{.*}}"frame-pointer"="all"
 // force-SAME: {{.*}}"frame-pointer"="all"
+//
+// AAPCS64 demands frame pointers:
+// aarch64-linux-SAME: {{.*}}"frame-pointer"="non-leaf"
 // aarch64-apple-SAME: {{.*}}"frame-pointer"="non-leaf"
 // CHECK-SAME: }

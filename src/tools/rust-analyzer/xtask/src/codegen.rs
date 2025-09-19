@@ -3,21 +3,29 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
-use crate::{flags, project_root};
+use crate::{
+    flags::{self, CodegenType},
+    project_root,
+};
 
 pub(crate) mod assists_doc_tests;
 pub(crate) mod diagnostics_docs;
+pub(crate) mod feature_docs;
 mod grammar;
 mod lints;
+mod parser_inline_tests;
 
 impl flags::Codegen {
     pub(crate) fn run(self, _sh: &Shell) -> anyhow::Result<()> {
         match self.codegen_type.unwrap_or_default() {
             flags::CodegenType::All => {
-                diagnostics_docs::generate(self.check);
+                grammar::generate(self.check);
                 assists_doc_tests::generate(self.check);
+                parser_inline_tests::generate(self.check);
+                feature_docs::generate(self.check);
+                diagnostics_docs::generate(self.check);
                 // lints::generate(self.check) Updating clones the rust repo, so don't run it unless
                 // explicitly asked for
             }
@@ -25,39 +33,11 @@ impl flags::Codegen {
             flags::CodegenType::AssistsDocTests => assists_doc_tests::generate(self.check),
             flags::CodegenType::DiagnosticsDocs => diagnostics_docs::generate(self.check),
             flags::CodegenType::LintDefinitions => lints::generate(self.check),
+            flags::CodegenType::ParserTests => parser_inline_tests::generate(self.check),
+            flags::CodegenType::FeatureDocs => feature_docs::generate(self.check),
         }
         Ok(())
     }
-}
-
-fn list_rust_files(dir: &Path) -> Vec<PathBuf> {
-    let mut res = list_files(dir);
-    res.retain(|it| {
-        it.file_name().unwrap_or_default().to_str().unwrap_or_default().ends_with(".rs")
-    });
-    res
-}
-
-fn list_files(dir: &Path) -> Vec<PathBuf> {
-    let mut res = Vec::new();
-    let mut work = vec![dir.to_path_buf()];
-    while let Some(dir) = work.pop() {
-        for entry in dir.read_dir().unwrap() {
-            let entry = entry.unwrap();
-            let file_type = entry.file_type().unwrap();
-            let path = entry.path();
-            let is_hidden =
-                path.file_name().unwrap_or_default().to_str().unwrap_or_default().starts_with('.');
-            if !is_hidden {
-                if file_type.is_dir() {
-                    work.push(path);
-                } else if file_type.is_file() {
-                    res.push(path);
-                }
-            }
-        }
-    }
-    res
 }
 
 #[derive(Clone)]
@@ -100,7 +80,7 @@ impl CommentBlock {
         let mut block = dummy_block.clone();
         for (line_num, line) in lines.enumerate() {
             match line.strip_prefix("//") {
-                Some(mut contents) => {
+                Some(mut contents) if !contents.starts_with('/') => {
                     if let Some('/' | '!') = contents.chars().next() {
                         contents = &contents[1..];
                         block.is_doc = true;
@@ -110,7 +90,7 @@ impl CommentBlock {
                     }
                     block.contents.push(contents.to_owned());
                 }
-                None => {
+                _ => {
                     if !block.contents.is_empty() {
                         let block = mem::replace(&mut block, dummy_block.clone());
                         res.push(block);
@@ -139,43 +119,51 @@ impl fmt::Display for Location {
         let name = self.file.file_name().unwrap();
         write!(
             f,
-            "https://github.com/rust-lang/rust-analyzer/blob/master/{}#L{}[{}]",
+            " [{}](https://github.com/rust-lang/rust-analyzer/blob/master/{}#L{}) ",
+            name.to_str().unwrap(),
             path,
-            self.line,
-            name.to_str().unwrap()
+            self.line
         )
-    }
-}
-
-fn ensure_rustfmt(sh: &Shell) {
-    let version = cmd!(sh, "rustup run stable rustfmt --version").read().unwrap_or_default();
-    if !version.contains("stable") {
-        panic!(
-            "Failed to run rustfmt from toolchain 'stable'. \
-                 Please run `rustup component add rustfmt --toolchain stable` to install it.",
-        );
     }
 }
 
 fn reformat(text: String) -> String {
     let sh = Shell::new().unwrap();
-    ensure_rustfmt(&sh);
     let rustfmt_toml = project_root().join("rustfmt.toml");
-    let mut stdout = cmd!(
-        sh,
-        "rustup run stable rustfmt --config-path {rustfmt_toml} --config fn_single_line=true"
-    )
-    .stdin(text)
-    .read()
-    .unwrap();
+    let version = cmd!(sh, "rustup run stable rustfmt --version").read().unwrap_or_default();
+
+    // First try explicitly requesting the stable channel via rustup in case nightly is being used by default,
+    // then plain rustfmt in case rustup isn't being used to manage the compiler (e.g. when using Nix).
+    let mut stdout = if !version.contains("stable") {
+        let version = cmd!(sh, "rustfmt --version").read().unwrap_or_default();
+        if !version.contains("stable") {
+            panic!(
+                "Failed to run rustfmt from toolchain 'stable'. \
+                 Please run `rustup component add rustfmt --toolchain stable` to install it.",
+            );
+        } else {
+            cmd!(sh, "rustfmt --config-path {rustfmt_toml} --config fn_single_line=true")
+                .stdin(text)
+                .read()
+                .unwrap()
+        }
+    } else {
+        cmd!(
+            sh,
+            "rustup run stable rustfmt --config-path {rustfmt_toml} --config fn_single_line=true"
+        )
+        .stdin(text)
+        .read()
+        .unwrap()
+    };
     if !stdout.ends_with('\n') {
         stdout.push('\n');
     }
     stdout
 }
 
-fn add_preamble(generator: &'static str, mut text: String) -> String {
-    let preamble = format!("//! Generated by `{generator}`, do not edit by hand.\n\n");
+fn add_preamble(cg: CodegenType, mut text: String) -> String {
+    let preamble = format!("//! Generated by `cargo xtask codegen {cg}`, do not edit by hand.\n\n");
     text.insert_str(0, &preamble);
     text
 }
@@ -183,11 +171,12 @@ fn add_preamble(generator: &'static str, mut text: String) -> String {
 /// Checks that the `file` has the specified `contents`. If that is not the
 /// case, updates the file and then fails the test.
 #[allow(clippy::print_stderr)]
-fn ensure_file_contents(file: &Path, contents: &str, check: bool) {
+fn ensure_file_contents(cg: CodegenType, file: &Path, contents: &str, check: bool) -> bool {
+    let contents = normalize_newlines(contents);
     if let Ok(old_contents) = fs::read_to_string(file) {
-        if normalize_newlines(&old_contents) == normalize_newlines(contents) {
+        if normalize_newlines(&old_contents) == contents {
             // File is already up to date.
-            return;
+            return false;
         }
     }
 
@@ -197,9 +186,11 @@ fn ensure_file_contents(file: &Path, contents: &str, check: bool) {
             "{} was not up-to-date{}",
             file.display(),
             if std::env::var("CI").is_ok() {
-                "\n    NOTE: run `cargo codegen` locally and commit the updated files\n"
+                format!(
+                    "\n    NOTE: run `cargo xtask codegen {cg}` locally and commit the updated files\n"
+                )
             } else {
-                ""
+                "".to_owned()
             }
         );
     } else {
@@ -212,6 +203,7 @@ fn ensure_file_contents(file: &Path, contents: &str, check: bool) {
             let _ = fs::create_dir_all(parent);
         }
         fs::write(file, contents).unwrap();
+        true
     }
 }
 

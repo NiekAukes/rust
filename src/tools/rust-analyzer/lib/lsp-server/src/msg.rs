@@ -3,7 +3,8 @@ use std::{
     io::{self, BufRead, Write},
 };
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde_derive::{Deserialize, Serialize};
 
 use crate::error::ExtractError;
 
@@ -79,9 +80,9 @@ pub struct Request {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Response {
-    // JSON RPC allows this to be null if it was impossible
-    // to decode the request's id. Ignore this special case
-    // and just die horribly.
+    // JSON-RPC allows this to be null if we can't find or parse the
+    // request id. We fail deserialization in that case, so we just
+    // make this field mandatory.
     pub id: RequestId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
@@ -153,6 +154,14 @@ pub struct Notification {
     pub params: serde_json::Value,
 }
 
+fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+macro_rules! invalid_data {
+    ($($tt:tt)*) => (invalid_data(format!($($tt)*)))
+}
+
 impl Message {
     pub fn read(r: &mut impl BufRead) -> io::Result<Option<Message>> {
         Message::_read(r)
@@ -162,18 +171,25 @@ impl Message {
             None => return Ok(None),
             Some(text) => text,
         };
-        let msg = serde_json::from_str(&text)?;
+
+        let msg = match serde_json::from_str(&text) {
+            Ok(msg) => msg,
+            Err(e) => {
+                return Err(invalid_data!("malformed LSP payload: {:?}", e));
+            }
+        };
+
         Ok(Some(msg))
     }
-    pub fn write(self, w: &mut impl Write) -> io::Result<()> {
+    pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         self._write(w)
     }
-    fn _write(self, w: &mut dyn Write) -> io::Result<()> {
+    fn _write(&self, w: &mut dyn Write) -> io::Result<()> {
         #[derive(Serialize)]
-        struct JsonRpc {
+        struct JsonRpc<'a> {
             jsonrpc: &'static str,
             #[serde(flatten)]
-            msg: Message,
+            msg: &'a Message,
         }
         let text = serde_json::to_string(&JsonRpc { jsonrpc: "2.0", msg: self })?;
         write_msg_text(w, &text)
@@ -181,7 +197,7 @@ impl Message {
 }
 
 impl Response {
-    pub fn new_ok<R: Serialize>(id: RequestId, result: R) -> Response {
+    pub fn new_ok<R: serde::Serialize>(id: RequestId, result: R) -> Response {
         Response { id, result: Some(serde_json::to_value(result).unwrap()), error: None }
     }
     pub fn new_err(id: RequestId, code: i32, message: String) -> Response {
@@ -191,7 +207,7 @@ impl Response {
 }
 
 impl Request {
-    pub fn new<P: Serialize>(id: RequestId, method: String, params: P) -> Request {
+    pub fn new<P: serde::Serialize>(id: RequestId, method: String, params: P) -> Request {
         Request { id, method, params: serde_json::to_value(params).unwrap() }
     }
     pub fn extract<P: DeserializeOwned>(
@@ -216,7 +232,7 @@ impl Request {
 }
 
 impl Notification {
-    pub fn new(method: String, params: impl Serialize) -> Notification {
+    pub fn new(method: String, params: impl serde::Serialize) -> Notification {
         Notification { method, params: serde_json::to_value(params).unwrap() }
     }
     pub fn extract<P: DeserializeOwned>(
@@ -240,13 +256,6 @@ impl Notification {
 }
 
 fn read_msg_text(inp: &mut dyn BufRead) -> io::Result<Option<String>> {
-    fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, error)
-    }
-    macro_rules! invalid_data {
-        ($($tt:tt)*) => (invalid_data(format!($($tt)*)))
-    }
-
     let mut size = None;
     let mut buf = String::new();
     loop {
@@ -264,22 +273,22 @@ fn read_msg_text(inp: &mut dyn BufRead) -> io::Result<Option<String>> {
         let mut parts = buf.splitn(2, ": ");
         let header_name = parts.next().unwrap();
         let header_value =
-            parts.next().ok_or_else(|| invalid_data(format!("malformed header: {:?}", buf)))?;
+            parts.next().ok_or_else(|| invalid_data!("malformed header: {:?}", buf))?;
         if header_name.eq_ignore_ascii_case("Content-Length") {
             size = Some(header_value.parse::<usize>().map_err(invalid_data)?);
         }
     }
-    let size: usize = size.ok_or_else(|| invalid_data("no Content-Length".to_owned()))?;
+    let size: usize = size.ok_or_else(|| invalid_data!("no Content-Length"))?;
     let mut buf = buf.into_bytes();
     buf.resize(size, 0);
     inp.read_exact(&mut buf)?;
     let buf = String::from_utf8(buf).map_err(invalid_data)?;
-    log::debug!("< {}", buf);
+    log::debug!("< {buf}");
     Ok(Some(buf))
 }
 
 fn write_msg_text(out: &mut dyn Write, msg: &str) -> io::Result<()> {
-    log::debug!("> {}", msg);
+    log::debug!("> {msg}");
     write!(out, "Content-Length: {}\r\n\r\n", msg.len())?;
     out.write_all(msg.as_bytes())?;
     out.flush()?;

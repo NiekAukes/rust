@@ -4,10 +4,8 @@
 
 use std::fmt::Debug;
 use std::mem::ManuallyDrop;
-use std::ops::{
-    Coroutine,
-    CoroutineState::{self, *},
-};
+use std::ops::Coroutine;
+use std::ops::CoroutineState::{self, *};
 use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -185,18 +183,18 @@ fn basic() {
 
 fn smoke_resume_arg() {
     fn drain<G: Coroutine<R, Yield = Y> + Unpin, R, Y>(
-        gen: &mut G,
+        gen_: &mut G,
         inout: Vec<(R, CoroutineState<Y, G::Return>)>,
     ) where
         Y: Debug + PartialEq,
         G::Return: Debug + PartialEq,
     {
-        let mut gen = Pin::new(gen);
+        let mut gen_ = Pin::new(gen_);
 
         for (input, out) in inout {
-            assert_eq!(gen.as_mut().resume(input), out);
+            assert_eq!(gen_.as_mut().resume(input), out);
             // Test if the coroutine is valid (according to type invariants).
-            let _ = unsafe { ManuallyDrop::new(ptr::read(gen.as_mut().get_unchecked_mut())) };
+            let _ = unsafe { ManuallyDrop::new(ptr::read(gen_.as_mut().get_unchecked_mut())) };
         }
     }
 

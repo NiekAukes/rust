@@ -13,7 +13,7 @@ error[E0057]: this function takes 2 arguments but 1 argument was supplied
   --> $DIR/cyclic_type_ice.rs:3:5
    |
 LL |     f(f);
-   |     ^--- an argument is missing
+   |     ^--- argument #2 is missing
    |
 note: closure defined here
   --> $DIR/cyclic_type_ice.rs:2:13
@@ -22,8 +22,9 @@ LL |     let f = |_, _| ();
    |             ^^^^^^
 help: provide the argument
    |
-LL |     f(/*  */, /*  */);
-   |      ~~~~~~~~~~~~~~~~
+LL -     f(f);
+LL +     f(/* _ */, /* _ */);
+   |
 
 error: aborting due to 2 previous errors
 

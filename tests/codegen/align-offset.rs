@@ -1,4 +1,4 @@
-//@ compile-flags: -O
+//@ compile-flags: -Copt-level=3
 
 #![crate_type = "lib"]
 
@@ -52,7 +52,6 @@ pub fn align_offset_word_slice(slice: &[Align4]) -> usize {
     // CHECK: ret [[USIZE]] %[[OFFSET]]
     slice.as_ptr().align_offset(32)
 }
-
 
 // CHECK-LABEL: @align_offset_word_ptr(ptr{{.+}}%ptr
 #[no_mangle]

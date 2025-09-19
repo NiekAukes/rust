@@ -1,10 +1,11 @@
-use build_helper::util::try_run;
-use compiletest::header::TestProps;
-use config::Config;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::{env, fs};
+
+use build_helper::util::try_run;
+use compiletest::header::TestProps;
+use config::Config;
 
 mod config;
 
@@ -19,7 +20,7 @@ fn get_browser_ui_test_version_inner(npm: &Path, global: bool) -> Option<String>
         Err(e) => {
             eprintln!(
                 "path to npm can be wrong, provided path: {npm:?}. Try to set npm path \
-            in config.toml in [build.npm]",
+            in bootstrap.toml in [build.npm]",
             );
             panic!("{:?}", e)
         }
@@ -117,15 +118,17 @@ If you want to install the `browser-ui-test` dependency, run `npm install browse
                     ..Default::default()
                 };
 
-                let test_props = TestProps::from_file(&librs, None, &compiletest_c);
+                let test_props = TestProps::from_file(
+                    &camino::Utf8PathBuf::try_from(librs).unwrap(),
+                    None,
+                    &compiletest_c,
+                );
 
                 if !test_props.compile_flags.is_empty() {
                     cargo.env("RUSTDOCFLAGS", test_props.compile_flags.join(" "));
                 }
 
-                if let Some(flags) = &test_props.run_flags {
-                    cargo.arg(flags);
-                }
+                cargo.args(&test_props.run_flags);
             }
 
             if try_run(&mut cargo, config.verbose).is_err() {

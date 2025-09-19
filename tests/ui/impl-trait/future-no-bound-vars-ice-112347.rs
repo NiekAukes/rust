@@ -7,8 +7,9 @@
 
 use std::future::Future;
 
-type Fut<'a> = impl Future<Output = ()> + 'a;
+pub type Fut<'a> = impl Future<Output = ()> + 'a;
 
+#[define_opaque(Fut)]
 fn foo<'a>(_: &()) -> Fut<'_> {
     async {}
 }

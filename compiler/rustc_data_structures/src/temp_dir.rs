@@ -1,5 +1,6 @@
 use std::mem::ManuallyDrop;
 use std::path::Path;
+
 use tempfile::TempDir;
 
 /// This is used to avoid TempDir being dropped on error paths unintentionally.
@@ -16,7 +17,7 @@ impl Drop for MaybeTempDir {
         // occur.
         let dir = unsafe { ManuallyDrop::take(&mut self.dir) };
         if self.keep {
-            let _ = dir.into_path();
+            let _ = dir.keep();
         }
     }
 }

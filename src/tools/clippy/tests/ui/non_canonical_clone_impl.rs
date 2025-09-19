@@ -1,6 +1,10 @@
+//@aux-build:proc_macro_derive.rs
 #![allow(clippy::clone_on_copy, unused)]
 #![allow(clippy::assigning_clones)]
 #![no_main]
+
+extern crate proc_macros;
+use proc_macros::with_span;
 
 // lint
 
@@ -8,10 +12,12 @@ struct A(u32);
 
 impl Clone for A {
     fn clone(&self) -> Self {
+        //~^ non_canonical_clone_impl
         Self(self.0)
     }
 
     fn clone_from(&mut self, source: &Self) {
+        //~^ non_canonical_clone_impl
         source.clone();
         *self = source.clone();
     }
@@ -79,10 +85,12 @@ struct F(u32);
 
 impl Clone for F {
     fn clone(&self) -> Self {
+        //~^ non_canonical_clone_impl
         Self(self.0)
     }
 
     fn clone_from(&mut self, source: &Self) {
+        //~^ non_canonical_clone_impl
         source.clone();
         *self = source.clone();
     }
@@ -105,3 +113,19 @@ impl<A: Copy> Clone for Uwu<A> {
 }
 
 impl<A: std::fmt::Debug + Copy + Clone> Copy for Uwu<A> {}
+
+// should skip proc macros, see https://github.com/rust-lang/rust-clippy/issues/12788
+#[derive(proc_macro_derive::NonCanonicalClone)]
+pub struct G;
+
+with_span!(
+    span
+
+    #[derive(Copy)]
+    struct H;
+    impl Clone for H {
+        fn clone(&self) -> Self {
+            todo!()
+        }
+    }
+);

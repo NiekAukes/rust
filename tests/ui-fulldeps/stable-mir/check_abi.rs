@@ -4,29 +4,30 @@
 //@ ignore-stage1
 //@ ignore-cross-compile
 //@ ignore-remote
-//@ ignore-windows-gnu mingw has troubles with linking https://github.com/rust-lang/rust/pull/116837
 
 #![feature(rustc_private)]
 #![feature(assert_matches)]
-#![feature(control_flow_enum)]
 #![feature(ascii_char, ascii_char_variants)]
 
 extern crate rustc_hir;
+extern crate rustc_middle;
 #[macro_use]
 extern crate rustc_smir;
 extern crate rustc_driver;
 extern crate rustc_interface;
 extern crate stable_mir;
 
-use rustc_smir::rustc_internal;
 use stable_mir::abi::{
     ArgAbi, CallConvention, FieldsShape, IntegerLength, PassMode, Primitive, Scalar, ValueAbi,
     VariantsShape,
 };
+use stable_mir::mir::MirVisitor;
 use stable_mir::mir::mono::Instance;
 use stable_mir::target::MachineInfo;
+use stable_mir::ty::{AdtDef, RigidTy, Ty, TyKind};
 use stable_mir::{CrateDef, CrateItem, CrateItems, ItemKind};
 use std::assert_matches::assert_matches;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::io::Write;
 use std::ops::ControlFlow;
@@ -53,6 +54,32 @@ fn test_stable_mir() -> ControlFlow<()> {
     // Test variadic function.
     let variadic_fn = *get_item(&items, (ItemKind::Fn, "variadic_fn")).unwrap();
     check_variadic(variadic_fn);
+
+    // Extract function pointers.
+    let fn_ptr_holder = *get_item(&items, (ItemKind::Fn, "fn_ptr_holder")).unwrap();
+    let fn_ptr_holder_instance = Instance::try_from(fn_ptr_holder).unwrap();
+    let body = fn_ptr_holder_instance.body().unwrap();
+    let args = body.arg_locals();
+
+    // Test fn_abi of function pointer version.
+    let ptr_fn_abi = args[0].ty.kind().fn_sig().unwrap().fn_ptr_abi().unwrap();
+    assert_eq!(ptr_fn_abi, fn_abi);
+
+    // Test variadic_fn of function pointer version.
+    let ptr_variadic_fn_abi = args[1].ty.kind().fn_sig().unwrap().fn_ptr_abi().unwrap();
+    assert!(ptr_variadic_fn_abi.c_variadic);
+    assert_eq!(ptr_variadic_fn_abi.args.len(), 1);
+
+    let entry = stable_mir::entry_fn().unwrap();
+    let main_fn = Instance::try_from(entry).unwrap();
+    let mut visitor = AdtDefVisitor::default();
+    visitor.visit_body(&main_fn.body().unwrap());
+    let AdtDefVisitor { adt_defs } = visitor;
+    assert_eq!(adt_defs.len(), 1);
+
+    // Test ADT representation options
+    let repr_c_struct = adt_defs.iter().find(|def| def.trimmed_name() == "ReprCStruct").unwrap();
+    assert!(repr_c_struct.repr().flags.is_c);
 
     ControlFlow::Continue(())
 }
@@ -99,7 +126,7 @@ fn check_result(abi: &ArgAbi) {
     assert_matches!(layout.variants, VariantsShape::Multiple { .. })
 }
 
-/// Check the niche information about: `NonZeroU8`
+/// Checks the niche information about `NonZero<u8>`.
 fn check_niche(abi: &ArgAbi) {
     assert!(abi.ty.kind().is_struct());
     assert_matches!(abi.mode, PassMode::Direct { .. });
@@ -125,6 +152,20 @@ fn get_item<'a>(
     items.iter().find(|crate_item| (item.0 == crate_item.kind()) && crate_item.name() == item.1)
 }
 
+#[derive(Default)]
+struct AdtDefVisitor {
+    adt_defs: HashSet<AdtDef>,
+}
+
+impl MirVisitor for AdtDefVisitor {
+    fn visit_ty(&mut self, ty: &Ty, _location: stable_mir::mir::visit::Location) {
+        if let TyKind::RigidTy(RigidTy::Adt(adt, _)) = ty.kind() {
+            self.adt_defs.insert(adt);
+        }
+        self.super_ty(ty)
+    }
+}
+
 /// This test will generate and analyze a dummy crate using the stable mir.
 /// For that, it will first write the dummy crate into a file.
 /// Then it will create a `StableMir` using custom arguments and then
@@ -132,9 +173,9 @@ fn get_item<'a>(
 fn main() {
     let path = "alloc_input.rs";
     generate_input(&path).unwrap();
-    let args = vec![
+    let args = &[
         "rustc".to_string(),
-        "--crate-type=lib".to_string(),
+        "-Cpanic=abort".to_string(),
         "--crate-name".to_string(),
         CRATE_NAME.to_string(),
         path.to_string(),
@@ -150,12 +191,12 @@ fn generate_input(path: &str) -> std::io::Result<()> {
         #![feature(c_variadic)]
         #![allow(unused_variables)]
 
-        use std::num::NonZeroU8;
+        use std::num::NonZero;
 
         pub fn fn_abi(
             ignore: [u8; 0],
             primitive: char,
-            niche: NonZeroU8,
+            niche: NonZero<u8>,
         ) -> Result<usize, &'static str> {{
                 // We only care about the signature.
                 todo!()
@@ -163,6 +204,21 @@ fn generate_input(path: &str) -> std::io::Result<()> {
 
         pub unsafe extern "C" fn variadic_fn(n: usize, mut args: ...) -> usize {{
             0
+        }}
+
+        pub type ComplexFn = fn([u8; 0], char, NonZero<u8>) -> Result<usize, &'static str>;
+        pub type VariadicFn = unsafe extern "C" fn(usize, ...) -> usize;
+
+        pub fn fn_ptr_holder(complex_fn: ComplexFn, variadic_fn: VariadicFn) {{
+            // We only care about the signature.
+            todo!()
+        }}
+
+        fn main() {{
+            #[repr(C)]
+            struct ReprCStruct;
+
+            let _s = ReprCStruct;
         }}
         "#
     )?;

@@ -9,6 +9,7 @@ use crate::sys_common::{FromInner, IntoInner};
 // Anonymous pipes
 ////////////////////////////////////////////////////////////////////////////////
 
+#[derive(Debug)]
 pub struct AnonPipe(FileDesc);
 
 pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
@@ -22,9 +23,11 @@ pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
             target_os = "dragonfly",
             target_os = "freebsd",
             target_os = "hurd",
+            target_os = "illumos",
             target_os = "linux",
             target_os = "netbsd",
             target_os = "openbsd",
+            target_os = "cygwin",
             target_os = "redox"
         ))] {
             unsafe {
@@ -46,6 +49,12 @@ pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
 }
 
 impl AnonPipe {
+    #[allow(dead_code)]
+    // FIXME: This function seems legitimately unused.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        self.0.duplicate().map(Self)
+    }
+
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.read(buf)
     }
@@ -78,6 +87,12 @@ impl AnonPipe {
     #[inline]
     pub fn is_write_vectored(&self) -> bool {
         self.0.is_write_vectored()
+    }
+
+    #[allow(dead_code)]
+    // FIXME: This function seems legitimately unused.
+    pub fn as_file_desc(&self) -> &FileDesc {
+        &self.0
     }
 }
 

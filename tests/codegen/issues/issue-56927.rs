@@ -1,6 +1,9 @@
 //@ compile-flags: -C no-prepopulate-passes
+// 32bit MSVC does not align things properly so we suppress high alignment annotations (#112480)
+//@ ignore-i686-pc-windows-msvc
+//@ ignore-i686-pc-windows-gnu
 
-#![crate_type="rlib"]
+#![crate_type = "rlib"]
 
 #[repr(align(16))]
 pub struct S {

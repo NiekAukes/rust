@@ -10,7 +10,9 @@
 #![allow(internal_features)]
 #![allow(rustc::default_hash_types)]
 #![allow(rustc::potential_query_instability)]
-#![cfg_attr(not(parallel_compiler), feature(cell_leak))]
+#![cfg_attr(bootstrap, feature(cfg_match))]
+#![cfg_attr(not(bootstrap), feature(cfg_select))]
+#![cfg_attr(not(bootstrap), feature(sized_hierarchy))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
@@ -18,36 +20,72 @@
 #![feature(array_windows)]
 #![feature(ascii_char)]
 #![feature(ascii_char_variants)]
+#![feature(assert_matches)]
 #![feature(auto_traits)]
-#![feature(cfg_match)]
 #![feature(core_intrinsics)]
+#![feature(dropck_eyepatch)]
 #![feature(extend_one)]
-#![feature(hash_raw_entry)]
-#![feature(hasher_prefixfree_extras)]
-#![feature(lazy_cell)]
-#![feature(lint_reasons)]
-#![feature(macro_metavar_expr)]
+#![feature(file_buffered)]
 #![feature(map_try_insert)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(min_specialization)]
 #![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(ptr_alignment_type)]
 #![feature(rustc_attrs)]
 #![feature(rustdoc_internals)]
-#![feature(strict_provenance)]
 #![feature(test)]
 #![feature(thread_id_value)]
 #![feature(type_alias_impl_trait)]
 #![feature(unwrap_infallible)]
 // tidy-alphabetical-end
 
-#[macro_use]
-extern crate tracing;
-
 use std::fmt;
 
+pub use atomic_ref::AtomicRef;
+pub use ena::{snapshot_vec, undo_log, unify};
 pub use rustc_index::static_assert_size;
+// re-exported for `rustc_smir`
+// FIXME(sized_hierarchy): remove with `cfg(bootstrap)`, see `rustc_serialize/src/lib.rs`
+pub use rustc_serialize::PointeeSized;
+
+pub mod aligned;
+pub mod base_n;
+pub mod binary_search_util;
+pub mod fingerprint;
+pub mod flat_map_in_place;
+pub mod flock;
+pub mod frozen;
+pub mod fx;
+pub mod graph;
+pub mod intern;
+pub mod jobserver;
+pub mod marker;
+pub mod memmap;
+pub mod obligation_forest;
+pub mod owned_slice;
+pub mod packed;
+pub mod profiling;
+pub mod sharded;
+pub mod small_c_str;
+pub mod snapshot_map;
+pub mod sorted_map;
+pub mod sso;
+pub mod stable_hasher;
+pub mod stack;
+pub mod steal;
+pub mod svh;
+pub mod sync;
+pub mod tagged_ptr;
+pub mod temp_dir;
+pub mod thinvec;
+pub mod thousands;
+pub mod transitive_relation;
+pub mod unhash;
+pub mod unord;
+pub mod vec_cache;
+pub mod work_queue;
+
+mod atomic_ref;
 
 /// This calls the passed function while ensuring it won't be inlined into the caller.
 #[inline(never)]
@@ -55,53 +93,6 @@ pub use rustc_index::static_assert_size;
 pub fn outline<F: FnOnce() -> R, R>(f: F) -> R {
     f()
 }
-
-pub mod base_n;
-pub mod binary_search_util;
-pub mod captures;
-pub mod flat_map_in_place;
-pub mod flock;
-pub mod fx;
-pub mod graph;
-pub mod intern;
-pub mod jobserver;
-pub mod macros;
-pub mod obligation_forest;
-pub mod sip128;
-pub mod small_c_str;
-pub mod snapshot_map;
-pub mod svh;
-pub use ena::snapshot_vec;
-pub mod memmap;
-pub mod sorted_map;
-#[macro_use]
-pub mod stable_hasher;
-mod atomic_ref;
-pub mod fingerprint;
-pub mod marker;
-pub mod profiling;
-pub mod sharded;
-pub mod stack;
-pub mod sync;
-pub mod tiny_list;
-pub mod transitive_relation;
-pub mod vec_linked_list;
-pub mod work_queue;
-pub use atomic_ref::AtomicRef;
-pub mod aligned;
-pub mod frozen;
-mod hashes;
-pub mod owned_slice;
-pub mod packed;
-pub mod sso;
-pub mod steal;
-pub mod tagged_ptr;
-pub mod temp_dir;
-pub mod unhash;
-pub mod unord;
-
-pub use ena::undo_log;
-pub use ena::unify;
 
 /// Returns a structure that calls `f` when dropped.
 pub fn defer<F: FnOnce()>(f: F) -> OnDrop<F> {

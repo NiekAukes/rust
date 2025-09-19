@@ -24,15 +24,14 @@
 //! globals is comparatively simpler. The easiest way is to wrap the test in a closure argument
 //! to: `rustc_span::create_default_session_globals_then(|| { test_here(); })`.
 
-use super::counters;
-use super::graph::{self, BasicCoverageBlock};
-
 use itertools::Itertools;
 use rustc_data_structures::graph::{DirectedGraph, Successors};
 use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::*;
-use rustc_middle::ty;
-use rustc_span::{BytePos, Pos, Span, DUMMY_SP};
+use rustc_middle::{bug, ty};
+use rustc_span::{BytePos, DUMMY_SP, Pos, Span};
+
+use super::graph::{self, BasicCoverageBlock};
 
 fn bcb(index: u32) -> BasicCoverageBlock {
     BasicCoverageBlock::from_u32(index)
@@ -134,7 +133,7 @@ impl<'tcx> MockBlocks<'tcx> {
             some_from_block,
             TerminatorKind::Call {
                 func: Operand::Copy(self.dummy_place.clone()),
-                args: vec![],
+                args: [].into(),
                 destination: self.dummy_place.clone(),
                 target: Some(TEMP_BLOCK),
                 unwind: UnwindAction::Continue,
@@ -227,16 +226,12 @@ fn print_mir_graphviz(name: &str, mir_body: &Body<'_>) {
     }
 }
 
-fn print_coverage_graphviz(
-    name: &str,
-    mir_body: &Body<'_>,
-    basic_coverage_blocks: &graph::CoverageGraph,
-) {
+fn print_coverage_graphviz(name: &str, mir_body: &Body<'_>, graph: &graph::CoverageGraph) {
     if PRINT_GRAPHS {
         println!(
             "digraph {} {{\n{}\n}}",
             name,
-            basic_coverage_blocks
+            graph
                 .iter_enumerated()
                 .map(|(bcb, bcb_data)| {
                     format!(
@@ -244,7 +239,7 @@ fn print_coverage_graphviz(
                         bcb,
                         bcb,
                         mir_body[bcb_data.last_bb()].terminator().kind.name(),
-                        basic_coverage_blocks
+                        graph
                             .successors(bcb)
                             .map(|successor| { format!("    {:?} -> {:?};", bcb, successor) })
                             .join("\n")
@@ -304,11 +299,11 @@ fn goto_switchint<'a>() -> Body<'a> {
 
 #[track_caller]
 fn assert_successors(
-    basic_coverage_blocks: &graph::CoverageGraph,
+    graph: &graph::CoverageGraph,
     bcb: BasicCoverageBlock,
     expected_successors: &[BasicCoverageBlock],
 ) {
-    let mut successors = basic_coverage_blocks.successors[bcb].clone();
+    let mut successors = graph.successors[bcb].clone();
     successors.sort_unstable();
     assert_eq!(successors, expected_successors);
 }
@@ -319,8 +314,8 @@ fn test_covgraph_goto_switchint() {
     if false {
         eprintln!("basic_blocks = {}", debug_basic_blocks(&mir_body));
     }
-    let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
-    print_coverage_graphviz("covgraph_goto_switchint ", &mir_body, &basic_coverage_blocks);
+    let graph = graph::CoverageGraph::from_mir(&mir_body);
+    print_coverage_graphviz("covgraph_goto_switchint ", &mir_body, &graph);
     /*
     ┌──────────────┐     ┌─────────────────┐
     │ bcb2: Return │ ◀── │ bcb0: SwitchInt │
@@ -332,16 +327,11 @@ fn test_covgraph_goto_switchint() {
                          │  bcb1: Return   │
                          └─────────────────┘
     */
-    assert_eq!(
-        basic_coverage_blocks.num_nodes(),
-        3,
-        "basic_coverage_blocks: {:?}",
-        basic_coverage_blocks.iter_enumerated().collect::<Vec<_>>()
-    );
+    assert_eq!(graph.num_nodes(), 3, "graph: {:?}", graph.iter_enumerated().collect::<Vec<_>>());
 
-    assert_successors(&basic_coverage_blocks, bcb(0), &[bcb(1), bcb(2)]);
-    assert_successors(&basic_coverage_blocks, bcb(1), &[]);
-    assert_successors(&basic_coverage_blocks, bcb(2), &[]);
+    assert_successors(&graph, bcb(0), &[bcb(1), bcb(2)]);
+    assert_successors(&graph, bcb(1), &[]);
+    assert_successors(&graph, bcb(2), &[]);
 }
 
 /// Create a mock `Body` with a loop.
@@ -387,12 +377,8 @@ fn switchint_then_loop_else_return<'a>() -> Body<'a> {
 #[test]
 fn test_covgraph_switchint_then_loop_else_return() {
     let mir_body = switchint_then_loop_else_return();
-    let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
-    print_coverage_graphviz(
-        "covgraph_switchint_then_loop_else_return",
-        &mir_body,
-        &basic_coverage_blocks,
-    );
+    let graph = graph::CoverageGraph::from_mir(&mir_body);
+    print_coverage_graphviz("covgraph_switchint_then_loop_else_return", &mir_body, &graph);
     /*
                        ┌─────────────────┐
                        │   bcb0: Call    │
@@ -412,17 +398,12 @@ fn test_covgraph_switchint_then_loop_else_return() {
       │                                     │
       └─────────────────────────────────────┘
     */
-    assert_eq!(
-        basic_coverage_blocks.num_nodes(),
-        4,
-        "basic_coverage_blocks: {:?}",
-        basic_coverage_blocks.iter_enumerated().collect::<Vec<_>>()
-    );
+    assert_eq!(graph.num_nodes(), 4, "graph: {:?}", graph.iter_enumerated().collect::<Vec<_>>());
 
-    assert_successors(&basic_coverage_blocks, bcb(0), &[bcb(1)]);
-    assert_successors(&basic_coverage_blocks, bcb(1), &[bcb(2), bcb(3)]);
-    assert_successors(&basic_coverage_blocks, bcb(2), &[]);
-    assert_successors(&basic_coverage_blocks, bcb(3), &[bcb(1)]);
+    assert_successors(&graph, bcb(0), &[bcb(1)]);
+    assert_successors(&graph, bcb(1), &[bcb(2), bcb(3)]);
+    assert_successors(&graph, bcb(2), &[]);
+    assert_successors(&graph, bcb(3), &[bcb(1)]);
 }
 
 /// Create a mock `Body` with nested loops.
@@ -498,11 +479,11 @@ fn switchint_loop_then_inner_loop_else_break<'a>() -> Body<'a> {
 #[test]
 fn test_covgraph_switchint_loop_then_inner_loop_else_break() {
     let mir_body = switchint_loop_then_inner_loop_else_break();
-    let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
+    let graph = graph::CoverageGraph::from_mir(&mir_body);
     print_coverage_graphviz(
         "covgraph_switchint_loop_then_inner_loop_else_break",
         &mir_body,
-        &basic_coverage_blocks,
+        &graph,
     );
     /*
                          ┌─────────────────┐
@@ -535,123 +516,13 @@ fn test_covgraph_switchint_loop_then_inner_loop_else_break() {
       │                                            │
       └────────────────────────────────────────────┘
     */
-    assert_eq!(
-        basic_coverage_blocks.num_nodes(),
-        7,
-        "basic_coverage_blocks: {:?}",
-        basic_coverage_blocks.iter_enumerated().collect::<Vec<_>>()
-    );
+    assert_eq!(graph.num_nodes(), 7, "graph: {:?}", graph.iter_enumerated().collect::<Vec<_>>());
 
-    assert_successors(&basic_coverage_blocks, bcb(0), &[bcb(1)]);
-    assert_successors(&basic_coverage_blocks, bcb(1), &[bcb(2), bcb(3)]);
-    assert_successors(&basic_coverage_blocks, bcb(2), &[]);
-    assert_successors(&basic_coverage_blocks, bcb(3), &[bcb(4)]);
-    assert_successors(&basic_coverage_blocks, bcb(4), &[bcb(5), bcb(6)]);
-    assert_successors(&basic_coverage_blocks, bcb(5), &[bcb(1)]);
-    assert_successors(&basic_coverage_blocks, bcb(6), &[bcb(4)]);
-}
-
-#[test]
-fn test_find_loop_backedges_none() {
-    let mir_body = goto_switchint();
-    let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
-    if false {
-        eprintln!(
-            "basic_coverage_blocks = {:?}",
-            basic_coverage_blocks.iter_enumerated().collect::<Vec<_>>()
-        );
-        eprintln!("successors = {:?}", basic_coverage_blocks.successors);
-    }
-    let backedges = graph::find_loop_backedges(&basic_coverage_blocks);
-    assert_eq!(
-        backedges.iter_enumerated().map(|(_bcb, backedges)| backedges.len()).sum::<usize>(),
-        0,
-        "backedges: {:?}",
-        backedges
-    );
-}
-
-#[test]
-fn test_find_loop_backedges_one() {
-    let mir_body = switchint_then_loop_else_return();
-    let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
-    let backedges = graph::find_loop_backedges(&basic_coverage_blocks);
-    assert_eq!(
-        backedges.iter_enumerated().map(|(_bcb, backedges)| backedges.len()).sum::<usize>(),
-        1,
-        "backedges: {:?}",
-        backedges
-    );
-
-    assert_eq!(backedges[bcb(1)], &[bcb(3)]);
-}
-
-#[test]
-fn test_find_loop_backedges_two() {
-    let mir_body = switchint_loop_then_inner_loop_else_break();
-    let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
-    let backedges = graph::find_loop_backedges(&basic_coverage_blocks);
-    assert_eq!(
-        backedges.iter_enumerated().map(|(_bcb, backedges)| backedges.len()).sum::<usize>(),
-        2,
-        "backedges: {:?}",
-        backedges
-    );
-
-    assert_eq!(backedges[bcb(1)], &[bcb(5)]);
-    assert_eq!(backedges[bcb(4)], &[bcb(6)]);
-}
-
-#[test]
-fn test_traverse_coverage_with_loops() {
-    let mir_body = switchint_loop_then_inner_loop_else_break();
-    let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
-    let mut traversed_in_order = Vec::new();
-    let mut traversal = graph::TraverseCoverageGraphWithLoops::new(&basic_coverage_blocks);
-    while let Some(bcb) = traversal.next() {
-        traversed_in_order.push(bcb);
-    }
-
-    // bcb0 is visited first. Then bcb1 starts the first loop, and all remaining nodes, *except*
-    // bcb6 are inside the first loop.
-    assert_eq!(
-        *traversed_in_order.last().expect("should have elements"),
-        bcb(6),
-        "bcb6 should not be visited until all nodes inside the first loop have been visited"
-    );
-}
-
-#[test]
-fn test_make_bcb_counters() {
-    rustc_span::create_default_session_globals_then(|| {
-        let mir_body = goto_switchint();
-        let basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);
-        // Historically this test would use `spans` internals to set up fake
-        // coverage spans for BCBs 1 and 2. Now we skip that step and just tell
-        // BCB counter construction that those BCBs have spans.
-        let bcb_has_coverage_spans = |bcb: BasicCoverageBlock| (1..=2).contains(&bcb.as_usize());
-        let coverage_counters = counters::CoverageCounters::make_bcb_counters(
-            &basic_coverage_blocks,
-            bcb_has_coverage_spans,
-        );
-        assert_eq!(coverage_counters.num_expressions(), 0);
-
-        assert_eq!(
-            0, // bcb1 has a `Counter` with id = 0
-            match coverage_counters.bcb_counter(bcb(1)).expect("should have a counter") {
-                counters::BcbCounter::Counter { id, .. } => id,
-                _ => panic!("expected a Counter"),
-            }
-            .as_u32()
-        );
-
-        assert_eq!(
-            1, // bcb2 has a `Counter` with id = 1
-            match coverage_counters.bcb_counter(bcb(2)).expect("should have a counter") {
-                counters::BcbCounter::Counter { id, .. } => id,
-                _ => panic!("expected a Counter"),
-            }
-            .as_u32()
-        );
-    });
+    assert_successors(&graph, bcb(0), &[bcb(1)]);
+    assert_successors(&graph, bcb(1), &[bcb(2), bcb(3)]);
+    assert_successors(&graph, bcb(2), &[]);
+    assert_successors(&graph, bcb(3), &[bcb(4)]);
+    assert_successors(&graph, bcb(4), &[bcb(5), bcb(6)]);
+    assert_successors(&graph, bcb(5), &[bcb(1)]);
+    assert_successors(&graph, bcb(6), &[bcb(4)]);
 }

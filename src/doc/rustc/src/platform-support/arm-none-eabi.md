@@ -1,6 +1,15 @@
 # `{arm,thumb}*-none-eabi(hf)?`
 
-## Tier 2 Target List
+## Common Target Details
+
+This documentation covers details that apply to a range of bare-metal targets
+for 32-bit Arm CPUs. The `arm-none-eabi` flavor of the GNU compiler toolchain is
+often used to assist compilation to these targets.
+
+Details that apply only to only a specific target in this group are covered in
+their own document.
+
+### Tier 2 Target List
 
 - Arm A-Profile Architectures
   - `armv7a-none-eabi`
@@ -16,7 +25,7 @@
 - *Legacy* Arm Architectures
   - None
 
-## Tier 3 Target List
+### Tier 3 Target List
 
 - Arm A-Profile Architectures
   - `armv7a-none-eabihf`
@@ -28,11 +37,7 @@
   - [`armv4t-none-eabi` and `thumbv4t-none-eabi`](armv4t-none-eabi.md)
   - [`armv5te-none-eabi` and `thumbv5te-none-eabi`](armv5te-none-eabi.md)
 
-## Common Target Details
-
-This documentation covers details that apply to a range of bare-metal targets
-for 32-bit Arm CPUs. In addition, target specific details may be covered in
-their own document.
+## Instruction Sets
 
 There are two 32-bit instruction set architectures (ISAs) defined by Arm:
 
@@ -100,9 +105,13 @@ features you do not have available, leaving you with the optimized instruction
 scheduling and support for the features you do have. More details are available
 in the detailed target-specific documentation.
 
-**Note:** Many target-features are currently unstable and subject to change, and
+<div class="warning">
+
+Many target-features are currently unstable and subject to change, and
 if you use them you should disassemble the compiler output and manually inspect
 it to ensure only appropriate instructions for your CPU have been generated.
+
+</div>
 
 If you wish to use the *target-cpu* and *target-feature* options, you can add
 them to your `.cargo/config.toml` file alongside any other flags your project

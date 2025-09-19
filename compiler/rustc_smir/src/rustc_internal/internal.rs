@@ -4,22 +4,24 @@
 //! due to incomplete stable coverage.
 
 // Prefer importing stable_mir over internal rustc constructs to make this file more readable.
-use crate::rustc_smir::Tables;
-use rustc_middle::ty::{self as rustc_ty, Ty as InternalTy, TyCtxt};
+
+use rustc_middle::ty::{self as rustc_ty, Const as InternalConst, Ty as InternalTy, TyCtxt};
 use rustc_span::Symbol;
 use stable_mir::abi::Layout;
 use stable_mir::mir::alloc::AllocId;
 use stable_mir::mir::mono::{Instance, MonoItem, StaticDef};
-use stable_mir::mir::{BinOp, Mutability, Place, ProjectionElem, Safety};
+use stable_mir::mir::{BinOp, Mutability, Place, ProjectionElem, RawPtrKind, Safety, UnOp};
 use stable_mir::ty::{
-    Abi, AdtDef, Binder, BoundRegionKind, BoundTyKind, BoundVariableKind, ClosureKind, Const,
-    DynKind, ExistentialPredicate, ExistentialProjection, ExistentialTraitRef, FloatTy, FnSig,
-    GenericArgKind, GenericArgs, IndexedVal, IntTy, Movability, Pattern, Region, RigidTy, Span,
-    TermKind, TraitRef, Ty, UintTy, VariantDef, VariantIdx,
+    Abi, AdtDef, Binder, BoundRegionKind, BoundTyKind, BoundVariableKind, ClosureKind, DynKind,
+    ExistentialPredicate, ExistentialProjection, ExistentialTraitRef, FloatTy, FnSig,
+    GenericArgKind, GenericArgs, IndexedVal, IntTy, MirConst, Movability, Pattern, Region, RigidTy,
+    Span, TermKind, TraitRef, Ty, TyConst, UintTy, VariantDef, VariantIdx,
 };
 use stable_mir::{CrateItem, CrateNum, DefId};
 
 use super::RustcInternal;
+use crate::rustc_smir::Tables;
+use crate::stable_mir;
 
 impl RustcInternal for CrateItem {
     type T<'tcx> = rustc_span::def_id::DefId;
@@ -55,7 +57,7 @@ impl RustcInternal for GenericArgKind {
         let arg: rustc_ty::GenericArg<'tcx> = match self {
             GenericArgKind::Lifetime(reg) => reg.internal(tables, tcx).into(),
             GenericArgKind::Type(ty) => ty.internal(tables, tcx).into(),
-            GenericArgKind::Const(cnst) => ty_const(cnst, tables, tcx).into(),
+            GenericArgKind::Const(cnst) => cnst.internal(tables, tcx).into(),
         };
         tcx.lift(arg).unwrap()
     }
@@ -76,14 +78,20 @@ impl RustcInternal for Ty {
     }
 }
 
+impl RustcInternal for TyConst {
+    type T<'tcx> = InternalConst<'tcx>;
+    fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
+        tcx.lift(tables.ty_consts[self.id]).unwrap()
+    }
+}
+
 impl RustcInternal for Pattern {
     type T<'tcx> = rustc_ty::Pattern<'tcx>;
     fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
         tcx.mk_pat(match self {
-            Pattern::Range { start, end, include_end } => rustc_ty::PatternKind::Range {
-                start: start.as_ref().map(|c| ty_const(c, tables, tcx)),
-                end: end.as_ref().map(|c| ty_const(c, tables, tcx)),
-                include_end: *include_end,
+            Pattern::Range { start, end, include_end: _ } => rustc_ty::PatternKind::Range {
+                start: start.as_ref().unwrap().internal(tables, tcx),
+                end: end.as_ref().unwrap().internal(tables, tcx),
             },
         })
     }
@@ -101,7 +109,7 @@ impl RustcInternal for RigidTy {
             RigidTy::Float(float_ty) => rustc_ty::TyKind::Float(float_ty.internal(tables, tcx)),
             RigidTy::Never => rustc_ty::TyKind::Never,
             RigidTy::Array(ty, cnst) => {
-                rustc_ty::TyKind::Array(ty.internal(tables, tcx), ty_const(cnst, tables, tcx))
+                rustc_ty::TyKind::Array(ty.internal(tables, tcx), cnst.internal(tables, tcx))
             }
             RigidTy::Pat(ty, pat) => {
                 rustc_ty::TyKind::Pat(ty.internal(tables, tcx), pat.internal(tables, tcx))
@@ -123,13 +131,20 @@ impl RustcInternal for RigidTy {
             RigidTy::FnDef(def, args) => {
                 rustc_ty::TyKind::FnDef(def.0.internal(tables, tcx), args.internal(tables, tcx))
             }
-            RigidTy::FnPtr(sig) => rustc_ty::TyKind::FnPtr(sig.internal(tables, tcx)),
+            RigidTy::FnPtr(sig) => {
+                let (sig_tys, hdr) = sig.internal(tables, tcx).split();
+                rustc_ty::TyKind::FnPtr(sig_tys, hdr)
+            }
             RigidTy::Closure(def, args) => {
                 rustc_ty::TyKind::Closure(def.0.internal(tables, tcx), args.internal(tables, tcx))
             }
             RigidTy::Coroutine(def, args, _mov) => {
                 rustc_ty::TyKind::Coroutine(def.0.internal(tables, tcx), args.internal(tables, tcx))
             }
+            RigidTy::CoroutineClosure(def, args) => rustc_ty::TyKind::CoroutineClosure(
+                def.0.internal(tables, tcx),
+                args.internal(tables, tcx),
+            ),
             RigidTy::CoroutineWitness(def, args) => rustc_ty::TyKind::CoroutineWitness(
                 def.0.internal(tables, tcx),
                 args.internal(tables, tcx),
@@ -181,8 +196,10 @@ impl RustcInternal for FloatTy {
 
     fn internal<'tcx>(&self, _tables: &mut Tables<'_>, _tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
         match self {
+            FloatTy::F16 => rustc_ty::FloatTy::F16,
             FloatTy::F32 => rustc_ty::FloatTy::F32,
             FloatTy::F64 => rustc_ty::FloatTy::F64,
+            FloatTy::F128 => rustc_ty::FloatTy::F128,
         }
     }
 }
@@ -209,6 +226,18 @@ impl RustcInternal for Movability {
     }
 }
 
+impl RustcInternal for RawPtrKind {
+    type T<'tcx> = rustc_middle::mir::RawPtrKind;
+
+    fn internal<'tcx>(&self, _tables: &mut Tables<'_>, _tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
+        match self {
+            RawPtrKind::Mut => rustc_middle::mir::RawPtrKind::Mut,
+            RawPtrKind::Const => rustc_middle::mir::RawPtrKind::Const,
+            RawPtrKind::FakeForPtrMetadata => rustc_middle::mir::RawPtrKind::FakeForPtrMetadata,
+        }
+    }
+}
+
 impl RustcInternal for FnSig {
     type T<'tcx> = rustc_ty::FnSig<'tcx>;
 
@@ -216,7 +245,7 @@ impl RustcInternal for FnSig {
         tcx.lift(rustc_ty::FnSig {
             inputs_and_output: tcx.mk_type_list(&self.inputs_and_output.internal(tables, tcx)),
             c_variadic: self.c_variadic,
-            unsafety: self.unsafety.internal(tables, tcx),
+            safety: self.safety.internal(tables, tcx),
             abi: self.abi.internal(tables, tcx),
         })
         .unwrap()
@@ -224,10 +253,10 @@ impl RustcInternal for FnSig {
 }
 
 impl RustcInternal for VariantIdx {
-    type T<'tcx> = rustc_target::abi::VariantIdx;
+    type T<'tcx> = rustc_abi::VariantIdx;
 
     fn internal<'tcx>(&self, _tables: &mut Tables<'_>, _tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
-        rustc_target::abi::VariantIdx::from(self.to_index())
+        rustc_abi::VariantIdx::from(self.to_index())
     }
 }
 
@@ -239,25 +268,14 @@ impl RustcInternal for VariantDef {
     }
 }
 
-fn ty_const<'tcx>(
-    constant: &Const,
-    tables: &mut Tables<'_>,
-    tcx: TyCtxt<'tcx>,
-) -> rustc_ty::Const<'tcx> {
-    match constant.internal(tables, tcx) {
-        rustc_middle::mir::Const::Ty(c) => c,
-        cnst => {
-            panic!("Trying to convert constant `{constant:?}` to type constant, but found {cnst:?}")
-        }
-    }
-}
-
-impl RustcInternal for Const {
+impl RustcInternal for MirConst {
     type T<'tcx> = rustc_middle::mir::Const<'tcx>;
     fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
-        let constant = tables.constants[self.id];
+        let constant = tables.mir_consts[self.id];
         match constant {
-            rustc_middle::mir::Const::Ty(ty) => rustc_middle::mir::Const::Ty(tcx.lift(ty).unwrap()),
+            rustc_middle::mir::Const::Ty(ty, ct) => {
+                rustc_middle::mir::Const::Ty(tcx.lift(ty).unwrap(), tcx.lift(ct).unwrap())
+            }
             rustc_middle::mir::Const::Unevaluated(uneval, ty) => {
                 rustc_middle::mir::Const::Unevaluated(
                     tcx.lift(uneval).unwrap(),
@@ -333,12 +351,12 @@ impl RustcInternal for BoundVariableKind {
                 ),
             }),
             BoundVariableKind::Region(kind) => rustc_ty::BoundVariableKind::Region(match kind {
-                BoundRegionKind::BrAnon => rustc_ty::BoundRegionKind::BrAnon,
-                BoundRegionKind::BrNamed(def, symbol) => rustc_ty::BoundRegionKind::BrNamed(
+                BoundRegionKind::BrAnon => rustc_ty::BoundRegionKind::Anon,
+                BoundRegionKind::BrNamed(def, symbol) => rustc_ty::BoundRegionKind::Named(
                     def.0.internal(tables, tcx),
                     Symbol::intern(symbol),
                 ),
-                BoundRegionKind::BrEnv => rustc_ty::BoundRegionKind::BrEnv,
+                BoundRegionKind::BrEnv => rustc_ty::BoundRegionKind::ClosureEnv,
             }),
             BoundVariableKind::Const => rustc_ty::BoundVariableKind::Const,
         }
@@ -378,11 +396,12 @@ impl RustcInternal for ExistentialProjection {
     type T<'tcx> = rustc_ty::ExistentialProjection<'tcx>;
 
     fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
-        rustc_ty::ExistentialProjection {
-            def_id: self.def_id.0.internal(tables, tcx),
-            args: self.generic_args.internal(tables, tcx),
-            term: self.term.internal(tables, tcx),
-        }
+        rustc_ty::ExistentialProjection::new_from_args(
+            tcx,
+            self.def_id.0.internal(tables, tcx),
+            self.generic_args.internal(tables, tcx),
+            self.term.internal(tables, tcx),
+        )
     }
 }
 
@@ -392,7 +411,7 @@ impl RustcInternal for TermKind {
     fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
         match self {
             TermKind::Type(ty) => ty.internal(tables, tcx).into(),
-            TermKind::Const(const_) => ty_const(const_, tables, tcx).into(),
+            TermKind::Const(cnst) => cnst.internal(tables, tcx).into(),
         }
     }
 }
@@ -401,10 +420,11 @@ impl RustcInternal for ExistentialTraitRef {
     type T<'tcx> = rustc_ty::ExistentialTraitRef<'tcx>;
 
     fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
-        rustc_ty::ExistentialTraitRef {
-            def_id: self.def_id.0.internal(tables, tcx),
-            args: self.generic_args.internal(tables, tcx),
-        }
+        rustc_ty::ExistentialTraitRef::new_from_args(
+            tcx,
+            self.def_id.0.internal(tables, tcx),
+            self.generic_args.internal(tables, tcx),
+        )
     }
 }
 
@@ -412,7 +432,7 @@ impl RustcInternal for TraitRef {
     type T<'tcx> = rustc_ty::TraitRef<'tcx>;
 
     fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
-        rustc_ty::TraitRef::new(
+        rustc_ty::TraitRef::new_from_args(
             tcx,
             self.def_id.0.internal(tables, tcx),
             self.args().internal(tables, tcx),
@@ -447,50 +467,50 @@ impl RustcInternal for AdtDef {
 }
 
 impl RustcInternal for Abi {
-    type T<'tcx> = rustc_target::spec::abi::Abi;
+    type T<'tcx> = rustc_abi::ExternAbi;
 
     fn internal<'tcx>(&self, _tables: &mut Tables<'_>, _tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
         match *self {
-            Abi::Rust => rustc_target::spec::abi::Abi::Rust,
-            Abi::C { unwind } => rustc_target::spec::abi::Abi::C { unwind },
-            Abi::Cdecl { unwind } => rustc_target::spec::abi::Abi::Cdecl { unwind },
-            Abi::Stdcall { unwind } => rustc_target::spec::abi::Abi::Stdcall { unwind },
-            Abi::Fastcall { unwind } => rustc_target::spec::abi::Abi::Fastcall { unwind },
-            Abi::Vectorcall { unwind } => rustc_target::spec::abi::Abi::Vectorcall { unwind },
-            Abi::Thiscall { unwind } => rustc_target::spec::abi::Abi::Thiscall { unwind },
-            Abi::Aapcs { unwind } => rustc_target::spec::abi::Abi::Aapcs { unwind },
-            Abi::Win64 { unwind } => rustc_target::spec::abi::Abi::Win64 { unwind },
-            Abi::SysV64 { unwind } => rustc_target::spec::abi::Abi::SysV64 { unwind },
-            Abi::PtxKernel => rustc_target::spec::abi::Abi::PtxKernel,
-            Abi::Msp430Interrupt => rustc_target::spec::abi::Abi::Msp430Interrupt,
-            Abi::X86Interrupt => rustc_target::spec::abi::Abi::X86Interrupt,
-            Abi::EfiApi => rustc_target::spec::abi::Abi::EfiApi,
-            Abi::AvrInterrupt => rustc_target::spec::abi::Abi::AvrInterrupt,
-            Abi::AvrNonBlockingInterrupt => rustc_target::spec::abi::Abi::AvrNonBlockingInterrupt,
-            Abi::CCmseNonSecureCall => rustc_target::spec::abi::Abi::CCmseNonSecureCall,
-            Abi::Wasm => rustc_target::spec::abi::Abi::Wasm,
-            Abi::System { unwind } => rustc_target::spec::abi::Abi::System { unwind },
-            Abi::RustIntrinsic => rustc_target::spec::abi::Abi::RustIntrinsic,
-            Abi::RustCall => rustc_target::spec::abi::Abi::RustCall,
-            Abi::Unadjusted => rustc_target::spec::abi::Abi::Unadjusted,
-            Abi::RustCold => rustc_target::spec::abi::Abi::RustCold,
-            Abi::RiscvInterruptM => rustc_target::spec::abi::Abi::RiscvInterruptM,
-            Abi::RiscvInterruptS => rustc_target::spec::abi::Abi::RiscvInterruptS,
+            Abi::Rust => rustc_abi::ExternAbi::Rust,
+            Abi::C { unwind } => rustc_abi::ExternAbi::C { unwind },
+            Abi::Cdecl { unwind } => rustc_abi::ExternAbi::Cdecl { unwind },
+            Abi::Stdcall { unwind } => rustc_abi::ExternAbi::Stdcall { unwind },
+            Abi::Fastcall { unwind } => rustc_abi::ExternAbi::Fastcall { unwind },
+            Abi::Vectorcall { unwind } => rustc_abi::ExternAbi::Vectorcall { unwind },
+            Abi::Thiscall { unwind } => rustc_abi::ExternAbi::Thiscall { unwind },
+            Abi::Aapcs { unwind } => rustc_abi::ExternAbi::Aapcs { unwind },
+            Abi::Win64 { unwind } => rustc_abi::ExternAbi::Win64 { unwind },
+            Abi::SysV64 { unwind } => rustc_abi::ExternAbi::SysV64 { unwind },
+            Abi::PtxKernel => rustc_abi::ExternAbi::PtxKernel,
+            Abi::Msp430Interrupt => rustc_abi::ExternAbi::Msp430Interrupt,
+            Abi::X86Interrupt => rustc_abi::ExternAbi::X86Interrupt,
+            Abi::GpuKernel => rustc_abi::ExternAbi::GpuKernel,
+            Abi::EfiApi => rustc_abi::ExternAbi::EfiApi,
+            Abi::AvrInterrupt => rustc_abi::ExternAbi::AvrInterrupt,
+            Abi::AvrNonBlockingInterrupt => rustc_abi::ExternAbi::AvrNonBlockingInterrupt,
+            Abi::CCmseNonSecureCall => rustc_abi::ExternAbi::CCmseNonSecureCall,
+            Abi::CCmseNonSecureEntry => rustc_abi::ExternAbi::CCmseNonSecureEntry,
+            Abi::System { unwind } => rustc_abi::ExternAbi::System { unwind },
+            Abi::RustCall => rustc_abi::ExternAbi::RustCall,
+            Abi::Unadjusted => rustc_abi::ExternAbi::Unadjusted,
+            Abi::RustCold => rustc_abi::ExternAbi::RustCold,
+            Abi::RiscvInterruptM => rustc_abi::ExternAbi::RiscvInterruptM,
+            Abi::RiscvInterruptS => rustc_abi::ExternAbi::RiscvInterruptS,
+            Abi::Custom => rustc_abi::ExternAbi::Custom,
         }
     }
 }
 
 impl RustcInternal for Safety {
-    type T<'tcx> = rustc_hir::Unsafety;
+    type T<'tcx> = rustc_hir::Safety;
 
     fn internal<'tcx>(&self, _tables: &mut Tables<'_>, _tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
         match self {
-            Safety::Unsafe => rustc_hir::Unsafety::Unsafe,
-            Safety::Normal => rustc_hir::Unsafety::Normal,
+            Safety::Unsafe => rustc_hir::Safety::Unsafe,
+            Safety::Safe => rustc_hir::Safety::Safe,
         }
     }
 }
-
 impl RustcInternal for Span {
     type T<'tcx> = rustc_span::Span;
 
@@ -500,7 +520,7 @@ impl RustcInternal for Span {
 }
 
 impl RustcInternal for Layout {
-    type T<'tcx> = rustc_target::abi::Layout<'tcx>;
+    type T<'tcx> = rustc_abi::Layout<'tcx>;
 
     fn internal<'tcx>(&self, tables: &mut Tables<'_>, tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
         tcx.lift(tables.layouts[*self]).unwrap()
@@ -579,6 +599,18 @@ impl RustcInternal for BinOp {
             BinOp::Gt => rustc_middle::mir::BinOp::Gt,
             BinOp::Cmp => rustc_middle::mir::BinOp::Cmp,
             BinOp::Offset => rustc_middle::mir::BinOp::Offset,
+        }
+    }
+}
+
+impl RustcInternal for UnOp {
+    type T<'tcx> = rustc_middle::mir::UnOp;
+
+    fn internal<'tcx>(&self, _tables: &mut Tables<'_>, _tcx: TyCtxt<'tcx>) -> Self::T<'tcx> {
+        match self {
+            UnOp::Not => rustc_middle::mir::UnOp::Not,
+            UnOp::Neg => rustc_middle::mir::UnOp::Neg,
+            UnOp::PtrMetadata => rustc_middle::mir::UnOp::PtrMetadata,
         }
     }
 }

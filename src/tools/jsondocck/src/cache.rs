@@ -1,9 +1,10 @@
-use crate::config::Config;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
 use fs_err as fs;
+use serde_json::Value;
+
+use crate::config::Config;
 
 #[derive(Debug)]
 pub struct Cache {
@@ -23,11 +24,12 @@ impl Cache {
 
         Cache {
             value: serde_json::from_str::<Value>(&content).expect("failed to convert from JSON"),
-            variables: HashMap::new(),
+            variables: HashMap::from([("FILE".to_owned(), config.template.clone().into())]),
         }
     }
 
-    pub fn value(&self) -> &Value {
-        &self.value
+    // FIXME: Make this failible, so jsonpath syntax error has line number.
+    pub fn select(&self, path: &str) -> Vec<&Value> {
+        jsonpath_rust::query::js_path_vals(path, &self.value).unwrap()
     }
 }

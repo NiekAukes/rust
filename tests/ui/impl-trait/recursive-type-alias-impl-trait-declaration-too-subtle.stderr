@@ -1,11 +1,3 @@
-error: unconstrained opaque type
-  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:4:16
-   |
-LL |     type Foo = impl PartialEq<(Foo, i32)>;
-   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `Foo` must be used in combination with a concrete type within the same module
-
 error[E0053]: method `eq` has an incompatible type for trait
   --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:10:30
    |
@@ -13,41 +5,58 @@ LL |     type Foo = impl PartialEq<(Foo, i32)>;
    |                -------------------------- the found opaque type
 ...
 LL |         fn eq(&self, _other: &(Foo, i32)) -> bool {
-   |                              ^^^^^^^^^^^
-   |                              |
-   |                              expected `a::Bar`, found opaque type
-   |                              help: change the parameter type to match the trait: `&(a::Bar, i32)`
+   |                              ^^^^^^^^^^^ expected `a::Bar`, found opaque type
    |
    = note: expected signature `fn(&a::Bar, &(a::Bar, _)) -> _`
               found signature `fn(&a::Bar, &(a::Foo, _)) -> _`
-
-error: unconstrained opaque type
-  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:18:16
+help: change the parameter type to match the trait
    |
-LL |     type Foo = impl PartialEq<(Foo, i32)>;
-   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL -         fn eq(&self, _other: &(Foo, i32)) -> bool {
+LL +         fn eq(&self, _other: &(a::Bar, i32)) -> bool {
    |
-   = note: `Foo` must be used in combination with a concrete type within the same module
 
 error[E0053]: method `eq` has an incompatible type for trait
-  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:24:30
+  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:25:30
    |
 LL |     type Foo = impl PartialEq<(Foo, i32)>;
    |                -------------------------- the expected opaque type
 ...
 LL |         fn eq(&self, _other: &(Bar, i32)) -> bool {
-   |                              ^^^^^^^^^^^
-   |                              |
-   |                              expected opaque type, found `b::Bar`
-   |                              help: change the parameter type to match the trait: `&(b::Foo, i32)`
+   |                              ^^^^^^^^^^^ expected opaque type, found `b::Bar`
    |
    = note: expected signature `fn(&b::Bar, &(b::Foo, _)) -> _`
               found signature `fn(&b::Bar, &(b::Bar, _)) -> _`
-note: this item must have the opaque type in its signature in order to be able to register hidden types
-  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:24:12
+note: this item must have a `#[define_opaque(b::Foo)]` attribute to be able to define hidden types
+  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:25:12
    |
 LL |         fn eq(&self, _other: &(Bar, i32)) -> bool {
    |            ^^
+help: change the parameter type to match the trait
+   |
+LL -         fn eq(&self, _other: &(Bar, i32)) -> bool {
+LL +         fn eq(&self, _other: &(b::Foo, i32)) -> bool {
+   |
+
+error: item does not constrain `a::Foo::{opaque#0}`
+  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:10:12
+   |
+LL |         fn eq(&self, _other: &(Foo, i32)) -> bool {
+   |            ^^
+   |
+   = note: consider removing `#[define_opaque]` or adding an empty `#[define_opaque()]`
+note: this opaque type is supposed to be constrained
+  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:4:16
+   |
+LL |     type Foo = impl PartialEq<(Foo, i32)>;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unconstrained opaque type
+  --> $DIR/recursive-type-alias-impl-trait-declaration-too-subtle.rs:19:16
+   |
+LL |     type Foo = impl PartialEq<(Foo, i32)>;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `Foo` must be used in combination with a concrete type within the same crate
 
 error: aborting due to 4 previous errors
 

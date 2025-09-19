@@ -1,14 +1,15 @@
 //! Code related to parsing literals.
 
+use std::{ascii, fmt, str};
+
+use rustc_literal_escaper::{
+    MixedUnit, Mode, byte_from_char, unescape_byte, unescape_char, unescape_mixed, unescape_unicode,
+};
+use rustc_span::{Span, Symbol, kw, sym};
+use tracing::debug;
+
 use crate::ast::{self, LitKind, MetaItemLit, StrStyle};
 use crate::token::{self, Token};
-use rustc_lexer::unescape::{
-    byte_from_char, unescape_byte, unescape_char, unescape_mixed, unescape_unicode, MixedUnit, Mode,
-};
-use rustc_span::symbol::{kw, sym, Symbol};
-use rustc_span::Span;
-use std::{ascii, fmt, str};
-use tracing::debug;
 
 // Escapes a string, represented as a symbol. Reuses the original symbol,
 // avoiding interning, if no changes are required.
@@ -120,7 +121,7 @@ impl LitKind {
             }
             token::ByteStrRaw(n) => {
                 // Raw strings have no escapes so we can convert the symbol
-                // directly to a `Lrc<u8>`.
+                // directly to a `Arc<u8>`.
                 let buf = symbol.as_str().to_owned().into_bytes();
                 LitKind::ByteStr(buf.into(), StrStyle::Raw(n))
             }
@@ -141,7 +142,7 @@ impl LitKind {
             }
             token::CStrRaw(n) => {
                 // Raw strings have no escapes so we can convert the symbol
-                // directly to a `Lrc<u8>` after appending the terminating NUL
+                // directly to a `Arc<u8>` after appending the terminating NUL
                 // char.
                 let mut buf = symbol.as_str().to_owned().into_bytes();
                 buf.push(0);

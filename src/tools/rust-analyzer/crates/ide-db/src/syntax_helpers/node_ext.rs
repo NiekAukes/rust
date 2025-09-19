@@ -1,9 +1,12 @@
 //! Various helper functions to work with SyntaxNodes.
+use std::ops::ControlFlow;
+
 use itertools::Itertools;
 use parser::T;
+use span::Edition;
 use syntax::{
-    ast::{self, HasLoopBody, MacroCall, PathSegmentKind, VisibilityKind},
     AstNode, AstToken, Preorder, RustLanguage, WalkEvent,
+    ast::{self, HasLoopBody, MacroCall, PathSegmentKind, VisibilityKind},
 };
 
 pub fn expr_as_name_ref(expr: &ast::Expr) -> Option<ast::NameRef> {
@@ -36,10 +39,35 @@ pub fn walk_expr(expr: &ast::Expr, cb: &mut dyn FnMut(ast::Expr)) {
     })
 }
 
+pub fn is_closure_or_blk_with_modif(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::BlockExpr(block_expr) => {
+            matches!(
+                block_expr.modifier(),
+                Some(
+                    ast::BlockModifier::Async(_)
+                        | ast::BlockModifier::Try(_)
+                        | ast::BlockModifier::Const(_)
+                )
+            )
+        }
+        ast::Expr::ClosureExpr(_) => true,
+        _ => false,
+    }
+}
+
 /// Preorder walk all the expression's child expressions preserving events.
 /// If the callback returns true on an [`WalkEvent::Enter`], the subtree of the expression will be skipped.
 /// Note that the subtree may already be skipped due to the context analysis this function does.
 pub fn preorder_expr(start: &ast::Expr, cb: &mut dyn FnMut(WalkEvent<ast::Expr>) -> bool) {
+    preorder_expr_with_ctx_checker(start, &is_closure_or_blk_with_modif, cb);
+}
+
+pub fn preorder_expr_with_ctx_checker(
+    start: &ast::Expr,
+    check_ctx: &dyn Fn(&ast::Expr) -> bool,
+    cb: &mut dyn FnMut(WalkEvent<ast::Expr>) -> bool,
+) {
     let mut preorder = start.syntax().preorder();
     while let Some(event) = preorder.next() {
         let node = match event {
@@ -71,20 +99,7 @@ pub fn preorder_expr(start: &ast::Expr, cb: &mut dyn FnMut(WalkEvent<ast::Expr>)
                 if ast::GenericArg::can_cast(node.kind()) {
                     preorder.skip_subtree();
                 } else if let Some(expr) = ast::Expr::cast(node) {
-                    let is_different_context = match &expr {
-                        ast::Expr::BlockExpr(block_expr) => {
-                            matches!(
-                                block_expr.modifier(),
-                                Some(
-                                    ast::BlockModifier::Async(_)
-                                        | ast::BlockModifier::Try(_)
-                                        | ast::BlockModifier::Const(_)
-                                )
-                            )
-                        }
-                        ast::Expr::ClosureExpr(_) => true,
-                        _ => false,
-                    } && expr.syntax() != start.syntax();
+                    let is_different_context = check_ctx(&expr) && expr.syntax() != start.syntax();
                     let skip = cb(WalkEvent::Enter(expr));
                     if skip || is_different_context {
                         preorder.skip_subtree();
@@ -106,7 +121,10 @@ pub fn walk_patterns_in_expr(start: &ast::Expr, cb: &mut dyn FnMut(ast::Pat)) {
         match ast::Stmt::cast(node.clone()) {
             Some(ast::Stmt::LetStmt(l)) => {
                 if let Some(pat) = l.pat() {
-                    walk_pat(&pat, cb);
+                    _ = walk_pat(&pat, &mut |pat| {
+                        cb(pat);
+                        ControlFlow::<(), ()>::Continue(())
+                    });
                 }
                 if let Some(expr) = l.initializer() {
                     walk_patterns_in_expr(&expr, cb);
@@ -141,7 +159,10 @@ pub fn walk_patterns_in_expr(start: &ast::Expr, cb: &mut dyn FnMut(ast::Pat)) {
                     }
                 } else if let Some(pat) = ast::Pat::cast(node) {
                     preorder.skip_subtree();
-                    walk_pat(&pat, cb);
+                    _ = walk_pat(&pat, &mut |pat| {
+                        cb(pat);
+                        ControlFlow::<(), ()>::Continue(())
+                    });
                 }
             }
         }
@@ -149,7 +170,10 @@ pub fn walk_patterns_in_expr(start: &ast::Expr, cb: &mut dyn FnMut(ast::Pat)) {
 }
 
 /// Preorder walk all the pattern's sub patterns.
-pub fn walk_pat(pat: &ast::Pat, cb: &mut dyn FnMut(ast::Pat)) {
+pub fn walk_pat<T>(
+    pat: &ast::Pat,
+    cb: &mut dyn FnMut(ast::Pat) -> ControlFlow<T>,
+) -> ControlFlow<T> {
     let mut preorder = pat.syntax().preorder();
     while let Some(event) = preorder.next() {
         let node = match event {
@@ -160,10 +184,10 @@ pub fn walk_pat(pat: &ast::Pat, cb: &mut dyn FnMut(ast::Pat)) {
         match ast::Pat::cast(node) {
             Some(pat @ ast::Pat::ConstBlockPat(_)) => {
                 preorder.skip_subtree();
-                cb(pat);
+                cb(pat)?;
             }
             Some(pat) => {
-                cb(pat);
+                cb(pat)?;
             }
             // skip const args
             None if ast::GenericArg::can_cast(kind) => {
@@ -172,6 +196,7 @@ pub fn walk_pat(pat: &ast::Pat, cb: &mut dyn FnMut(ast::Pat)) {
             None => (),
         }
     }
+    ControlFlow::Continue(())
 }
 
 /// Preorder walk all the type's sub types.
@@ -207,7 +232,7 @@ pub fn vis_eq(this: &ast::Visibility, other: &ast::Visibility) -> bool {
     match (this.kind(), other.kind()) {
         (VisibilityKind::In(this), VisibilityKind::In(other)) => {
             stdx::iter_eq_by(this.segments(), other.segments(), |lhs, rhs| {
-                lhs.kind().zip(rhs.kind()).map_or(false, |it| match it {
+                lhs.kind().zip(rhs.kind()).is_some_and(|it| match it {
                     (PathSegmentKind::CrateKw, PathSegmentKind::CrateKw)
                     | (PathSegmentKind::SelfKw, PathSegmentKind::SelfKw)
                     | (PathSegmentKind::SuperKw, PathSegmentKind::SuperKw) => true,
@@ -246,7 +271,7 @@ pub fn is_pattern_cond(expr: ast::Expr) -> bool {
                 .or_else(|| expr.rhs().map(is_pattern_cond))
                 .unwrap_or(false)
         }
-        ast::Expr::ParenExpr(expr) => expr.expr().map_or(false, is_pattern_cond),
+        ast::Expr::ParenExpr(expr) => expr.expr().is_some_and(is_pattern_cond),
         ast::Expr::LetExpr(_) => true,
         _ => false,
     }
@@ -277,6 +302,8 @@ pub fn for_each_tail_expr(expr: &ast::Expr, cb: &mut dyn FnMut(&ast::Expr)) {
                     });
                 }
                 Some(ast::BlockModifier::Unsafe(_)) => (),
+                Some(ast::BlockModifier::Gen(_)) => (),
+                Some(ast::BlockModifier::AsyncGen(_)) => (),
                 None => (),
             }
             if let Some(stmt_list) = b.stmt_list() {
@@ -392,8 +419,8 @@ fn for_each_break_expr(
     }
 }
 
-fn eq_label_lt(lt1: &Option<ast::Lifetime>, lt2: &Option<ast::Lifetime>) -> bool {
-    lt1.as_ref().zip(lt2.as_ref()).map_or(false, |(lt, lbl)| lt.text() == lbl.text())
+pub fn eq_label_lt(lt1: &Option<ast::Lifetime>, lt2: &Option<ast::Lifetime>) -> bool {
+    lt1.as_ref().zip(lt2.as_ref()).is_some_and(|(lt, lbl)| lt.text() == lbl.text())
 }
 
 struct TreeWithDepthIterator {
@@ -442,27 +469,32 @@ impl Iterator for TreeWithDepthIterator {
 }
 
 /// Parses the input token tree as comma separated plain paths.
-pub fn parse_tt_as_comma_sep_paths(input: ast::TokenTree) -> Option<Vec<ast::Path>> {
+pub fn parse_tt_as_comma_sep_paths(
+    input: ast::TokenTree,
+    edition: Edition,
+) -> Option<Vec<ast::Path>> {
     let r_paren = input.r_paren_token();
     let tokens =
         input.syntax().children_with_tokens().skip(1).map_while(|it| match it.into_token() {
             // seeing a keyword means the attribute is unclosed so stop parsing here
-            Some(tok) if tok.kind().is_keyword() => None,
+            Some(tok) if tok.kind().is_keyword(edition) => None,
             // don't include the right token tree parenthesis if it exists
             tok @ Some(_) if tok == r_paren => None,
             // only nodes that we can find are other TokenTrees, those are unexpected in this parse though
             None => None,
             Some(tok) => Some(tok),
         });
-    let input_expressions = tokens.group_by(|tok| tok.kind() == T![,]);
+    let input_expressions = tokens.chunk_by(|tok| tok.kind() == T![,]);
     let paths = input_expressions
         .into_iter()
         .filter_map(|(is_sep, group)| (!is_sep).then_some(group))
         .filter_map(|mut tokens| {
-            syntax::hacks::parse_expr_from_str(&tokens.join("")).and_then(|expr| match expr {
-                ast::Expr::PathExpr(it) => it.path(),
-                _ => None,
-            })
+            syntax::hacks::parse_expr_from_str(&tokens.join(""), Edition::CURRENT).and_then(
+                |expr| match expr {
+                    ast::Expr::PathExpr(it) => it.path(),
+                    _ => None,
+                },
+            )
         })
         .collect();
     Some(paths)

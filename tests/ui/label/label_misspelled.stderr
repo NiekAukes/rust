@@ -78,6 +78,14 @@ LL |         break for_loop;
    |               not found in this scope
    |               help: use the similarly named label: `'for_loop`
 
+warning: denote infinite loops with `loop { ... }`
+  --> $DIR/label_misspelled.rs:4:5
+   |
+LL |     'while_loop: while true {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^ help: use `loop`
+   |
+   = note: `#[warn(while_true)]` on by default
+
 warning: unused label
   --> $DIR/label_misspelled.rs:4:5
    |
@@ -89,14 +97,6 @@ note: the lint level is defined here
    |
 LL | #![warn(unused_labels)]
    |         ^^^^^^^^^^^^^
-
-warning: denote infinite loops with `loop { ... }`
-  --> $DIR/label_misspelled.rs:4:5
-   |
-LL |     'while_loop: while true {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^ help: use `loop`
-   |
-   = note: `#[warn(while_true)]` on by default
 
 warning: unused label
   --> $DIR/label_misspelled.rs:9:5
@@ -122,17 +122,17 @@ warning: denote infinite loops with `loop { ... }`
 LL |     'while_loop: while true {
    |     ^^^^^^^^^^^^^^^^^^^^^^^ help: use `loop`
 
-warning: unused label
-  --> $DIR/label_misspelled.rs:47:5
-   |
-LL |     'while_loop: while true {
-   |     ^^^^^^^^^^^
-
 warning: denote infinite loops with `loop { ... }`
   --> $DIR/label_misspelled.rs:47:5
    |
 LL |     'while_loop: while true {
    |     ^^^^^^^^^^^^^^^^^^^^^^^ help: use `loop`
+
+warning: unused label
+  --> $DIR/label_misspelled.rs:47:5
+   |
+LL |     'while_loop: while true {
+   |     ^^^^^^^^^^^
 
 warning: unused label
   --> $DIR/label_misspelled.rs:52:5
@@ -157,12 +157,14 @@ LL |         break foo;
    |
 help: use `break` on its own without a value inside this `while` loop
    |
-LL |         break;
-   |         ~~~~~
+LL -         break foo;
+LL +         break;
+   |
 help: alternatively, you might have meant to use the available loop label
    |
-LL |         break 'while_loop;
-   |               ~~~~~~~~~~~
+LL -         break foo;
+LL +         break 'while_loop;
+   |
 
 error[E0571]: `break` with value from a `while` loop
   --> $DIR/label_misspelled.rs:54:9
@@ -175,12 +177,14 @@ LL |         break foo;
    |
 help: use `break` on its own without a value inside this `while` loop
    |
-LL |         break;
-   |         ~~~~~
+LL -         break foo;
+LL +         break;
+   |
 help: alternatively, you might have meant to use the available loop label
    |
-LL |         break 'while_let;
-   |               ~~~~~~~~~~
+LL -         break foo;
+LL +         break 'while_let;
+   |
 
 error[E0571]: `break` with value from a `for` loop
   --> $DIR/label_misspelled.rs:59:9
@@ -193,12 +197,14 @@ LL |         break foo;
    |
 help: use `break` on its own without a value inside this `for` loop
    |
-LL |         break;
-   |         ~~~~~
+LL -         break foo;
+LL +         break;
+   |
 help: alternatively, you might have meant to use the available loop label
    |
-LL |         break 'for_loop;
-   |               ~~~~~~~~~
+LL -         break foo;
+LL +         break 'for_loop;
+   |
 
 error: aborting due to 11 previous errors; 10 warnings emitted
 

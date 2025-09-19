@@ -8,38 +8,38 @@
 //!
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/thir.html
 
-use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
-use rustc_errors::{DiagArgValue, IntoDiagArg};
-use rustc_hir as hir;
-use rustc_hir::def_id::DefId;
-use rustc_hir::{BindingMode, ByRef, HirId, MatchSource, RangeEnd};
-use rustc_index::newtype_index;
-use rustc_index::IndexVec;
-use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeVisitable};
-use rustc_middle::middle::region;
-use rustc_middle::mir::interpret::AllocId;
-use rustc_middle::mir::{self, BinOp, BorrowKind, FakeReadCause, UnOp};
-use rustc_middle::ty::adjustment::PointerCoercion;
-use rustc_middle::ty::layout::IntegerExt;
-use rustc_middle::ty::{
-    self, AdtDef, CanonicalUserType, CanonicalUserTypeAnnotation, FnSig, GenericArgsRef, List, Ty,
-    TyCtxt, UpvarArgs,
-};
-use rustc_span::def_id::LocalDefId;
-use rustc_span::{sym, ErrorGuaranteed, Span, Symbol, DUMMY_SP};
-use rustc_target::abi::{FieldIdx, Integer, Size, VariantIdx};
-use rustc_target::asm::InlineAsmRegOrRegClass;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Index;
+use std::sync::Arc;
+
+use rustc_abi::{FieldIdx, Integer, Size, VariantIdx};
+use rustc_ast::{AsmMacro, InlineAsmOptions, InlineAsmTemplatePiece};
+use rustc_hir as hir;
+use rustc_hir::def_id::DefId;
+use rustc_hir::{BindingMode, ByRef, HirId, MatchSource, RangeEnd};
+use rustc_index::{IndexVec, newtype_index};
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeVisitable};
+use rustc_span::def_id::LocalDefId;
+use rustc_span::{ErrorGuaranteed, Span, Symbol};
+use rustc_target::asm::InlineAsmRegOrRegClass;
+use tracing::instrument;
+
+use crate::middle::region;
+use crate::mir::interpret::AllocId;
+use crate::mir::{self, AssignOp, BinOp, BorrowKind, FakeReadCause, UnOp};
+use crate::thir::visit::for_each_immediate_subpat;
+use crate::ty::adjustment::PointerCoercion;
+use crate::ty::layout::IntegerExt;
+use crate::ty::{
+    self, AdtDef, CanonicalUserType, CanonicalUserTypeAnnotation, FnSig, GenericArgsRef, List, Ty,
+    TyCtxt, UpvarArgs,
+};
 
 pub mod visit;
 
 macro_rules! thir_with_elements {
     (
-        $($field_name:ident: $field_ty:ty,)*
-
-    @elements:
         $($name:ident: $id:ty => $value:ty => $format:literal,)*
     ) => {
         $(
@@ -50,25 +50,24 @@ macro_rules! thir_with_elements {
             }
         )*
 
+        // Note: Making `Thir` implement `Clone` is useful for external tools that need access to
+        // THIR bodies even after the `Steal` query result has been stolen.
+        // One such tool is https://github.com/rust-corpus/qrates/.
         /// A container for a THIR body.
         ///
         /// This can be indexed directly by any THIR index (e.g. [`ExprId`]).
         #[derive(Debug, HashStable, Clone)]
         pub struct Thir<'tcx> {
-            $(
-                pub $field_name: $field_ty,
-            )*
+            pub body_type: BodyTy<'tcx>,
             $(
                 pub $name: IndexVec<$id, $value>,
             )*
         }
 
         impl<'tcx> Thir<'tcx> {
-            pub fn new($($field_name: $field_ty,)*) -> Thir<'tcx> {
+            pub fn new(body_type: BodyTy<'tcx>) -> Thir<'tcx> {
                 Thir {
-                    $(
-                        $field_name,
-                    )*
+                    body_type,
                     $(
                         $name: IndexVec::new(),
                     )*
@@ -88,9 +87,6 @@ macro_rules! thir_with_elements {
 }
 
 thir_with_elements! {
-    body_type: BodyTy<'tcx>,
-
-@elements:
     arms: ArmId => Arm<'tcx> => "a{}",
     blocks: BlockId => Block => "b{}",
     exprs: ExprId => Expr<'tcx> => "e{}",
@@ -102,6 +98,7 @@ thir_with_elements! {
 pub enum BodyTy<'tcx> {
     Const(Ty<'tcx>),
     Fn(FnSig<'tcx>),
+    GlobalAsm(Ty<'tcx>),
 }
 
 /// Description of a type-checked function parameter.
@@ -158,8 +155,21 @@ pub struct AdtExpr<'tcx> {
     pub user_ty: UserTy<'tcx>,
 
     pub fields: Box<[FieldExpr]>,
-    /// The base, e.g. `Foo {x: 1, .. base}`.
-    pub base: Option<FruInfo<'tcx>>,
+    /// The base, e.g. `Foo {x: 1, ..base}`.
+    pub base: AdtExprBase<'tcx>,
+}
+
+#[derive(Clone, Debug, HashStable)]
+pub enum AdtExprBase<'tcx> {
+    /// A struct expression where all the fields are explicitly enumerated: `Foo { a, b }`.
+    None,
+    /// A struct expression with a "base", an expression of the same type as the outer struct that
+    /// will be used to populate any fields not explicitly mentioned: `Foo { ..base }`
+    Base(FruInfo<'tcx>),
+    /// A struct expression with a `..` tail but no "base" expression. The values from the struct
+    /// fields' default values will be used to populate any fields not explicitly mentioned:
+    /// `Foo { .. }`.
+    DefaultFields(Box<[Ty<'tcx>]>),
 }
 
 #[derive(Clone, Debug, HashStable)]
@@ -173,6 +183,7 @@ pub struct ClosureExpr<'tcx> {
 
 #[derive(Clone, Debug, HashStable)]
 pub struct InlineAsmExpr<'tcx> {
+    pub asm_macro: AsmMacro,
     pub template: &'tcx [InlineAsmTemplatePiece],
     pub operands: Box<[InlineAsmOperand<'tcx>]>,
     pub options: InlineAsmOptions,
@@ -246,11 +257,22 @@ pub struct Expr<'tcx> {
     pub ty: Ty<'tcx>,
 
     /// The lifetime of this expression if it should be spilled into a
-    /// temporary; should be `None` only if in a constant context
-    pub temp_lifetime: Option<region::Scope>,
+    /// temporary
+    pub temp_lifetime: TempLifetime,
 
     /// span of the expression in the source
     pub span: Span,
+}
+
+/// Temporary lifetime information for THIR expressions
+#[derive(Clone, Copy, Debug, HashStable)]
+pub struct TempLifetime {
+    /// Lifetime for temporaries as expected.
+    /// This should be `None` in a constant context.
+    pub temp_lifetime: Option<region::Scope>,
+    /// If `Some(lt)`, indicates that the lifetime of this temporary will change to `lt` in a future edition.
+    /// If `None`, then no changes are expected, or lints are disabled.
+    pub backwards_incompatible: Option<region::Scope>,
 }
 
 #[derive(Clone, Debug, HashStable)]
@@ -270,7 +292,10 @@ pub enum ExprKind<'tcx> {
     If {
         if_then_scope: region::Scope,
         cond: ExprId,
+        /// `then` is always `ExprKind::Block`.
         then: ExprId,
+        /// If present, the `else_opt` expr is always `ExprKind::Block` (for
+        /// `else`) or `ExprKind::If` (for `else if`).
         else_opt: Option<ExprId>,
     },
     /// A function call. Method calls and overloaded operators are converted to plain function calls.
@@ -293,6 +318,14 @@ pub enum ExprKind<'tcx> {
         /// The span of the function, without the dot and receiver
         /// (e.g. `foo(a, b)` in `x.foo(a, b)`).
         fn_span: Span,
+    },
+    /// A use expression `x.use`.
+    ByUse {
+        /// The expression on which use is applied.
+        expr: ExprId,
+        /// The span of use, without the dot and receiver
+        /// (e.g. `use` in `x.use`).
+        span: Span,
     },
     /// A *non-overloaded* dereference.
     Deref {
@@ -338,6 +371,8 @@ pub enum ExprKind<'tcx> {
     PointerCoercion {
         cast: PointerCoercion,
         source: ExprId,
+        /// Whether this coercion is written with an `as` cast in the source code.
+        is_from_as_cast: bool,
     },
     /// A `loop` expression.
     Loop {
@@ -357,7 +392,6 @@ pub enum ExprKind<'tcx> {
     /// A `match` expression.
     Match {
         scrutinee: ExprId,
-        scrutinee_hir_id: HirId,
         arms: Box<[ArmId]>,
         match_source: MatchSource,
     },
@@ -372,7 +406,7 @@ pub enum ExprKind<'tcx> {
     },
     /// A *non-overloaded* operation assignment, e.g. `lhs += rhs`.
     AssignOp {
-        op: BinOp,
+        op: AssignOp,
         lhs: ExprId,
         rhs: ExprId,
     },
@@ -407,7 +441,7 @@ pub enum ExprKind<'tcx> {
         arg: ExprId,
     },
     /// A `&raw [const|mut] $place_expr` raw borrow resulting in type `*[const|mut] T`.
-    AddressOf {
+    RawBorrow {
         mutability: hir::Mutability,
         arg: ExprId,
     },
@@ -453,12 +487,27 @@ pub enum ExprKind<'tcx> {
         source: ExprId,
         /// Type that the user gave to this expression
         user_ty: UserTy<'tcx>,
+        user_ty_span: Span,
     },
-    /// A type ascription on a value, e.g. `42: i32`.
+    /// A type ascription on a value, e.g. `type_ascribe!(42, i32)` or `42 as i32`.
     ValueTypeAscription {
         source: ExprId,
         /// Type that the user gave to this expression
         user_ty: UserTy<'tcx>,
+        user_ty_span: Span,
+    },
+    /// An unsafe binder cast on a place, e.g. `unwrap_binder!(*ptr)`.
+    PlaceUnwrapUnsafeBinder {
+        source: ExprId,
+    },
+    /// An unsafe binder cast on a value, e.g. `unwrap_binder!(rvalue())`,
+    /// which makes a temporary.
+    ValueUnwrapUnsafeBinder {
+        source: ExprId,
+    },
+    /// Construct an unsafe binder, e.g. `wrap_binder(&ref)`.
+    WrapUnsafeBinder {
+        source: ExprId,
     },
     /// A closure definition.
     Closure(Box<ClosureExpr<'tcx>>),
@@ -572,8 +621,7 @@ pub enum InlineAsmOperand<'tcx> {
         span: Span,
     },
     SymFn {
-        value: mir::Const<'tcx>,
-        span: Span,
+        value: ExprId,
     },
     SymStatic {
         def_id: DefId,
@@ -586,7 +634,7 @@ pub enum InlineAsmOperand<'tcx> {
 #[derive(Clone, Debug, HashStable, TypeVisitable)]
 pub struct FieldPat<'tcx> {
     pub field: FieldIdx,
-    pub pattern: Box<Pat<'tcx>>,
+    pub pattern: Pat<'tcx>,
 }
 
 #[derive(Clone, Debug, HashStable, TypeVisitable)]
@@ -597,10 +645,6 @@ pub struct Pat<'tcx> {
 }
 
 impl<'tcx> Pat<'tcx> {
-    pub fn wildcard_from_ty(ty: Ty<'tcx>) -> Self {
-        Pat { ty, span: DUMMY_SP, kind: PatKind::Wild }
-    }
-
     pub fn simple_ident(&self) -> Option<Symbol> {
         match self.kind {
             PatKind::Binding {
@@ -632,28 +676,7 @@ impl<'tcx> Pat<'tcx> {
             return;
         }
 
-        use PatKind::*;
-        match &self.kind {
-            Wild
-            | Never
-            | Range(..)
-            | Binding { subpattern: None, .. }
-            | Constant { .. }
-            | Error(_) => {}
-            AscribeUserType { subpattern, .. }
-            | Binding { subpattern: Some(subpattern), .. }
-            | Deref { subpattern }
-            | DerefPattern { subpattern, .. }
-            | InlineConstant { subpattern, .. } => subpattern.walk_(it),
-            Leaf { subpatterns } | Variant { subpatterns, .. } => {
-                subpatterns.iter().for_each(|field| field.pattern.walk_(it))
-            }
-            Or { pats } => pats.iter().for_each(|p| p.walk_(it)),
-            Array { box ref prefix, ref slice, box ref suffix }
-            | Slice { box ref prefix, ref slice, box ref suffix } => {
-                prefix.iter().chain(slice.iter()).chain(suffix.iter()).for_each(|p| p.walk_(it))
-            }
-        }
+        for_each_immediate_subpat(self, |p| p.walk_(it));
     }
 
     /// Whether the pattern has a `PatKind::Error` nested within.
@@ -701,12 +724,6 @@ impl<'tcx> Pat<'tcx> {
     }
 }
 
-impl<'tcx> IntoDiagArg for Pat<'tcx> {
-    fn into_diag_arg(self) -> DiagArgValue {
-        format!("{self}").into_diag_arg()
-    }
-}
-
 #[derive(Clone, Debug, HashStable, TypeVisitable)]
 pub struct Ascription<'tcx> {
     pub annotation: CanonicalUserTypeAnnotation<'tcx>,
@@ -733,6 +750,9 @@ pub struct Ascription<'tcx> {
 
 #[derive(Clone, Debug, HashStable, TypeVisitable)]
 pub enum PatKind<'tcx> {
+    /// A missing pattern, e.g. for an anonymous param in a bare fn like `fn f(u32)`.
+    Missing,
+
     /// A wildcard pattern: `_`.
     Wild,
 
@@ -750,8 +770,12 @@ pub enum PatKind<'tcx> {
         var: LocalVarId,
         ty: Ty<'tcx>,
         subpattern: Option<Box<Pat<'tcx>>>,
+
         /// Is this the leftmost occurrence of the binding, i.e., is `var` the
         /// `HirId` of this pattern?
+        ///
+        /// (The same binding can occur multiple times in different branches of
+        /// an or-pattern, but only one of them will be primary.)
         is_primary: bool,
     },
 
@@ -778,7 +802,12 @@ pub enum PatKind<'tcx> {
     /// Deref pattern, written `box P` for now.
     DerefPattern {
         subpattern: Box<Pat<'tcx>>,
-        mutability: hir::Mutability,
+        /// Whether the pattern scrutinee needs to be borrowed in order to call `Deref::deref` or
+        /// `DerefMut::deref_mut`, and if so, which. This is `ByRef::No` for deref patterns on
+        /// boxes; they are lowered using a built-in deref rather than a method call, thus they
+        /// don't borrow the scrutinee.
+        #[type_visitable(ignore)]
+        borrow: ByRef,
     },
 
     /// One of the following:
@@ -788,52 +817,48 @@ pub enum PatKind<'tcx> {
     /// * integer, bool, char or float (represented as a valtree), which will be handled by
     ///   exhaustiveness to cover exactly its own value, similar to `&str`, but these values are
     ///   much simpler.
-    /// * Opaque constants (represented as `mir::ConstValue`), that must not be matched
-    ///   structurally. So anything that does not derive `PartialEq` and `Eq`.
-    ///
-    /// These are always compared with the matched place using (the semantics of) `PartialEq`.
+    /// * `String`, if `string_deref_patterns` is enabled.
     Constant {
         value: mir::Const<'tcx>,
     },
 
-    /// Inline constant found while lowering a pattern.
-    InlineConstant {
-        /// [LocalDefId] of the constant, we need this so that we have a
-        /// reference that can be used by unsafety checking to visit nested
-        /// unevaluated constants.
-        def: LocalDefId,
-        /// If the inline constant is used in a range pattern, this subpattern
-        /// represents the range (if both ends are inline constants, there will
-        /// be multiple InlineConstant wrappers).
+    /// Pattern obtained by converting a constant (inline or named) to its pattern
+    /// representation using `const_to_pat`. This is used for unsafety checking.
+    ExpandedConstant {
+        /// [DefId] of the constant item.
+        def_id: DefId,
+        /// The pattern that the constant lowered to.
         ///
-        /// Otherwise, the actual pattern that the constant lowered to. As with
-        /// other constants, inline constants are matched structurally where
-        /// possible.
+        /// HACK: we need to keep the `DefId` of inline constants around for unsafety checking;
+        /// therefore when a range pattern contains inline constants, we re-wrap the range pattern
+        /// with the `ExpandedConstant` nodes that correspond to the range endpoints. Hence
+        /// `subpattern` may actually be a range pattern, and `def_id` be the constant for one of
+        /// its endpoints.
         subpattern: Box<Pat<'tcx>>,
     },
 
-    Range(Box<PatRange<'tcx>>),
+    Range(Arc<PatRange<'tcx>>),
 
     /// Matches against a slice, checking the length and extracting elements.
     /// irrefutable when there is a slice pattern and both `prefix` and `suffix` are empty.
     /// e.g., `&[ref xs @ ..]`.
     Slice {
-        prefix: Box<[Box<Pat<'tcx>>]>,
+        prefix: Box<[Pat<'tcx>]>,
         slice: Option<Box<Pat<'tcx>>>,
-        suffix: Box<[Box<Pat<'tcx>>]>,
+        suffix: Box<[Pat<'tcx>]>,
     },
 
     /// Fixed match against an array; irrefutable.
     Array {
-        prefix: Box<[Box<Pat<'tcx>>]>,
+        prefix: Box<[Pat<'tcx>]>,
         slice: Option<Box<Pat<'tcx>>>,
-        suffix: Box<[Box<Pat<'tcx>>]>,
+        suffix: Box<[Pat<'tcx>]>,
     },
 
     /// An or-pattern, e.g. `p | q`.
     /// Invariant: `pats.len() >= 2`.
     Or {
-        pats: Box<[Box<Pat<'tcx>>]>,
+        pats: Box<[Pat<'tcx>]>,
     },
 
     /// A never pattern `!`.
@@ -913,7 +938,7 @@ impl<'tcx> PatRange<'tcx> {
         &self,
         value: mir::Const<'tcx>,
         tcx: TyCtxt<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
     ) -> Option<bool> {
         use Ordering::*;
         debug_assert_eq!(self.ty, value.ty());
@@ -921,10 +946,10 @@ impl<'tcx> PatRange<'tcx> {
         let value = PatRangeBoundary::Finite(value);
         // For performance, it's important to only do the second comparison if necessary.
         Some(
-            match self.lo.compare_with(value, ty, tcx, param_env)? {
+            match self.lo.compare_with(value, ty, tcx, typing_env)? {
                 Less | Equal => true,
                 Greater => false,
-            } && match value.compare_with(self.hi, ty, tcx, param_env)? {
+            } && match value.compare_with(self.hi, ty, tcx, typing_env)? {
                 Less => true,
                 Equal => self.end == RangeEnd::Included,
                 Greater => false,
@@ -937,17 +962,17 @@ impl<'tcx> PatRange<'tcx> {
         &self,
         other: &Self,
         tcx: TyCtxt<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
     ) -> Option<bool> {
         use Ordering::*;
         debug_assert_eq!(self.ty, other.ty);
         // For performance, it's important to only do the second comparison if necessary.
         Some(
-            match other.lo.compare_with(self.hi, self.ty, tcx, param_env)? {
+            match other.lo.compare_with(self.hi, self.ty, tcx, typing_env)? {
                 Less => true,
                 Equal => self.end == RangeEnd::Included,
                 Greater => false,
-            } && match self.lo.compare_with(other.hi, self.ty, tcx, param_env)? {
+            } && match self.lo.compare_with(other.hi, self.ty, tcx, typing_env)? {
                 Less => true,
                 Equal => other.end == RangeEnd::Included,
                 Greater => false,
@@ -993,9 +1018,14 @@ impl<'tcx> PatRangeBoundary<'tcx> {
             Self::NegInfinity | Self::PosInfinity => None,
         }
     }
-    pub fn eval_bits(self, ty: Ty<'tcx>, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> u128 {
+    pub fn eval_bits(
+        self,
+        ty: Ty<'tcx>,
+        tcx: TyCtxt<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
+    ) -> u128 {
         match self {
-            Self::Finite(value) => value.eval_bits(tcx, param_env),
+            Self::Finite(value) => value.eval_bits(tcx, typing_env),
             Self::NegInfinity => {
                 // Unwrap is ok because the type is known to be numeric.
                 ty.numeric_min_and_max_as_bits(tcx).unwrap().0
@@ -1007,13 +1037,13 @@ impl<'tcx> PatRangeBoundary<'tcx> {
         }
     }
 
-    #[instrument(skip(tcx, param_env), level = "debug", ret)]
+    #[instrument(skip(tcx, typing_env), level = "debug", ret)]
     pub fn compare_with(
         self,
         other: Self,
         ty: Ty<'tcx>,
         tcx: TyCtxt<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
     ) -> Option<Ordering> {
         use PatRangeBoundary::*;
         match (self, other) {
@@ -1032,8 +1062,8 @@ impl<'tcx> PatRangeBoundary<'tcx> {
                 if let (Some(a), Some(b)) = (a.try_to_scalar_int(), b.try_to_scalar_int()) {
                     let sz = ty.primitive_size(tcx);
                     let cmp = match ty.kind() {
-                        ty::Uint(_) | ty::Char => a.assert_uint(sz).cmp(&b.assert_uint(sz)),
-                        ty::Int(_) => a.assert_int(sz).cmp(&b.assert_int(sz)),
+                        ty::Uint(_) | ty::Char => a.to_uint(sz).cmp(&b.to_uint(sz)),
+                        ty::Int(_) => a.to_int(sz).cmp(&b.to_int(sz)),
                         _ => unreachable!(),
                     };
                     return Some(cmp);
@@ -1042,10 +1072,16 @@ impl<'tcx> PatRangeBoundary<'tcx> {
             _ => {}
         }
 
-        let a = self.eval_bits(ty, tcx, param_env);
-        let b = other.eval_bits(ty, tcx, param_env);
+        let a = self.eval_bits(ty, tcx, typing_env);
+        let b = other.eval_bits(ty, tcx, typing_env);
 
         match ty.kind() {
+            ty::Float(ty::FloatTy::F16) => {
+                use rustc_apfloat::Float;
+                let a = rustc_apfloat::ieee::Half::from_bits(a);
+                let b = rustc_apfloat::ieee::Half::from_bits(b);
+                a.partial_cmp(&b)
+            }
             ty::Float(ty::FloatTy::F32) => {
                 use rustc_apfloat::Float;
                 let a = rustc_apfloat::ieee::Single::from_bits(a);
@@ -1058,8 +1094,14 @@ impl<'tcx> PatRangeBoundary<'tcx> {
                 let b = rustc_apfloat::ieee::Double::from_bits(b);
                 a.partial_cmp(&b)
             }
+            ty::Float(ty::FloatTy::F128) => {
+                use rustc_apfloat::Float;
+                let a = rustc_apfloat::ieee::Quad::from_bits(a);
+                let b = rustc_apfloat::ieee::Quad::from_bits(b);
+                a.partial_cmp(&b)
+            }
             ty::Int(ity) => {
-                let size = rustc_target::abi::Integer::from_int_ty(&tcx, *ity).size();
+                let size = rustc_abi::Integer::from_int_ty(&tcx, *ity).size();
                 let a = size.sign_extend(a) as i128;
                 let b = size.sign_extend(b) as i128;
                 Some(a.cmp(&b))
@@ -1070,167 +1112,15 @@ impl<'tcx> PatRangeBoundary<'tcx> {
     }
 }
 
-impl<'tcx> fmt::Display for Pat<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Printing lists is a chore.
-        let mut first = true;
-        let mut start_or_continue = |s| {
-            if first {
-                first = false;
-                ""
-            } else {
-                s
-            }
-        };
-        let mut start_or_comma = || start_or_continue(", ");
-
-        match self.kind {
-            PatKind::Wild => write!(f, "_"),
-            PatKind::Never => write!(f, "!"),
-            PatKind::AscribeUserType { ref subpattern, .. } => write!(f, "{subpattern}: _"),
-            PatKind::Binding { name, mode, ref subpattern, .. } => {
-                f.write_str(mode.prefix_str())?;
-                write!(f, "{name}")?;
-                if let Some(ref subpattern) = *subpattern {
-                    write!(f, " @ {subpattern}")?;
-                }
-                Ok(())
-            }
-            PatKind::Variant { ref subpatterns, .. } | PatKind::Leaf { ref subpatterns } => {
-                let variant_and_name = match self.kind {
-                    PatKind::Variant { adt_def, variant_index, .. } => ty::tls::with(|tcx| {
-                        let variant = adt_def.variant(variant_index);
-                        let adt_did = adt_def.did();
-                        let name = if tcx.get_diagnostic_item(sym::Option) == Some(adt_did)
-                            || tcx.get_diagnostic_item(sym::Result) == Some(adt_did)
-                        {
-                            variant.name.to_string()
-                        } else {
-                            format!("{}::{}", tcx.def_path_str(adt_def.did()), variant.name)
-                        };
-                        Some((variant, name))
-                    }),
-                    _ => self.ty.ty_adt_def().and_then(|adt_def| {
-                        if !adt_def.is_enum() {
-                            ty::tls::with(|tcx| {
-                                Some((adt_def.non_enum_variant(), tcx.def_path_str(adt_def.did())))
-                            })
-                        } else {
-                            None
-                        }
-                    }),
-                };
-
-                if let Some((variant, name)) = &variant_and_name {
-                    write!(f, "{name}")?;
-
-                    // Only for Adt we can have `S {...}`,
-                    // which we handle separately here.
-                    if variant.ctor.is_none() {
-                        write!(f, " {{ ")?;
-
-                        let mut printed = 0;
-                        for p in subpatterns {
-                            if let PatKind::Wild = p.pattern.kind {
-                                continue;
-                            }
-                            let name = variant.fields[p.field].name;
-                            write!(f, "{}{}: {}", start_or_comma(), name, p.pattern)?;
-                            printed += 1;
-                        }
-
-                        let is_union = self.ty.ty_adt_def().is_some_and(|adt| adt.is_union());
-                        if printed < variant.fields.len() && (!is_union || printed == 0) {
-                            write!(f, "{}..", start_or_comma())?;
-                        }
-
-                        return write!(f, " }}");
-                    }
-                }
-
-                let num_fields =
-                    variant_and_name.as_ref().map_or(subpatterns.len(), |(v, _)| v.fields.len());
-                if num_fields != 0 || variant_and_name.is_none() {
-                    write!(f, "(")?;
-                    for i in 0..num_fields {
-                        write!(f, "{}", start_or_comma())?;
-
-                        // Common case: the field is where we expect it.
-                        if let Some(p) = subpatterns.get(i) {
-                            if p.field.index() == i {
-                                write!(f, "{}", p.pattern)?;
-                                continue;
-                            }
-                        }
-
-                        // Otherwise, we have to go looking for it.
-                        if let Some(p) = subpatterns.iter().find(|p| p.field.index() == i) {
-                            write!(f, "{}", p.pattern)?;
-                        } else {
-                            write!(f, "_")?;
-                        }
-                    }
-                    write!(f, ")")?;
-                }
-
-                Ok(())
-            }
-            PatKind::Deref { ref subpattern } => {
-                match self.ty.kind() {
-                    ty::Adt(def, _) if def.is_box() => write!(f, "box ")?,
-                    ty::Ref(_, _, mutbl) => {
-                        write!(f, "&{}", mutbl.prefix_str())?;
-                    }
-                    _ => bug!("{} is a bad Deref pattern type", self.ty),
-                }
-                write!(f, "{subpattern}")
-            }
-            PatKind::DerefPattern { ref subpattern, .. } => {
-                write!(f, "deref!({subpattern})")
-            }
-            PatKind::Constant { value } => write!(f, "{value}"),
-            PatKind::InlineConstant { def: _, ref subpattern } => {
-                write!(f, "{} (from inline const)", subpattern)
-            }
-            PatKind::Range(ref range) => write!(f, "{range}"),
-            PatKind::Slice { ref prefix, ref slice, ref suffix }
-            | PatKind::Array { ref prefix, ref slice, ref suffix } => {
-                write!(f, "[")?;
-                for p in prefix.iter() {
-                    write!(f, "{}{}", start_or_comma(), p)?;
-                }
-                if let Some(ref slice) = *slice {
-                    write!(f, "{}", start_or_comma())?;
-                    match slice.kind {
-                        PatKind::Wild => {}
-                        _ => write!(f, "{slice}")?,
-                    }
-                    write!(f, "..")?;
-                }
-                for p in suffix.iter() {
-                    write!(f, "{}{}", start_or_comma(), p)?;
-                }
-                write!(f, "]")
-            }
-            PatKind::Or { ref pats } => {
-                for pat in pats.iter() {
-                    write!(f, "{}{}", start_or_continue(" | "), pat)?;
-                }
-                Ok(())
-            }
-            PatKind::Error(_) => write!(f, "<error>"),
-        }
-    }
-}
-
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
 #[cfg(target_pointer_width = "64")]
 mod size_asserts {
-    use super::*;
     use rustc_data_structures::static_assert_size;
+
+    use super::*;
     // tidy-alphabetical-start
     static_assert_size!(Block, 48);
-    static_assert_size!(Expr<'_>, 64);
+    static_assert_size!(Expr<'_>, 72);
     static_assert_size!(ExprKind<'_>, 40);
     static_assert_size!(Pat<'_>, 64);
     static_assert_size!(PatKind<'_>, 48);

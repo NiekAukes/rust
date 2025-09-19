@@ -1,13 +1,4 @@
-#![feature(
-    no_core,
-    lang_items,
-    never_type,
-    linkage,
-    extern_types,
-    thread_local,
-    repr_simd,
-    raw_ref_op
-)]
+#![feature(no_core, lang_items, never_type, linkage, extern_types, thread_local, repr_simd)]
 #![no_core]
 #![allow(dead_code, non_camel_case_types, internal_features)]
 
@@ -213,11 +204,8 @@ fn main() {
         assert_eq!(intrinsics::size_of_val(a) as u8, 16);
         assert_eq!(intrinsics::size_of_val(&0u32) as u8, 4);
 
-        assert_eq!(intrinsics::min_align_of::<u16>() as u8, 2);
-        assert_eq!(
-            intrinsics::min_align_of_val(&a) as u8,
-            intrinsics::min_align_of::<&str>() as u8
-        );
+        assert_eq!(intrinsics::align_of::<u16>() as u8, 2);
+        assert_eq!(intrinsics::align_of_val(&a) as u8, intrinsics::align_of::<&str>() as u8);
 
         assert!(!intrinsics::needs_drop::<u8>());
         assert!(!intrinsics::needs_drop::<[u8]>());
@@ -274,7 +262,7 @@ fn main() {
 
     assert_eq!(((|()| 42u8) as fn(()) -> u8)(()), 42);
 
-    #[cfg(not(any(jit, windows)))]
+    #[cfg(not(any(jit, target_vendor = "apple", windows)))]
     {
         extern "C" {
             #[linkage = "extern_weak"]
@@ -332,14 +320,10 @@ fn main() {
     #[cfg(all(not(jit), not(all(windows, target_env = "gnu"))))]
     test_tls();
 
-    #[cfg(all(
-        not(jit),
-        not(no_unstable_features),
-        target_arch = "x86_64",
-        any(target_os = "linux", target_os = "macos")
-    ))]
+    #[cfg(all(not(jit), target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
     unsafe {
         global_asm_test();
+        naked_test();
     }
 
     // Both statics have a reference that points to the same anonymous allocation.
@@ -365,17 +349,12 @@ fn stack_val_align() {
     assert_eq!(&a as *const Foo as usize % 8192, 0);
 }
 
-#[cfg(all(
-    not(jit),
-    not(no_unstable_features),
-    target_arch = "x86_64",
-    any(target_os = "linux", target_os = "macos")
-))]
+#[cfg(all(not(jit), target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 extern "C" {
     fn global_asm_test();
 }
 
-#[cfg(all(not(jit), not(no_unstable_features), target_arch = "x86_64", target_os = "linux"))]
+#[cfg(all(not(jit), target_arch = "x86_64", target_os = "linux"))]
 global_asm! {
     "
     .global global_asm_test
@@ -385,7 +364,7 @@ global_asm! {
     "
 }
 
-#[cfg(all(not(jit), not(no_unstable_features), target_arch = "x86_64", target_os = "macos"))]
+#[cfg(all(not(jit), target_arch = "x86_64", target_os = "macos"))]
 global_asm! {
     "
     .global _global_asm_test
@@ -393,6 +372,12 @@ global_asm! {
     // comment that would normally be removed by LLVM
     ret
     "
+}
+
+#[cfg(all(not(jit), target_arch = "x86_64"))]
+#[unsafe(naked)]
+extern "C" fn naked_test() {
+    naked_asm!("ret")
 }
 
 #[repr(C)]
@@ -585,6 +570,7 @@ pub enum E2<X> {
     V4,
 }
 
+#[allow(unreachable_patterns)]
 fn check_niche_behavior() {
     if let E1::V2 { .. } = (E1::V1 { f: true }) {
         intrinsics::abort();

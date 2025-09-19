@@ -1,20 +1,21 @@
 //! Conversion of internal Rust compiler items to stable ones.
 
-use rustc_target::abi::FieldIdx;
+use rustc_abi::FieldIdx;
 
 use crate::rustc_smir::{Stable, Tables};
+use crate::stable_mir;
 
 mod abi;
 mod error;
 mod mir;
 mod ty;
 
-impl<'tcx> Stable<'tcx> for rustc_hir::Unsafety {
+impl<'tcx> Stable<'tcx> for rustc_hir::Safety {
     type T = stable_mir::mir::Safety;
     fn stable(&self, _: &mut Tables<'_>) -> Self::T {
         match self {
-            rustc_hir::Unsafety::Unsafe => stable_mir::mir::Safety::Unsafe,
-            rustc_hir::Unsafety::Normal => stable_mir::mir::Safety::Normal,
+            rustc_hir::Safety::Unsafe => stable_mir::mir::Safety::Unsafe,
+            rustc_hir::Safety::Safe => stable_mir::mir::Safety::Safe,
         }
     }
 }

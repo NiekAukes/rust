@@ -1,21 +1,19 @@
-use crate::{
-    lints::{SupertraitAsDerefTarget, SupertraitAsDerefTargetLabel},
-    LateContext, LateLintPass, LintContext,
-};
-
-use rustc_hir as hir;
+use rustc_hir::{self as hir, LangItem};
 use rustc_middle::ty;
-use rustc_session::lint::FutureIncompatibilityReason;
 use rustc_session::{declare_lint, declare_lint_pass};
 use rustc_span::sym;
 use rustc_trait_selection::traits::supertraits;
 
+use crate::lints::{SupertraitAsDerefTarget, SupertraitAsDerefTargetLabel};
+use crate::{LateContext, LateLintPass, LintContext};
+
 declare_lint! {
-    /// The `deref_into_dyn_supertrait` lint is output whenever there is a use of the
-    /// `Deref` implementation with a `dyn SuperTrait` type as `Output`.
+    /// The `deref_into_dyn_supertrait` lint is emitted whenever there is a `Deref` implementation
+    /// for `dyn SubTrait` with a `dyn SuperTrait` type as the `Output` type.
     ///
-    /// These implementations will become shadowed when the `trait_upcasting` feature is stabilized.
-    /// The `deref` functions will no longer be called implicitly, so there might be behavior change.
+    /// These implementations are "shadowed" by trait upcasting (stabilized since
+    /// 1.86.0). The `deref` functions is no longer called implicitly, which might
+    /// change behavior compared to previous rustc versions.
     ///
     /// ### Example
     ///
@@ -45,15 +43,14 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// The dyn upcasting coercion feature adds new coercion rules, taking priority
-    /// over certain other coercion rules, which will cause some behavior change.
+    /// The trait upcasting coercion added a new coercion rule, taking priority over certain other
+    /// coercion rules, which causes some behavior change compared to older `rustc` versions.
+    ///
+    /// `deref` can be still called explicitly, it just isn't called as part of a deref coercion
+    /// (since trait upcasting coercion takes priority).
     pub DEREF_INTO_DYN_SUPERTRAIT,
-    Warn,
-    "`Deref` implementation usage with a supertrait trait object for output might be shadowed in the future",
-    @future_incompatible = FutureIncompatibleInfo {
-        reason: FutureIncompatibilityReason::FutureReleaseSemanticsChange,
-        reference: "issue #89460 <https://github.com/rust-lang/rust/issues/89460>",
-    };
+    Allow,
+    "`Deref` implementation with a supertrait trait object for output is shadowed by trait upcasting",
 }
 
 declare_lint_pass!(DerefIntoDynSupertrait => [DEREF_INTO_DYN_SUPERTRAIT]);
@@ -66,13 +63,13 @@ impl<'tcx> LateLintPass<'tcx> for DerefIntoDynSupertrait {
             // the trait is a `Deref` implementation
             && let Some(trait_) = &impl_.of_trait
             && let Some(did) = trait_.trait_def_id()
-            && Some(did) == tcx.lang_items().deref_trait()
+            && tcx.is_lang_item(did, LangItem::Deref)
             // the self type is `dyn t_principal`
             && let self_ty = tcx.type_of(item.owner_id).instantiate_identity()
             && let ty::Dynamic(data, _, ty::Dyn) = self_ty.kind()
             && let Some(self_principal) = data.principal()
             // `<T as Deref>::Target` is `dyn target_principal`
-            && let Some(target) = cx.get_associated_type(self_ty, did, "Target")
+            && let Some(target) = cx.get_associated_type(self_ty, did, sym::Target)
             && let ty::Dynamic(data, _, ty::Dyn) = target.kind()
             && let Some(target_principal) = data.principal()
             // `target_principal` is a supertrait of `t_principal`

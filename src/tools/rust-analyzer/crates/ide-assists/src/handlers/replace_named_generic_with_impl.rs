@@ -1,20 +1,20 @@
-use hir::Semantics;
+use hir::{FileRange, Semantics};
+use ide_db::text_edit::TextRange;
 use ide_db::{
-    base_db::{FileId, FileRange},
+    EditionedFileId, RootDatabase,
     defs::Definition,
     search::{SearchScope, UsageSearchResult},
-    RootDatabase,
 };
 use syntax::{
+    AstNode,
     ast::{
-        self, make::impl_trait_type, HasGenericParams, HasName, HasTypeBounds, Name, NameLike,
-        PathType,
+        self, HasGenericParams, HasName, HasTypeBounds, Name, NameLike, PathType,
+        make::impl_trait_type,
     },
-    match_ast, ted, AstNode,
+    match_ast, ted,
 };
-use text_edit::TextRange;
 
-use crate::{AssistContext, AssistId, AssistKind, Assists};
+use crate::{AssistContext, AssistId, Assists};
 
 // Assist: replace_named_generic_with_impl
 //
@@ -70,7 +70,7 @@ pub(crate) fn replace_named_generic_with_impl(
     let target = type_param.syntax().text_range();
 
     acc.add(
-        AssistId("replace_named_generic_with_impl", AssistKind::RefactorRewrite),
+        AssistId::refactor_rewrite("replace_named_generic_with_impl"),
         "Replace named generic with impl trait",
         target,
         |edit| {
@@ -157,7 +157,7 @@ fn find_usages(
     sema: &Semantics<'_, RootDatabase>,
     fn_: &ast::Fn,
     type_param_def: Definition,
-    file_id: FileId,
+    file_id: EditionedFileId,
 ) -> UsageSearchResult {
     let file_range = FileRange { file_id, range: fn_.syntax().text_range() };
     type_param_def.usages(sema).in_scope(&SearchScope::file_range(file_range)).all()

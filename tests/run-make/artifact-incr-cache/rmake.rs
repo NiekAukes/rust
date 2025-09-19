@@ -1,3 +1,5 @@
+//@ needs-target-std
+//
 // rustc should be able to emit required files (asm, llvm-*, etc) during incremental
 // compilation on the first pass by running the code gen as well as on subsequent runs -
 // extracting them from the cache
@@ -7,17 +9,15 @@
 // Also see discussion at
 // <https://internals.rust-lang.org/t/interaction-between-incremental-compilation-and-emit/20551>
 
-use run_make_support::{rustc, tmp_dir};
+use run_make_support::rustc;
 
 fn main() {
-    let inc_dir = tmp_dir();
-
     for _ in 0..=1 {
         rustc()
             .input("lib.rs")
             .crate_type("lib")
             .emit("obj,asm,dep-info,link,mir,llvm-ir,llvm-bc")
-            .incremental(&inc_dir)
+            .incremental("incremental")
             .run();
     }
 }

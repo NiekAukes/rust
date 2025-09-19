@@ -5,12 +5,16 @@
 //!
 //! It also checks that some targets have the correct set cfgs.
 
-use std::collections::HashSet;
-use std::ffi::OsString;
-use std::io::BufRead;
-use std::iter::FromIterator;
+// ignore-tidy-linelength
+//@ needs-llvm-components: arm x86
+// Note: without the needs-llvm-components it will fail on LLVM built without the required
+// components listed above.
 
-use run_make_support::{rustc, tmp_dir};
+use std::collections::HashSet;
+use std::iter::FromIterator;
+use std::path::PathBuf;
+
+use run_make_support::{rfs, rustc};
 
 struct PrintCfg {
     target: &'static str,
@@ -83,21 +87,18 @@ fn check(PrintCfg { target, includes, disallow }: PrintCfg) {
     // --print=cfg
     {
         let output = rustc().target(target).print("cfg").run();
-
-        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stdout = output.stdout_utf8();
 
         check_(&stdout, includes, disallow);
     }
 
     // --print=cfg=PATH
     {
-        let tmp_path = tmp_dir().join(format!("{target}.cfg"));
-        let mut print_arg = OsString::from("--print=cfg=");
-        print_arg.push(tmp_path.as_os_str());
+        let tmp_path = PathBuf::from(format!("{target}.cfg"));
 
-        let output = rustc().target(target).arg(print_arg).run();
+        rustc().target(target).print(&format!("cfg={}", tmp_path.display())).run();
 
-        let output = std::fs::read_to_string(&tmp_path).unwrap();
+        let output = rfs::read_to_string(&tmp_path);
 
         check_(&output, includes, disallow);
     }

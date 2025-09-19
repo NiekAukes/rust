@@ -4,7 +4,7 @@
 use hir::Semantics;
 use ide_assists::utils::test_related_attribute_syn;
 use ide_db::RootDatabase;
-use syntax::{ast, ast::HasName, AstNode, SyntaxNode, TextRange};
+use syntax::{AstNode, SyntaxNode, TextRange, ast, ast::HasName};
 
 use crate::FileId;
 
@@ -13,7 +13,7 @@ pub(super) fn find_all_methods(
     file_id: FileId,
 ) -> Vec<(TextRange, Option<TextRange>)> {
     let sema = Semantics::new(db);
-    let source_file = sema.parse(file_id);
+    let source_file = sema.parse_guess_edition(file_id);
     source_file.syntax().descendants().filter_map(method_range).collect()
 }
 
@@ -34,8 +34,8 @@ fn method_range(item: SyntaxNode) -> Option<(TextRange, Option<TextRange>)> {
 mod tests {
     use syntax::TextRange;
 
-    use crate::fixture;
     use crate::TextSize;
+    use crate::fixture;
     use std::ops::RangeInclusive;
 
     #[test]

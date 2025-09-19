@@ -1,4 +1,4 @@
-//@ compile-flags: -Znext-solver
+//@ compile-flags: -Znext-solver --diagnostic-width=300
 //@ edition: 2021
 //@ revisions: pass fail
 //@[pass] check-pass
@@ -19,8 +19,6 @@ fn main() {
         #[coroutine]
         || {
             //[fail]~^ ERROR Coroutine<A>` is not satisfied
-            //[fail]~| ERROR as Coroutine<A>>::Yield == B`
-            //[fail]~| ERROR as Coroutine<A>>::Return == C`
             yield ();
         },
     );

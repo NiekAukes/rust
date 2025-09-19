@@ -3,29 +3,39 @@
 
 use std::{
     fmt,
+    ops::Div as _,
+    panic::AssertUnwindSafe,
     time::{Duration, Instant},
 };
 
-use always_assert::always;
-use crossbeam_channel::{select, Receiver};
-use ide_db::base_db::{SourceDatabase, SourceDatabaseExt, VfsPath};
+use crossbeam_channel::{Receiver, never, select};
+use ide_db::base_db::{SourceDatabase, VfsPath, salsa::Database as _};
 use lsp_server::{Connection, Notification, Request};
-use lsp_types::{notification::Notification as _, TextDocumentIdentifier};
+use lsp_types::{TextDocumentIdentifier, notification::Notification as _};
 use stdx::thread::ThreadIntent;
-use vfs::FileId;
+use tracing::{Level, error, span};
+use vfs::{AbsPathBuf, FileId, loader::LoadingProgress};
 
 use crate::{
     config::Config,
-    diagnostics::fetch_native_diagnostics,
-    dispatch::{NotificationDispatcher, RequestDispatcher},
-    global_state::{file_id_to_url, url_to_file_id, GlobalState},
-    hack_recover_crate_name,
+    diagnostics::{DiagnosticsGeneration, NativeDiagnosticsFetchKind, fetch_native_diagnostics},
+    discover::{DiscoverArgument, DiscoverCommand, DiscoverProjectMessage},
+    flycheck::{self, FlycheckMessage},
+    global_state::{
+        FetchBuildDataResponse, FetchWorkspaceRequest, FetchWorkspaceResponse, GlobalState,
+        file_id_to_url, url_to_file_id,
+    },
+    handlers::{
+        dispatch::{NotificationDispatcher, RequestDispatcher},
+        request::empty_diagnostic_report,
+    },
     lsp::{
         from_proto, to_proto,
-        utils::{notification_is, Progress},
+        utils::{Progress, notification_is},
     },
     lsp_ext,
     reload::{BuildDataProgress, ProcMacroProgress, ProjectWorkspaceProgress},
+    test_runner::{CargoTestMessage, CargoTestOutput, TestState},
 };
 
 pub fn main_loop(config: Config, connection: Connection) -> anyhow::Result<()> {
@@ -44,7 +54,7 @@ pub fn main_loop(config: Config, connection: Connection) -> anyhow::Result<()> {
     // https://github.com/rust-lang/rust-analyzer/issues/2835
     #[cfg(windows)]
     unsafe {
-        use winapi::um::processthreadsapi::*;
+        use windows_sys::Win32::System::Threading::*;
         let thread = GetCurrentThread();
         let thread_priority_above_normal = 1;
         SetThreadPriority(thread, thread_priority_above_normal);
@@ -58,8 +68,10 @@ enum Event {
     Task(Task),
     QueuedTask(QueuedTask),
     Vfs(vfs::loader::Message),
-    Flycheck(flycheck::Message),
-    TestResult(flycheck::CargoTestMessage),
+    Flycheck(FlycheckMessage),
+    TestResult(CargoTestMessage),
+    DiscoverProject(DiscoverProjectMessage),
+    FetchWorkspaces(FetchWorkspaceRequest),
 }
 
 impl fmt::Display for Event {
@@ -71,6 +83,8 @@ impl fmt::Display for Event {
             Event::Flycheck(_) => write!(f, "Event::Flycheck"),
             Event::QueuedTask(_) => write!(f, "Event::QueuedTask"),
             Event::TestResult(_) => write!(f, "Event::TestResult"),
+            Event::DiscoverProject(_) => write!(f, "Event::DiscoverProject"),
+            Event::FetchWorkspaces(_) => write!(f, "Event::SwitchWorkspaces"),
         }
     }
 }
@@ -82,17 +96,30 @@ pub(crate) enum QueuedTask {
 }
 
 #[derive(Debug)]
+pub(crate) enum DiagnosticsTaskKind {
+    Syntax(DiagnosticsGeneration, Vec<(FileId, Vec<lsp_types::Diagnostic>)>),
+    Semantic(DiagnosticsGeneration, Vec<(FileId, Vec<lsp_types::Diagnostic>)>),
+}
+
+#[derive(Debug)]
 pub(crate) enum Task {
     Response(lsp_server::Response),
-    ClientNotification(lsp_ext::UnindexedProjectParams),
+    DiscoverLinkedProjects(DiscoverProjectParam),
     Retry(lsp_server::Request),
-    Diagnostics(Vec<(FileId, Vec<lsp_types::Diagnostic>)>),
+    Diagnostics(DiagnosticsTaskKind),
     DiscoverTest(lsp_ext::DiscoverTestResults),
     PrimeCaches(PrimeCachesProgress),
     FetchWorkspace(ProjectWorkspaceProgress),
     FetchBuildData(BuildDataProgress),
     LoadProcMacros(ProcMacroProgress),
+    // FIXME: Remove this in favor of a more general QueuedTask, see `handle_did_save_text_document`
     BuildDepsHaveChanged,
+}
+
+#[derive(Debug)]
+pub(crate) enum DiscoverProjectParam {
+    Buildfile(AbsPathBuf),
+    Path(AbsPathBuf),
 }
 
 #[derive(Debug)]
@@ -125,6 +152,7 @@ impl fmt::Debug for Event {
             }
             _ => (),
         }
+
         match self {
             Event::Lsp(it) => fmt::Debug::fmt(it, f),
             Event::Task(it) => fmt::Debug::fmt(it, f),
@@ -132,6 +160,8 @@ impl fmt::Debug for Event {
             Event::Vfs(it) => fmt::Debug::fmt(it, f),
             Event::Flycheck(it) => fmt::Debug::fmt(it, f),
             Event::TestResult(it) => fmt::Debug::fmt(it, f),
+            Event::DiscoverProject(it) => fmt::Debug::fmt(it, f),
+            Event::FetchWorkspaces(it) => fmt::Debug::fmt(it, f),
         }
     }
 }
@@ -141,17 +171,32 @@ impl GlobalState {
         self.update_status_or_notify();
 
         if self.config.did_save_text_document_dynamic_registration() {
-            self.register_did_save_capability();
+            let additional_patterns = self
+                .config
+                .discover_workspace_config()
+                .map(|cfg| cfg.files_to_watch.clone().into_iter())
+                .into_iter()
+                .flatten()
+                .map(|f| format!("**/{f}"));
+            self.register_did_save_capability(additional_patterns);
         }
 
-        self.fetch_workspaces_queue.request_op("startup".to_owned(), false);
-        if let Some((cause, force_crate_graph_reload)) =
-            self.fetch_workspaces_queue.should_start_op()
-        {
-            self.fetch_workspaces(cause, force_crate_graph_reload);
+        if self.config.discover_workspace_config().is_none() {
+            self.fetch_workspaces_queue.request_op(
+                "startup".to_owned(),
+                FetchWorkspaceRequest { path: None, force_crate_graph_reload: false },
+            );
+            if let Some((cause, FetchWorkspaceRequest { path, force_crate_graph_reload })) =
+                self.fetch_workspaces_queue.should_start_op()
+            {
+                self.fetch_workspaces(cause, path, force_crate_graph_reload);
+            }
         }
 
-        while let Some(event) = self.next_event(&inbox) {
+        while let Ok(event) = self.next_event(&inbox) {
+            let Some(event) = event else {
+                anyhow::bail!("client exited without proper shutdown sequence");
+            };
             if matches!(
                 &event,
                 Event::Lsp(lsp_server::Message::Notification(Notification { method, .. }))
@@ -159,33 +204,42 @@ impl GlobalState {
             ) {
                 return Ok(());
             }
-            self.handle_event(event)?;
+            self.handle_event(event);
         }
 
-        anyhow::bail!("client exited without proper shutdown sequence")
+        Err(anyhow::anyhow!("A receiver has been dropped, something panicked!"))
     }
 
-    fn register_did_save_capability(&mut self) {
+    fn register_did_save_capability(&mut self, additional_patterns: impl Iterator<Item = String>) {
+        let additional_filters = additional_patterns.map(|pattern| lsp_types::DocumentFilter {
+            language: None,
+            scheme: None,
+            pattern: (Some(pattern)),
+        });
+
+        let mut selectors = vec![
+            lsp_types::DocumentFilter {
+                language: None,
+                scheme: None,
+                pattern: Some("**/*.rs".into()),
+            },
+            lsp_types::DocumentFilter {
+                language: None,
+                scheme: None,
+                pattern: Some("**/Cargo.toml".into()),
+            },
+            lsp_types::DocumentFilter {
+                language: None,
+                scheme: None,
+                pattern: Some("**/Cargo.lock".into()),
+            },
+        ];
+        selectors.extend(additional_filters);
+
         let save_registration_options = lsp_types::TextDocumentSaveRegistrationOptions {
             include_text: Some(false),
             text_document_registration_options: lsp_types::TextDocumentRegistrationOptions {
-                document_selector: Some(vec![
-                    lsp_types::DocumentFilter {
-                        language: None,
-                        scheme: None,
-                        pattern: Some("**/*.rs".into()),
-                    },
-                    lsp_types::DocumentFilter {
-                        language: None,
-                        scheme: None,
-                        pattern: Some("**/Cargo.toml".into()),
-                    },
-                    lsp_types::DocumentFilter {
-                        language: None,
-                        scheme: None,
-                        pattern: Some("**/Cargo.lock".into()),
-                    },
-                ]),
+                document_selector: Some(selectors),
             },
         };
 
@@ -200,37 +254,50 @@ impl GlobalState {
         );
     }
 
-    fn next_event(&self, inbox: &Receiver<lsp_server::Message>) -> Option<Event> {
+    fn next_event(
+        &mut self,
+        inbox: &Receiver<lsp_server::Message>,
+    ) -> Result<Option<Event>, crossbeam_channel::RecvError> {
+        // Make sure we reply to formatting requests ASAP so the editor doesn't block
+        if let Ok(task) = self.fmt_pool.receiver.try_recv() {
+            return Ok(Some(Event::Task(task)));
+        }
+
         select! {
             recv(inbox) -> msg =>
-                msg.ok().map(Event::Lsp),
+                return Ok(msg.ok().map(Event::Lsp)),
 
             recv(self.task_pool.receiver) -> task =>
-                Some(Event::Task(task.unwrap())),
+                task.map(Event::Task),
 
             recv(self.deferred_task_queue.receiver) -> task =>
-                Some(Event::QueuedTask(task.unwrap())),
+                task.map(Event::QueuedTask),
 
             recv(self.fmt_pool.receiver) -> task =>
-                Some(Event::Task(task.unwrap())),
+                task.map(Event::Task),
 
             recv(self.loader.receiver) -> task =>
-                Some(Event::Vfs(task.unwrap())),
+                task.map(Event::Vfs),
 
             recv(self.flycheck_receiver) -> task =>
-                Some(Event::Flycheck(task.unwrap())),
+                task.map(Event::Flycheck),
 
             recv(self.test_run_receiver) -> task =>
-                Some(Event::TestResult(task.unwrap())),
+                task.map(Event::TestResult),
 
+            recv(self.discover_receiver) -> task =>
+                task.map(Event::DiscoverProject),
+
+            recv(self.fetch_ws_receiver.as_ref().map_or(&never(), |(chan, _)| chan)) -> _instant => {
+                Ok(Event::FetchWorkspaces(self.fetch_ws_receiver.take().unwrap().1))
+            },
         }
+        .map(Some)
     }
 
-    fn handle_event(&mut self, event: Event) -> anyhow::Result<()> {
+    fn handle_event(&mut self, event: Event) {
         let loop_start = Instant::now();
-        // NOTE: don't count blocking select! call as a loop-turn time
-        let _p = tracing::span!(tracing::Level::INFO, "GlobalState::handle_event", event = %event)
-            .entered();
+        let _p = tracing::info_span!("GlobalState::handle_event", event = %event).entered();
 
         let event_dbg_msg = format!("{event:?}");
         tracing::debug!(?loop_start, ?event, "handle_event");
@@ -245,13 +312,11 @@ impl GlobalState {
         match event {
             Event::Lsp(msg) => match msg {
                 lsp_server::Message::Request(req) => self.on_new_request(loop_start, req),
-                lsp_server::Message::Notification(not) => self.on_notification(not)?,
+                lsp_server::Message::Notification(not) => self.on_notification(not),
                 lsp_server::Message::Response(resp) => self.complete_request(resp),
             },
             Event::QueuedTask(task) => {
-                let _p =
-                    tracing::span!(tracing::Level::INFO, "GlobalState::handle_event/queued_task")
-                        .entered();
+                let _p = tracing::info_span!("GlobalState::handle_event/queued_task").entered();
                 self.handle_queued_task(task);
                 // Coalesce multiple task events into one loop turn
                 while let Ok(task) = self.deferred_task_queue.receiver.try_recv() {
@@ -259,8 +324,7 @@ impl GlobalState {
                 }
             }
             Event::Task(task) => {
-                let _p = tracing::span!(tracing::Level::INFO, "GlobalState::handle_event/task")
-                    .entered();
+                let _p = tracing::info_span!("GlobalState::handle_event/task").entered();
                 let mut prime_caches_progress = Vec::new();
 
                 self.handle_task(&mut prime_caches_progress, task);
@@ -270,26 +334,30 @@ impl GlobalState {
                 }
 
                 for progress in prime_caches_progress {
-                    let (state, message, fraction);
+                    let (state, message, fraction, title);
                     match progress {
                         PrimeCachesProgress::Begin => {
                             state = Progress::Begin;
                             message = None;
                             fraction = 0.0;
+                            title = "Indexing";
                         }
                         PrimeCachesProgress::Report(report) => {
                             state = Progress::Report;
+                            title = report.work_type;
 
-                            message = match &report.crates_currently_indexing[..] {
+                            message = match &*report.crates_currently_indexing {
                                 [crate_name] => Some(format!(
-                                    "{}/{} ({crate_name})",
-                                    report.crates_done, report.crates_total
+                                    "{}/{} ({})",
+                                    report.crates_done,
+                                    report.crates_total,
+                                    crate_name.as_str(),
                                 )),
                                 [crate_name, rest @ ..] => Some(format!(
                                     "{}/{} ({} + {} more)",
                                     report.crates_done,
                                     report.crates_total,
-                                    crate_name,
+                                    crate_name.as_str(),
                                     rest.len()
                                 )),
                                 _ => None,
@@ -301,7 +369,9 @@ impl GlobalState {
                             state = Progress::End;
                             message = None;
                             fraction = 1.0;
+                            title = "Indexing";
 
+                            self.analysis_host.raw_database_mut().trigger_lru_eviction();
                             self.prime_caches_queue.op_completed(());
                             if cancelled {
                                 self.prime_caches_queue
@@ -310,12 +380,17 @@ impl GlobalState {
                         }
                     };
 
-                    self.report_progress("Indexing", state, message, Some(fraction), None);
+                    self.report_progress(
+                        title,
+                        state,
+                        message,
+                        Some(fraction),
+                        Some("rustAnalyzer/cachePriming".to_owned()),
+                    );
                 }
             }
             Event::Vfs(message) => {
-                let _p =
-                    tracing::span!(tracing::Level::INFO, "GlobalState::handle_event/vfs").entered();
+                let _p = tracing::info_span!("GlobalState::handle_event/vfs").entered();
                 self.handle_vfs_msg(message);
                 // Coalesce many VFS event into a single loop turn
                 while let Ok(message) = self.loader.receiver.try_recv() {
@@ -323,8 +398,7 @@ impl GlobalState {
                 }
             }
             Event::Flycheck(message) => {
-                let _p = tracing::span!(tracing::Level::INFO, "GlobalState::handle_event/flycheck")
-                    .entered();
+                let _p = tracing::info_span!("GlobalState::handle_event/flycheck").entered();
                 self.handle_flycheck_msg(message);
                 // Coalesce many flycheck updates into a single loop turn
                 while let Ok(message) = self.flycheck_receiver.try_recv() {
@@ -332,25 +406,41 @@ impl GlobalState {
                 }
             }
             Event::TestResult(message) => {
-                let _p =
-                    tracing::span!(tracing::Level::INFO, "GlobalState::handle_event/test_result")
-                        .entered();
+                let _p = tracing::info_span!("GlobalState::handle_event/test_result").entered();
                 self.handle_cargo_test_msg(message);
                 // Coalesce many test result event into a single loop turn
                 while let Ok(message) = self.test_run_receiver.try_recv() {
                     self.handle_cargo_test_msg(message);
                 }
             }
+            Event::DiscoverProject(message) => {
+                self.handle_discover_msg(message);
+                // Coalesce many project discovery events into a single loop turn.
+                while let Ok(message) = self.discover_receiver.try_recv() {
+                    self.handle_discover_msg(message);
+                }
+            }
+            Event::FetchWorkspaces(req) => {
+                self.fetch_workspaces_queue.request_op("project structure change".to_owned(), req)
+            }
         }
         let event_handling_duration = loop_start.elapsed();
-
-        let state_changed = self.process_changes();
-        let memdocs_added_or_removed = self.mem_docs.take_changes();
+        let (state_changed, memdocs_added_or_removed) = if self.vfs_done {
+            if let Some(cause) = self.wants_to_switch.take() {
+                self.switch_workspaces(cause);
+            }
+            (self.process_changes(), self.mem_docs.take_changes())
+        } else {
+            (false, false)
+        };
 
         if self.is_quiescent() {
             let became_quiescent = !was_quiescent;
             if became_quiescent {
-                if self.config.check_on_save() {
+                if self.config.check_on_save(None)
+                    && self.config.flycheck_workspace(None)
+                    && !self.fetch_build_data_queue.op_requested()
+                {
                     // Project has loaded properly, kick off initial flycheck
                     self.flycheck.iter().for_each(|flycheck| flycheck.restart_workspace(None));
                 }
@@ -376,11 +466,21 @@ impl GlobalState {
                 if self.config.inlay_hints_refresh() {
                     self.send_request::<lsp_types::request::InlayHintRefreshRequest>((), |_, _| ());
                 }
+
+                if self.config.diagnostics_refresh() {
+                    self.send_request::<lsp_types::request::WorkspaceDiagnosticRefresh>(
+                        (),
+                        |_, _| (),
+                    );
+                }
             }
 
             let project_or_mem_docs_changed =
                 became_quiescent || state_changed || memdocs_added_or_removed;
-            if project_or_mem_docs_changed && self.config.publish_diagnostics() {
+            if project_or_mem_docs_changed
+                && !self.config.text_document_diagnostic()
+                && self.config.publish_diagnostics(None)
+            {
                 self.update_diagnostics();
             }
             if project_or_mem_docs_changed && self.config.test_explorer() {
@@ -391,56 +491,33 @@ impl GlobalState {
         if let Some(diagnostic_changes) = self.diagnostics.take_changes() {
             for file_id in diagnostic_changes {
                 let uri = file_id_to_url(&self.vfs.read().0, file_id);
-                let mut diagnostics =
-                    self.diagnostics.diagnostics_for(file_id).cloned().collect::<Vec<_>>();
-
-                // VSCode assumes diagnostic messages to be non-empty strings, so we need to patch
-                // empty diagnostics. Neither the docs of VSCode nor the LSP spec say whether
-                // diagnostic messages are actually allowed to be empty or not and patching this
-                // in the VSCode client does not work as the assertion happens in the protocol
-                // conversion. So this hack is here to stay, and will be considered a hack
-                // until the LSP decides to state that empty messages are allowed.
-
-                // See https://github.com/rust-lang/rust-analyzer/issues/11404
-                // See https://github.com/rust-lang/rust-analyzer/issues/13130
-                let patch_empty = |message: &mut String| {
-                    if message.is_empty() {
-                        " ".clone_into(message);
-                    }
-                };
-
-                for d in &mut diagnostics {
-                    patch_empty(&mut d.message);
-                    if let Some(dri) = &mut d.related_information {
-                        for dri in dri {
-                            patch_empty(&mut dri.message);
-                        }
-                    }
-                }
-
                 let version = from_proto::vfs_path(&uri)
-                    .map(|path| self.mem_docs.get(&path).map(|it| it.version))
-                    .unwrap_or_default();
+                    .ok()
+                    .and_then(|path| self.mem_docs.get(&path).map(|it| it.version));
 
-                self.send_notification::<lsp_types::notification::PublishDiagnostics>(
-                    lsp_types::PublishDiagnosticsParams { uri, diagnostics, version },
-                );
+                let diagnostics =
+                    self.diagnostics.diagnostics_for(file_id).cloned().collect::<Vec<_>>();
+                self.publish_diagnostics(uri, version, diagnostics);
             }
         }
 
-        if self.config.cargo_autoreload_config() {
-            if let Some((cause, force_crate_graph_reload)) =
+        if self.config.cargo_autoreload_config(None)
+            || self.config.discover_workspace_config().is_some()
+        {
+            if let Some((cause, FetchWorkspaceRequest { path, force_crate_graph_reload })) =
                 self.fetch_workspaces_queue.should_start_op()
             {
-                self.fetch_workspaces(cause, force_crate_graph_reload);
+                self.fetch_workspaces(cause, path, force_crate_graph_reload);
             }
         }
 
         if !self.fetch_workspaces_queue.op_in_progress() {
             if let Some((cause, ())) = self.fetch_build_data_queue.should_start_op() {
                 self.fetch_build_data(cause);
-            } else if let Some((cause, paths)) = self.fetch_proc_macros_queue.should_start_op() {
-                self.fetch_proc_macros(cause, paths);
+            } else if let Some((cause, (change, paths))) =
+                self.fetch_proc_macros_queue.should_start_op()
+            {
+                self.fetch_proc_macros(cause, change, paths);
             }
         }
 
@@ -452,12 +529,13 @@ impl GlobalState {
 
         let loop_duration = loop_start.elapsed();
         if loop_duration > Duration::from_millis(100) && was_quiescent {
-            tracing::warn!("overly long loop turn took {loop_duration:?} (event handling took {event_handling_duration:?}): {event_dbg_msg}");
+            tracing::warn!(
+                "overly long loop turn took {loop_duration:?} (event handling took {event_handling_duration:?}): {event_dbg_msg}"
+            );
             self.poke_rust_analyzer_developer(format!(
                 "overly long loop turn took {loop_duration:?} (event handling took {event_handling_duration:?}): {event_dbg_msg}"
             ));
         }
-        Ok(())
     }
 
     fn prime_caches(&mut self, cause: String) {
@@ -465,7 +543,7 @@ impl GlobalState {
         let num_worker_threads = self.config.prime_caches_num_threads();
 
         self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, {
-            let analysis = self.snapshot().analysis;
+            let analysis = AssertUnwindSafe(self.snapshot().analysis);
             move |sender| {
                 sender.send(Task::PrimeCaches(PrimeCachesProgress::Begin)).unwrap();
                 let res = analysis.parallel_prime_caches(num_worker_threads, |progress| {
@@ -481,41 +559,107 @@ impl GlobalState {
 
     fn update_diagnostics(&mut self) {
         let db = self.analysis_host.raw_database();
+        let generation = self.diagnostics.next_generation();
         let subscriptions = {
             let vfs = &self.vfs.read().0;
             self.mem_docs
                 .iter()
                 .map(|path| vfs.file_id(path).unwrap())
+                .filter_map(|(file_id, excluded)| {
+                    (excluded == vfs::FileExcluded::No).then_some(file_id)
+                })
                 .filter(|&file_id| {
-                    let source_root = db.file_source_root(file_id);
+                    let source_root_id = db.file_source_root(file_id).source_root_id(db);
+                    let source_root = db.source_root(source_root_id).source_root(db);
                     // Only publish diagnostics for files in the workspace, not from crates.io deps
                     // or the sysroot.
                     // While theoretically these should never have errors, we have quite a few false
                     // positives particularly in the stdlib, and those diagnostics would stay around
                     // forever if we emitted them here.
-                    !db.source_root(source_root).is_library
+                    !source_root.is_library
                 })
-                .collect::<Vec<_>>()
+                .collect::<std::sync::Arc<_>>()
         };
         tracing::trace!("updating notifications for {:?}", subscriptions);
+        // Split up the work on multiple threads, but we don't wanna fill the entire task pool with
+        // diagnostic tasks, so we limit the number of tasks to a quarter of the total thread pool.
+        let max_tasks = self.config.main_loop_num_threads().div(4).max(1);
+        let chunk_length = subscriptions.len() / max_tasks;
+        let remainder = subscriptions.len() % max_tasks;
 
-        // Diagnostics are triggered by the user typing
-        // so we run them on a latency sensitive thread.
-        self.task_pool.handle.spawn(ThreadIntent::LatencySensitive, {
+        let mut start = 0;
+        for task_idx in 0..max_tasks {
+            let extra = if task_idx < remainder { 1 } else { 0 };
+            let end = start + chunk_length + extra;
+            let slice = start..end;
+            if slice.is_empty() {
+                break;
+            }
+            // Diagnostics are triggered by the user typing
+            // so we run them on a latency sensitive thread.
             let snapshot = self.snapshot();
-            move || Task::Diagnostics(fetch_native_diagnostics(snapshot, subscriptions))
-        });
+            self.task_pool.handle.spawn_with_sender(ThreadIntent::LatencySensitive, {
+                let subscriptions = subscriptions.clone();
+                // Do not fetch semantic diagnostics (and populate query results) if we haven't even
+                // loaded the initial workspace yet.
+                let fetch_semantic =
+                    self.vfs_done && self.fetch_workspaces_queue.last_op_result().is_some();
+                move |sender| {
+                    // We aren't observing the semantics token cache here
+                    let snapshot = AssertUnwindSafe(&snapshot);
+                    let Ok(diags) = std::panic::catch_unwind(|| {
+                        fetch_native_diagnostics(
+                            &snapshot,
+                            subscriptions.clone(),
+                            slice.clone(),
+                            NativeDiagnosticsFetchKind::Syntax,
+                        )
+                    }) else {
+                        return;
+                    };
+                    sender
+                        .send(Task::Diagnostics(DiagnosticsTaskKind::Syntax(generation, diags)))
+                        .unwrap();
+
+                    if fetch_semantic {
+                        let Ok(diags) = std::panic::catch_unwind(|| {
+                            fetch_native_diagnostics(
+                                &snapshot,
+                                subscriptions.clone(),
+                                slice.clone(),
+                                NativeDiagnosticsFetchKind::Semantic,
+                            )
+                        }) else {
+                            return;
+                        };
+                        sender
+                            .send(Task::Diagnostics(DiagnosticsTaskKind::Semantic(
+                                generation, diags,
+                            )))
+                            .unwrap();
+                    }
+                }
+            });
+            start = end;
+        }
     }
 
     fn update_tests(&mut self) {
+        if !self.vfs_done {
+            return;
+        }
         let db = self.analysis_host.raw_database();
         let subscriptions = self
             .mem_docs
             .iter()
             .map(|path| self.vfs.read().0.file_id(path).unwrap())
+            .filter_map(|(file_id, excluded)| {
+                (excluded == vfs::FileExcluded::No).then_some(file_id)
+            })
             .filter(|&file_id| {
-                let source_root = db.file_source_root(file_id);
-                !db.source_root(source_root).is_library
+                let source_root_id = db.file_source_root(file_id).source_root_id(db);
+                let source_root = db.source_root(source_root_id).source_root(db);
+                !source_root.is_library
             })
             .collect::<Vec<_>>();
         tracing::trace!("updating tests for {:?}", subscriptions);
@@ -531,9 +675,7 @@ impl GlobalState {
                     .filter_map(|f| snapshot.analysis.discover_tests_in_file(f).ok())
                     .flatten()
                     .collect::<Vec<_>>();
-                for t in &tests {
-                    hack_recover_crate_name::insert_name(t.id.clone());
-                }
+
                 Task::DiscoverTest(lsp_ext::DiscoverTestResults {
                     tests: tests
                         .into_iter()
@@ -556,8 +698,8 @@ impl GlobalState {
 
     fn update_status_or_notify(&mut self) {
         let status = self.current_status();
-        if self.last_reported_status.as_ref() != Some(&status) {
-            self.last_reported_status = Some(status.clone());
+        if self.last_reported_status != status {
+            self.last_reported_status = status.clone();
 
             if self.config.server_status_notification() {
                 self.send_notification::<lsp_ext::ServerStatusNotification>(status);
@@ -585,16 +727,11 @@ impl GlobalState {
     fn handle_task(&mut self, prime_caches_progress: &mut Vec<PrimeCachesProgress>, task: Task) {
         match task {
             Task::Response(response) => self.respond(response),
-            Task::ClientNotification(params) => {
-                self.send_notification::<lsp_ext::UnindexedProject>(params)
-            }
             // Only retry requests that haven't been cancelled. Otherwise we do unnecessary work.
             Task::Retry(req) if !self.is_completed(&req) => self.on_request(req),
             Task::Retry(_) => (),
-            Task::Diagnostics(diagnostics_per_file) => {
-                for (file_id, diagnostics) in diagnostics_per_file {
-                    self.diagnostics.set_native_diagnostics(file_id, diagnostics)
-                }
+            Task::Diagnostics(kind) => {
+                self.diagnostics.set_native_diagnostics(kind);
             }
             Task::PrimeCaches(progress) => match progress {
                 PrimeCachesProgress::Begin => prime_caches_progress.push(progress),
@@ -613,31 +750,60 @@ impl GlobalState {
                 let (state, msg) = match progress {
                     ProjectWorkspaceProgress::Begin => (Progress::Begin, None),
                     ProjectWorkspaceProgress::Report(msg) => (Progress::Report, Some(msg)),
-                    ProjectWorkspaceProgress::End(workspaces, force_reload_crate_graph) => {
-                        self.fetch_workspaces_queue
-                            .op_completed(Some((workspaces, force_reload_crate_graph)));
+                    ProjectWorkspaceProgress::End(workspaces, force_crate_graph_reload) => {
+                        let resp = FetchWorkspaceResponse { workspaces, force_crate_graph_reload };
+                        self.fetch_workspaces_queue.op_completed(resp);
                         if let Err(e) = self.fetch_workspace_error() {
-                            tracing::error!("FetchWorkspaceError:\n{e}");
+                            error!("FetchWorkspaceError: {e}");
                         }
-                        self.switch_workspaces("fetched workspace".to_owned());
+                        self.wants_to_switch = Some("fetched workspace".to_owned());
+                        self.diagnostics.clear_check_all();
                         (Progress::End, None)
                     }
                 };
 
                 self.report_progress("Fetching", state, msg, None, None);
             }
+            Task::DiscoverLinkedProjects(arg) => {
+                if let Some(cfg) = self.config.discover_workspace_config() {
+                    if !self.discover_workspace_queue.op_in_progress() {
+                        // the clone is unfortunately necessary to avoid a borrowck error when
+                        // `self.report_progress` is called later
+                        let title = &cfg.progress_label.clone();
+                        let command = cfg.command.clone();
+                        let discover = DiscoverCommand::new(self.discover_sender.clone(), command);
+
+                        self.report_progress(title, Progress::Begin, None, None, None);
+                        self.discover_workspace_queue
+                            .request_op("Discovering workspace".to_owned(), ());
+                        let _ = self.discover_workspace_queue.should_start_op();
+
+                        let arg = match arg {
+                            DiscoverProjectParam::Buildfile(it) => DiscoverArgument::Buildfile(it),
+                            DiscoverProjectParam::Path(it) => DiscoverArgument::Path(it),
+                        };
+
+                        let handle =
+                            discover.spawn(arg, &std::env::current_dir().unwrap()).unwrap();
+                        self.discover_handle = Some(handle);
+                    }
+                }
+            }
             Task::FetchBuildData(progress) => {
                 let (state, msg) = match progress {
                     BuildDataProgress::Begin => (Some(Progress::Begin), None),
                     BuildDataProgress::Report(msg) => (Some(Progress::Report), Some(msg)),
-                    BuildDataProgress::End(build_data_result) => {
-                        self.fetch_build_data_queue.op_completed(build_data_result);
+                    BuildDataProgress::End((workspaces, build_scripts)) => {
+                        let resp = FetchBuildDataResponse { workspaces, build_scripts };
+                        self.fetch_build_data_queue.op_completed(resp);
+
                         if let Err(e) = self.fetch_build_data_error() {
-                            tracing::error!("FetchBuildDataError:\n{e}");
+                            error!("FetchBuildDataError: {e}");
                         }
 
-                        self.switch_workspaces("fetched build data".to_owned());
-
+                        if self.wants_to_switch.is_none() {
+                            self.wants_to_switch = Some("fetched build data".to_owned());
+                        }
                         (Some(Progress::End), None)
                     }
                 };
@@ -650,9 +816,10 @@ impl GlobalState {
                 let (state, msg) = match progress {
                     ProcMacroProgress::Begin => (Some(Progress::Begin), None),
                     ProcMacroProgress::Report(msg) => (Some(Progress::Report), Some(msg)),
-                    ProcMacroProgress::End(proc_macro_load_result) => {
+                    ProcMacroProgress::End(change) => {
                         self.fetch_proc_macros_queue.op_completed(true);
-                        self.set_proc_macros(proc_macro_load_result);
+                        self.analysis_host.apply_change(change);
+                        self.finish_loading_crate_graph();
                         (Some(Progress::End), None)
                     }
                 };
@@ -669,9 +836,12 @@ impl GlobalState {
     }
 
     fn handle_vfs_msg(&mut self, message: vfs::loader::Message) {
+        let _p = tracing::info_span!("GlobalState::handle_vfs_msg").entered();
         let is_changed = matches!(message, vfs::loader::Message::Changed { .. });
         match message {
             vfs::loader::Message::Changed { files } | vfs::loader::Message::Loaded { files } => {
+                let _p = tracing::info_span!("GlobalState::handle_vfs_msg{changed/load}").entered();
+                self.debounce_workspace_fetch();
                 let vfs = &mut self.vfs.write().0;
                 for (path, contents) in files {
                     let path = VfsPath::from(path);
@@ -685,18 +855,24 @@ impl GlobalState {
                 }
             }
             vfs::loader::Message::Progress { n_total, n_done, dir, config_version } => {
-                always!(config_version <= self.vfs_config_version);
+                let _p = span!(Level::INFO, "GlobalState::handle_vfs_msg/progress").entered();
+                stdx::always!(config_version <= self.vfs_config_version);
 
-                let state = match n_done {
-                    None => Progress::Begin,
-                    Some(done) if done == n_total => Progress::End,
-                    Some(_) => Progress::Report,
+                let (n_done, state) = match n_done {
+                    LoadingProgress::Started => {
+                        self.vfs_span =
+                            Some(span!(Level::INFO, "vfs_load", total = n_total).entered());
+                        (0, Progress::Begin)
+                    }
+                    LoadingProgress::Progress(n_done) => (n_done.min(n_total), Progress::Report),
+                    LoadingProgress::Finished => {
+                        self.vfs_span = None;
+                        (n_total, Progress::End)
+                    }
                 };
-                let n_done = n_done.unwrap_or_default();
 
                 self.vfs_progress_config_version = config_version;
-                self.vfs_progress_n_total = n_total;
-                self.vfs_progress_n_done = n_done;
+                self.vfs_done = state == Progress::End;
 
                 let mut message = format!("{n_done}/{n_total}");
                 if let Some(dir) = dir {
@@ -726,16 +902,20 @@ impl GlobalState {
                 let snap = self.snapshot();
 
                 self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, move |sender| {
-                    let _p = tracing::span!(tracing::Level::INFO, "GlobalState::check_if_indexed")
-                        .entered();
+                    let _p = tracing::info_span!("GlobalState::check_if_indexed").entered();
                     tracing::debug!(?uri, "handling uri");
-                    let id = from_proto::file_id(&snap, &uri).expect("unable to get FileId");
+                    let Some(id) = from_proto::file_id(&snap, &uri).expect("unable to get FileId")
+                    else {
+                        return;
+                    };
                     if let Ok(crates) = &snap.analysis.crates_for(id) {
                         if crates.is_empty() {
-                            let params = lsp_ext::UnindexedProjectParams {
-                                text_documents: vec![lsp_types::TextDocumentIdentifier { uri }],
-                            };
-                            sender.send(Task::ClientNotification(params)).unwrap();
+                            if snap.config.discover_workspace_config().is_some() {
+                                let path =
+                                    from_proto::abs_path(&uri).expect("Unable to get AbsPath");
+                                let arg = DiscoverProjectParam::Path(path);
+                                sender.send(Task::DiscoverLinkedProjects(arg)).unwrap();
+                            }
                         } else {
                             tracing::debug!(?uri, "is indexed");
                         }
@@ -743,16 +923,15 @@ impl GlobalState {
                 });
             }
             QueuedTask::CheckProcMacroSources(modified_rust_files) => {
-                let crate_graph = self.analysis_host.raw_database().crate_graph();
-                let snap = self.snapshot();
+                let analysis = AssertUnwindSafe(self.snapshot().analysis);
                 self.task_pool.handle.spawn_with_sender(stdx::thread::ThreadIntent::Worker, {
                     move |sender| {
                         if modified_rust_files.into_iter().any(|file_id| {
                             // FIXME: Check whether these files could be build script related
-                            match snap.analysis.crates_for(file_id) {
-                                Ok(crates) => {
-                                    crates.iter().any(|&krate| crate_graph[krate].is_proc_macro)
-                                }
+                            match analysis.crates_for(file_id) {
+                                Ok(crates) => crates.iter().any(|&krate| {
+                                    analysis.is_proc_macro_crate(krate).is_ok_and(|it| it)
+                                }),
                                 _ => false,
                             }
                         }) {
@@ -764,58 +943,88 @@ impl GlobalState {
         }
     }
 
-    fn handle_cargo_test_msg(&mut self, message: flycheck::CargoTestMessage) {
+    fn handle_discover_msg(&mut self, message: DiscoverProjectMessage) {
+        let title = self
+            .config
+            .discover_workspace_config()
+            .map(|cfg| cfg.progress_label.clone())
+            .expect("No title could be found; this is a bug");
         match message {
-            flycheck::CargoTestMessage::Test { name, state } => {
+            DiscoverProjectMessage::Finished { project, buildfile } => {
+                self.discover_handle = None;
+                self.report_progress(&title, Progress::End, None, None, None);
+                self.discover_workspace_queue.op_completed(());
+
+                let mut config = Config::clone(&*self.config);
+                config.add_discovered_project_from_command(project, buildfile);
+                self.update_configuration(config);
+            }
+            DiscoverProjectMessage::Progress { message } => {
+                self.report_progress(&title, Progress::Report, Some(message), None, None)
+            }
+            DiscoverProjectMessage::Error { error, source } => {
+                self.discover_handle = None;
+                let message = format!("Project discovery failed: {error}");
+                self.discover_workspace_queue.op_completed(());
+                self.show_and_log_error(message.clone(), source);
+                self.report_progress(&title, Progress::End, Some(message), None, None)
+            }
+        }
+    }
+
+    fn handle_cargo_test_msg(&mut self, message: CargoTestMessage) {
+        match message.output {
+            CargoTestOutput::Test { name, state } => {
                 let state = match state {
-                    flycheck::TestState::Started => lsp_ext::TestState::Started,
-                    flycheck::TestState::Ignored => lsp_ext::TestState::Skipped,
-                    flycheck::TestState::Ok => lsp_ext::TestState::Passed,
-                    flycheck::TestState::Failed { stdout } => {
-                        lsp_ext::TestState::Failed { message: stdout }
-                    }
+                    TestState::Started => lsp_ext::TestState::Started,
+                    TestState::Ignored => lsp_ext::TestState::Skipped,
+                    TestState::Ok => lsp_ext::TestState::Passed,
+                    TestState::Failed { stdout } => lsp_ext::TestState::Failed { message: stdout },
                 };
-                let Some(test_id) = hack_recover_crate_name::lookup_name(name) else {
-                    return;
-                };
+
+                // The notification requires the namespace form (with underscores) of the target
+                let test_id = format!("{}::{name}", message.target.target.replace('-', "_"));
+
                 self.send_notification::<lsp_ext::ChangeTestState>(
                     lsp_ext::ChangeTestStateParams { test_id, state },
                 );
             }
-            flycheck::CargoTestMessage::Suite => (),
-            flycheck::CargoTestMessage::Finished => {
+            CargoTestOutput::Suite => (),
+            CargoTestOutput::Finished => {
                 self.test_run_remaining_jobs = self.test_run_remaining_jobs.saturating_sub(1);
                 if self.test_run_remaining_jobs == 0 {
                     self.send_notification::<lsp_ext::EndRunTest>(());
                     self.test_run_session = None;
                 }
             }
-            flycheck::CargoTestMessage::Custom { text } => {
+            CargoTestOutput::Custom { text } => {
                 self.send_notification::<lsp_ext::AppendOutputToRunTest>(text);
             }
         }
     }
 
-    fn handle_flycheck_msg(&mut self, message: flycheck::Message) {
+    fn handle_flycheck_msg(&mut self, message: FlycheckMessage) {
         match message {
-            flycheck::Message::AddDiagnostic { id, workspace_root, diagnostic } => {
+            FlycheckMessage::AddDiagnostic { id, workspace_root, diagnostic, package_id } => {
                 let snap = self.snapshot();
                 let diagnostics = crate::diagnostics::to_proto::map_rust_diagnostic_to_lsp(
-                    &self.config.diagnostics_map(),
+                    &self.config.diagnostics_map(None),
                     &diagnostic,
                     &workspace_root,
                     &snap,
                 );
                 for diag in diagnostics {
                     match url_to_file_id(&self.vfs.read().0, &diag.url) {
-                        Ok(file_id) => self.diagnostics.add_check_diagnostic(
+                        Ok(Some(file_id)) => self.diagnostics.add_check_diagnostic(
                             id,
+                            &package_id,
                             file_id,
                             diag.diagnostic,
                             diag.fix,
                         ),
+                        Ok(None) => {}
                         Err(err) => {
-                            tracing::error!(
+                            error!(
                                 "flycheck {id}: File with cargo diagnostic not found in VFS: {}",
                                 err
                             );
@@ -823,13 +1032,15 @@ impl GlobalState {
                     };
                 }
             }
-
-            flycheck::Message::Progress { id, progress } => {
+            FlycheckMessage::ClearDiagnostics { id, package_id: None } => {
+                self.diagnostics.clear_check(id)
+            }
+            FlycheckMessage::ClearDiagnostics { id, package_id: Some(package_id) } => {
+                self.diagnostics.clear_check_for_package(id, package_id)
+            }
+            FlycheckMessage::Progress { id, progress } => {
                 let (state, message) = match progress {
-                    flycheck::Progress::DidStart => {
-                        self.diagnostics.clear_check(id);
-                        (Progress::Begin, None)
-                    }
+                    flycheck::Progress::DidStart => (Progress::Begin, None),
                     flycheck::Progress::DidCheckCrate(target) => (Progress::Report, Some(target)),
                     flycheck::Progress::DidCancel => {
                         self.last_flycheck_error = None;
@@ -850,9 +1061,9 @@ impl GlobalState {
                 // When we're running multiple flychecks, we have to include a disambiguator in
                 // the title, or the editor complains. Note that this is a user-facing string.
                 let title = if self.flycheck.len() == 1 {
-                    format!("{}", self.config.flycheck())
+                    format!("{}", self.config.flycheck(None))
                 } else {
-                    format!("{} (#{})", self.config.flycheck(), id + 1)
+                    format!("{} (#{})", self.config.flycheck(None), id + 1)
                 };
                 self.report_progress(
                     &title,
@@ -867,6 +1078,8 @@ impl GlobalState {
 
     /// Registers and handles a request. This should only be called once per incoming request.
     fn on_new_request(&mut self, request_received: Instant, req: Request) {
+        let _p =
+            span!(Level::INFO, "GlobalState::on_new_request", req.method = ?req.method).entered();
         self.register_request(&req, request_received);
         self.on_request(req);
     }
@@ -894,13 +1107,16 @@ impl GlobalState {
         use crate::handlers::request as handlers;
         use lsp_types::request as lsp_request;
 
+        const RETRY: bool = true;
+        const NO_RETRY: bool = false;
+
+        #[rustfmt::skip]
         dispatcher
             // Request handlers that must run on the main thread
             // because they mutate GlobalState:
             .on_sync_mut::<lsp_ext::ReloadWorkspace>(handlers::handle_workspace_reload)
             .on_sync_mut::<lsp_ext::RebuildProcMacros>(handlers::handle_proc_macros_rebuild)
             .on_sync_mut::<lsp_ext::MemoryUsage>(handlers::handle_memory_usage)
-            .on_sync_mut::<lsp_ext::ShuffleCrateGraph>(handlers::handle_shuffle_crate_graph)
             .on_sync_mut::<lsp_ext::RunTest>(handlers::handle_run_test)
             // Request handlers which are related to the user typing
             // are run on the main thread to reduce latency:
@@ -919,95 +1135,98 @@ impl GlobalState {
             // analysis on the main thread because that would block other
             // requests. Instead, we run these request handlers on higher priority
             // threads in the threadpool.
-            .on_latency_sensitive::<lsp_request::Completion>(handlers::handle_completion)
-            .on_latency_sensitive::<lsp_request::ResolveCompletionItem>(
-                handlers::handle_completion_resolve,
-            )
-            .on_latency_sensitive::<lsp_request::SemanticTokensFullRequest>(
-                handlers::handle_semantic_tokens_full,
-            )
-            .on_latency_sensitive::<lsp_request::SemanticTokensFullDeltaRequest>(
-                handlers::handle_semantic_tokens_full_delta,
-            )
-            .on_latency_sensitive::<lsp_request::SemanticTokensRangeRequest>(
-                handlers::handle_semantic_tokens_range,
-            )
+            // FIXME: Retrying can make the result of this stale?
+            .on_latency_sensitive::<RETRY, lsp_request::Completion>(handlers::handle_completion)
+            // FIXME: Retrying can make the result of this stale
+            .on_latency_sensitive::<RETRY, lsp_request::ResolveCompletionItem>(handlers::handle_completion_resolve)
+            .on_latency_sensitive::<RETRY, lsp_request::SemanticTokensFullRequest>(handlers::handle_semantic_tokens_full)
+            .on_latency_sensitive::<RETRY, lsp_request::SemanticTokensFullDeltaRequest>(handlers::handle_semantic_tokens_full_delta)
+            .on_latency_sensitive::<NO_RETRY, lsp_request::SemanticTokensRangeRequest>(handlers::handle_semantic_tokens_range)
+            // FIXME: Some of these NO_RETRY could be retries if the file they are interested didn't change.
             // All other request handlers
-            .on::<lsp_ext::FetchDependencyList>(handlers::fetch_dependency_list)
-            .on::<lsp_ext::AnalyzerStatus>(handlers::handle_analyzer_status)
-            .on::<lsp_ext::SyntaxTree>(handlers::handle_syntax_tree)
-            .on::<lsp_ext::ViewHir>(handlers::handle_view_hir)
-            .on::<lsp_ext::ViewMir>(handlers::handle_view_mir)
-            .on::<lsp_ext::InterpretFunction>(handlers::handle_interpret_function)
-            .on::<lsp_ext::ViewFileText>(handlers::handle_view_file_text)
-            .on::<lsp_ext::ViewCrateGraph>(handlers::handle_view_crate_graph)
-            .on::<lsp_ext::ViewItemTree>(handlers::handle_view_item_tree)
-            .on::<lsp_ext::DiscoverTest>(handlers::handle_discover_test)
-            .on::<lsp_ext::ExpandMacro>(handlers::handle_expand_macro)
-            .on::<lsp_ext::ParentModule>(handlers::handle_parent_module)
-            .on::<lsp_ext::Runnables>(handlers::handle_runnables)
-            .on::<lsp_ext::RelatedTests>(handlers::handle_related_tests)
-            .on::<lsp_ext::CodeActionRequest>(handlers::handle_code_action)
-            .on::<lsp_ext::CodeActionResolveRequest>(handlers::handle_code_action_resolve)
-            .on::<lsp_ext::HoverRequest>(handlers::handle_hover)
-            .on::<lsp_ext::ExternalDocs>(handlers::handle_open_docs)
-            .on::<lsp_ext::OpenCargoToml>(handlers::handle_open_cargo_toml)
-            .on::<lsp_ext::MoveItem>(handlers::handle_move_item)
-            .on::<lsp_ext::WorkspaceSymbol>(handlers::handle_workspace_symbol)
-            .on::<lsp_request::DocumentSymbolRequest>(handlers::handle_document_symbol)
-            .on::<lsp_request::GotoDefinition>(handlers::handle_goto_definition)
-            .on::<lsp_request::GotoDeclaration>(handlers::handle_goto_declaration)
-            .on::<lsp_request::GotoImplementation>(handlers::handle_goto_implementation)
-            .on::<lsp_request::GotoTypeDefinition>(handlers::handle_goto_type_definition)
-            .on_no_retry::<lsp_request::InlayHintRequest>(handlers::handle_inlay_hints)
-            .on::<lsp_request::InlayHintResolveRequest>(handlers::handle_inlay_hints_resolve)
-            .on::<lsp_request::CodeLensRequest>(handlers::handle_code_lens)
-            .on::<lsp_request::CodeLensResolve>(handlers::handle_code_lens_resolve)
-            .on::<lsp_request::FoldingRangeRequest>(handlers::handle_folding_range)
-            .on::<lsp_request::SignatureHelpRequest>(handlers::handle_signature_help)
-            .on::<lsp_request::PrepareRenameRequest>(handlers::handle_prepare_rename)
-            .on::<lsp_request::Rename>(handlers::handle_rename)
-            .on::<lsp_request::References>(handlers::handle_references)
-            .on::<lsp_request::DocumentHighlightRequest>(handlers::handle_document_highlight)
-            .on::<lsp_request::CallHierarchyPrepare>(handlers::handle_call_hierarchy_prepare)
-            .on::<lsp_request::CallHierarchyIncomingCalls>(handlers::handle_call_hierarchy_incoming)
-            .on::<lsp_request::CallHierarchyOutgoingCalls>(handlers::handle_call_hierarchy_outgoing)
-            .on::<lsp_request::WillRenameFiles>(handlers::handle_will_rename_files)
-            .on::<lsp_ext::Ssr>(handlers::handle_ssr)
-            .on::<lsp_ext::ViewRecursiveMemoryLayout>(handlers::handle_view_recursive_memory_layout)
+            .on_with_vfs_default::<lsp_request::DocumentDiagnosticRequest>(handlers::handle_document_diagnostics, empty_diagnostic_report, || lsp_server::ResponseError {
+                code: lsp_server::ErrorCode::ServerCancelled as i32,
+                message: "server cancelled the request".to_owned(),
+                data: serde_json::to_value(lsp_types::DiagnosticServerCancellationData {
+                    retrigger_request: true
+                }).ok(),
+            })
+            .on::<RETRY, lsp_request::DocumentSymbolRequest>(handlers::handle_document_symbol)
+            .on::<RETRY, lsp_request::FoldingRangeRequest>(handlers::handle_folding_range)
+            .on::<NO_RETRY, lsp_request::SignatureHelpRequest>(handlers::handle_signature_help)
+            .on::<RETRY, lsp_request::WillRenameFiles>(handlers::handle_will_rename_files)
+            .on::<NO_RETRY, lsp_request::GotoDefinition>(handlers::handle_goto_definition)
+            .on::<NO_RETRY, lsp_request::GotoDeclaration>(handlers::handle_goto_declaration)
+            .on::<NO_RETRY, lsp_request::GotoImplementation>(handlers::handle_goto_implementation)
+            .on::<NO_RETRY, lsp_request::GotoTypeDefinition>(handlers::handle_goto_type_definition)
+            .on::<NO_RETRY, lsp_request::InlayHintRequest>(handlers::handle_inlay_hints)
+            .on_identity::<NO_RETRY, lsp_request::InlayHintResolveRequest, _>(handlers::handle_inlay_hints_resolve)
+            .on::<NO_RETRY, lsp_request::CodeLensRequest>(handlers::handle_code_lens)
+            .on_identity::<NO_RETRY, lsp_request::CodeLensResolve, _>(handlers::handle_code_lens_resolve)
+            .on::<NO_RETRY, lsp_request::PrepareRenameRequest>(handlers::handle_prepare_rename)
+            .on::<NO_RETRY, lsp_request::Rename>(handlers::handle_rename)
+            .on::<NO_RETRY, lsp_request::References>(handlers::handle_references)
+            .on::<NO_RETRY, lsp_request::DocumentHighlightRequest>(handlers::handle_document_highlight)
+            .on::<NO_RETRY, lsp_request::CallHierarchyPrepare>(handlers::handle_call_hierarchy_prepare)
+            .on::<NO_RETRY, lsp_request::CallHierarchyIncomingCalls>(handlers::handle_call_hierarchy_incoming)
+            .on::<NO_RETRY, lsp_request::CallHierarchyOutgoingCalls>(handlers::handle_call_hierarchy_outgoing)
+            // All other request handlers (lsp extension)
+            .on::<RETRY, lsp_ext::FetchDependencyList>(handlers::fetch_dependency_list)
+            .on::<RETRY, lsp_ext::AnalyzerStatus>(handlers::handle_analyzer_status)
+            .on::<RETRY, lsp_ext::ViewFileText>(handlers::handle_view_file_text)
+            .on::<RETRY, lsp_ext::ViewCrateGraph>(handlers::handle_view_crate_graph)
+            .on::<RETRY, lsp_ext::ViewItemTree>(handlers::handle_view_item_tree)
+            .on::<RETRY, lsp_ext::DiscoverTest>(handlers::handle_discover_test)
+            .on::<RETRY, lsp_ext::WorkspaceSymbol>(handlers::handle_workspace_symbol)
+            .on::<NO_RETRY, lsp_ext::Ssr>(handlers::handle_ssr)
+            .on::<NO_RETRY, lsp_ext::ViewRecursiveMemoryLayout>(handlers::handle_view_recursive_memory_layout)
+            .on::<NO_RETRY, lsp_ext::ViewSyntaxTree>(handlers::handle_view_syntax_tree)
+            .on::<NO_RETRY, lsp_ext::ViewHir>(handlers::handle_view_hir)
+            .on::<NO_RETRY, lsp_ext::ViewMir>(handlers::handle_view_mir)
+            .on::<NO_RETRY, lsp_ext::InterpretFunction>(handlers::handle_interpret_function)
+            .on::<NO_RETRY, lsp_ext::ExpandMacro>(handlers::handle_expand_macro)
+            .on::<NO_RETRY, lsp_ext::ParentModule>(handlers::handle_parent_module)
+            .on::<NO_RETRY, lsp_ext::ChildModules>(handlers::handle_child_modules)
+            .on::<NO_RETRY, lsp_ext::Runnables>(handlers::handle_runnables)
+            .on::<NO_RETRY, lsp_ext::RelatedTests>(handlers::handle_related_tests)
+            .on::<NO_RETRY, lsp_ext::CodeActionRequest>(handlers::handle_code_action)
+            .on_identity::<RETRY, lsp_ext::CodeActionResolveRequest, _>(handlers::handle_code_action_resolve)
+            .on::<NO_RETRY, lsp_ext::HoverRequest>(handlers::handle_hover)
+            .on::<NO_RETRY, lsp_ext::ExternalDocs>(handlers::handle_open_docs)
+            .on::<NO_RETRY, lsp_ext::OpenCargoToml>(handlers::handle_open_cargo_toml)
+            .on::<NO_RETRY, lsp_ext::MoveItem>(handlers::handle_move_item)
+            //
+            .on::<NO_RETRY, lsp_ext::InternalTestingFetchConfig>(handlers::internal_testing_fetch_config)
             .finish();
     }
 
     /// Handles an incoming notification.
-    fn on_notification(&mut self, not: Notification) -> anyhow::Result<()> {
+    fn on_notification(&mut self, not: Notification) {
+        let _p =
+            span!(Level::INFO, "GlobalState::on_notification", not.method = ?not.method).entered();
         use crate::handlers::notification as handlers;
         use lsp_types::notification as notifs;
 
         NotificationDispatcher { not: Some(not), global_state: self }
-            .on_sync_mut::<notifs::Cancel>(handlers::handle_cancel)?
+            .on_sync_mut::<notifs::Cancel>(handlers::handle_cancel)
             .on_sync_mut::<notifs::WorkDoneProgressCancel>(
                 handlers::handle_work_done_progress_cancel,
-            )?
-            .on_sync_mut::<notifs::DidOpenTextDocument>(handlers::handle_did_open_text_document)?
-            .on_sync_mut::<notifs::DidChangeTextDocument>(
-                handlers::handle_did_change_text_document,
-            )?
-            .on_sync_mut::<notifs::DidCloseTextDocument>(handlers::handle_did_close_text_document)?
-            .on_sync_mut::<notifs::DidSaveTextDocument>(handlers::handle_did_save_text_document)?
+            )
+            .on_sync_mut::<notifs::DidOpenTextDocument>(handlers::handle_did_open_text_document)
+            .on_sync_mut::<notifs::DidChangeTextDocument>(handlers::handle_did_change_text_document)
+            .on_sync_mut::<notifs::DidCloseTextDocument>(handlers::handle_did_close_text_document)
+            .on_sync_mut::<notifs::DidSaveTextDocument>(handlers::handle_did_save_text_document)
             .on_sync_mut::<notifs::DidChangeConfiguration>(
                 handlers::handle_did_change_configuration,
-            )?
+            )
             .on_sync_mut::<notifs::DidChangeWorkspaceFolders>(
                 handlers::handle_did_change_workspace_folders,
-            )?
-            .on_sync_mut::<notifs::DidChangeWatchedFiles>(
-                handlers::handle_did_change_watched_files,
-            )?
-            .on_sync_mut::<lsp_ext::CancelFlycheck>(handlers::handle_cancel_flycheck)?
-            .on_sync_mut::<lsp_ext::ClearFlycheck>(handlers::handle_clear_flycheck)?
-            .on_sync_mut::<lsp_ext::RunFlycheck>(handlers::handle_run_flycheck)?
-            .on_sync_mut::<lsp_ext::AbortRunTest>(handlers::handle_abort_run_test)?
+            )
+            .on_sync_mut::<notifs::DidChangeWatchedFiles>(handlers::handle_did_change_watched_files)
+            .on_sync_mut::<lsp_ext::CancelFlycheck>(handlers::handle_cancel_flycheck)
+            .on_sync_mut::<lsp_ext::ClearFlycheck>(handlers::handle_clear_flycheck)
+            .on_sync_mut::<lsp_ext::RunFlycheck>(handlers::handle_run_flycheck)
+            .on_sync_mut::<lsp_ext::AbortRunTest>(handlers::handle_abort_run_test)
             .finish();
-        Ok(())
     }
 }

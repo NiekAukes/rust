@@ -69,13 +69,16 @@
 //! step, we compress the vector to remove completed and error nodes, which
 //! aren't needed anymore.
 
-use crate::fx::{FxHashMap, FxHashSet};
-
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
 use std::fmt::Debug;
 use std::hash;
 use std::marker::PhantomData;
+
+use thin_vec::ThinVec;
+use tracing::debug;
+
+use crate::fx::{FxHashMap, FxHashSet};
 
 mod graphviz;
 
@@ -139,14 +142,12 @@ pub trait ObligationProcessor {
 #[derive(Debug)]
 pub enum ProcessResult<O, E> {
     Unchanged,
-    Changed(Vec<O>),
+    Changed(ThinVec<O>),
     Error(E),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct ObligationTreeId(usize);
-
-type ObligationTreeIdGenerator = impl Iterator<Item = ObligationTreeId>;
 
 pub struct ObligationForest<O: ForestObligation> {
     /// The list of obligations. In between calls to [Self::process_obligations],
@@ -310,18 +311,26 @@ pub struct Error<O, E> {
     pub backtrace: Vec<O>,
 }
 
-impl<O: ForestObligation> ObligationForest<O> {
-    pub fn new() -> ObligationForest<O> {
-        ObligationForest {
-            nodes: vec![],
-            done_cache: Default::default(),
-            active_cache: Default::default(),
-            reused_node_vec: vec![],
-            obligation_tree_id_generator: (0..).map(ObligationTreeId),
-            error_cache: Default::default(),
+mod helper {
+    use super::*;
+    pub(super) type ObligationTreeIdGenerator = impl Iterator<Item = ObligationTreeId>;
+    impl<O: ForestObligation> ObligationForest<O> {
+        #[define_opaque(ObligationTreeIdGenerator)]
+        pub fn new() -> ObligationForest<O> {
+            ObligationForest {
+                nodes: vec![],
+                done_cache: Default::default(),
+                active_cache: Default::default(),
+                reused_node_vec: vec![],
+                obligation_tree_id_generator: (0..).map(ObligationTreeId),
+                error_cache: Default::default(),
+            }
         }
     }
+}
+use helper::*;
 
+impl<O: ForestObligation> ObligationForest<O> {
     /// Returns the total number of nodes in the forest that have not
     /// yet been fully resolved.
     pub fn len(&self) -> usize {
@@ -395,15 +404,20 @@ impl<O: ForestObligation> ObligationForest<O> {
     }
 
     /// Returns the set of obligations that are in a pending state.
-    pub fn map_pending_obligations<P, F>(&self, f: F) -> Vec<P>
+    pub fn map_pending_obligations<P, F, R>(&self, f: F) -> R
     where
         F: Fn(&O) -> P,
+        R: FromIterator<P>,
     {
         self.nodes
             .iter()
             .filter(|node| node.state.get() == NodeState::Pending)
             .map(|node| f(&node.obligation))
             .collect()
+    }
+
+    pub fn has_pending_obligations(&self) -> bool {
+        self.nodes.iter().any(|node| node.state.get() == NodeState::Pending)
     }
 
     fn insert_into_error_cache(&mut self, index: usize) {

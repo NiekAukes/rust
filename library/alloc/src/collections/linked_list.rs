@@ -13,12 +13,11 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use core::cmp::Ordering;
-use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
-use core::mem;
 use core::ptr::NonNull;
+use core::{fmt, mem};
 
 use super::SpecExtend;
 use crate::alloc::{Allocator, Global};
@@ -1083,7 +1082,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
 
     /// Retains only the elements specified by the predicate.
     ///
-    /// In other words, remove all elements `e` for which `f(&e)` returns false.
+    /// In other words, remove all elements `e` for which `f(&mut e)` returns false.
     /// This method operates in place, visiting each element exactly once in the
     /// original order, and preserves the order of the retained elements.
     ///
@@ -1125,23 +1124,22 @@ impl<T, A: Allocator> LinkedList<T, A> {
 
     /// Creates an iterator which uses a closure to determine if an element should be removed.
     ///
-    /// If the closure returns true, then the element is removed and yielded.
-    /// If the closure returns false, the element will remain in the list and will not be yielded
-    /// by the iterator.
+    /// If the closure returns `true`, the element is removed from the list and
+    /// yielded. If the closure returns `false`, or panics, the element remains
+    /// in the list and will not be yielded.
     ///
     /// If the returned `ExtractIf` is not exhausted, e.g. because it is dropped without iterating
     /// or the iteration short-circuits, then the remaining elements will be retained.
     /// Use `extract_if().for_each(drop)` if you do not need the returned iterator.
     ///
-    /// Note that `extract_if` lets you mutate every element in the filter closure, regardless of
-    /// whether you choose to keep or remove it.
+    /// The iterator also lets you mutate the value of each element in the
+    /// closure, regardless of whether you choose to keep or remove it.
     ///
     /// # Examples
     ///
-    /// Splitting a list into evens and odds, reusing the original list:
+    /// Splitting a list into even and odd values, reusing the original list:
     ///
     /// ```
-    /// #![feature(extract_if)]
     /// use std::collections::LinkedList;
     ///
     /// let mut numbers: LinkedList<u32> = LinkedList::new();
@@ -1153,7 +1151,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
     /// assert_eq!(evens.into_iter().collect::<Vec<_>>(), vec![2, 4, 6, 8, 14]);
     /// assert_eq!(odds.into_iter().collect::<Vec<_>>(), vec![1, 3, 5, 9, 11, 13, 15]);
     /// ```
-    #[unstable(feature = "extract_if", reason = "recently added", issue = "43244")]
+    #[stable(feature = "extract_if", since = "1.87.0")]
     pub fn extract_if<F>(&mut self, filter: F) -> ExtractIf<'_, T, F, A>
     where
         F: FnMut(&mut T) -> bool,
@@ -1495,6 +1493,14 @@ impl<'a, T, A: Allocator> Cursor<'a, T, A> {
     pub fn back(&self) -> Option<&'a T> {
         self.list.back()
     }
+
+    /// Provides a reference to the cursor's parent list.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    pub fn as_list(&self) -> &'a LinkedList<T, A> {
+        self.list
+    }
 }
 
 impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
@@ -1605,6 +1611,18 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
     pub fn as_cursor(&self) -> Cursor<'_, T, A> {
         Cursor { list: self.list, current: self.current, index: self.index }
     }
+
+    /// Provides a read-only reference to the cursor's parent list.
+    ///
+    /// The lifetime of the returned reference is bound to that of the
+    /// `CursorMut`, which means it cannot outlive the `CursorMut` and that the
+    /// `CursorMut` is frozen for the lifetime of the reference.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    pub fn as_list(&self) -> &LinkedList<T, A> {
+        self.list
+    }
 }
 
 // Now the list editing operations
@@ -1705,7 +1723,7 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
         unsafe {
             self.current = unlinked_node.as_ref().next;
             self.list.unlink_node(unlinked_node);
-            let unlinked_node = Box::from_raw(unlinked_node.as_ptr());
+            let unlinked_node = Box::from_raw_in(unlinked_node.as_ptr(), &self.list.alloc);
             Some(unlinked_node.element)
         }
     }
@@ -1913,16 +1931,14 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
 }
 
 /// An iterator produced by calling `extract_if` on LinkedList.
-#[unstable(feature = "extract_if", reason = "recently added", issue = "43244")]
+#[stable(feature = "extract_if", since = "1.87.0")]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct ExtractIf<
     'a,
     T: 'a,
     F: 'a,
     #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global,
-> where
-    F: FnMut(&mut T) -> bool,
-{
+> {
     list: &'a mut LinkedList<T, A>,
     it: Option<NonNull<Node<T>>>,
     pred: F,
@@ -1930,7 +1946,7 @@ pub struct ExtractIf<
     old_len: usize,
 }
 
-#[unstable(feature = "extract_if", reason = "recently added", issue = "43244")]
+#[stable(feature = "extract_if", since = "1.87.0")]
 impl<T, F, A: Allocator> Iterator for ExtractIf<'_, T, F, A>
 where
     F: FnMut(&mut T) -> bool,
@@ -1946,7 +1962,7 @@ where
                 if (self.pred)(&mut node.as_mut().element) {
                     // `unlink_node` is okay with aliasing `element` references.
                     self.list.unlink_node(node);
-                    return Some(Box::from_raw(node.as_ptr()).element);
+                    return Some(Box::from_raw_in(node.as_ptr(), &self.list.alloc).element);
                 }
             }
         }
@@ -1959,13 +1975,15 @@ where
     }
 }
 
-#[unstable(feature = "extract_if", reason = "recently added", issue = "43244")]
-impl<T: fmt::Debug, F> fmt::Debug for ExtractIf<'_, T, F>
+#[stable(feature = "extract_if", since = "1.87.0")]
+impl<T, F, A> fmt::Debug for ExtractIf<'_, T, F, A>
 where
-    F: FnMut(&mut T) -> bool,
+    T: fmt::Debug,
+    A: Allocator,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ExtractIf").field(&self.list).finish()
+        let peek = self.it.map(|node| unsafe { &node.as_ref().element });
+        f.debug_struct("ExtractIf").field("peek", &peek).finish_non_exhaustive()
     }
 }
 

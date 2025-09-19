@@ -21,17 +21,13 @@
 //!
 //! [c]: https://rust-lang.github.io/chalk/book/canonical_queries/canonicalization.html
 
-use crate::infer::ConstVariableOrigin;
-use crate::infer::{InferCtxt, RegionVariableOrigin, TypeVariableOrigin};
+pub use instantiate::CanonicalExt;
 use rustc_index::IndexVec;
-use rustc_middle::infer::unify_key::EffectVarValue;
-use rustc_middle::ty::fold::TypeFoldable;
-use rustc_middle::ty::GenericArg;
-use rustc_middle::ty::{self, List, Ty, TyCtxt};
+pub use rustc_middle::infer::canonical::*;
+use rustc_middle::ty::{self, GenericArg, List, Ty, TyCtxt, TypeFoldable};
 use rustc_span::Span;
 
-pub use instantiate::CanonicalExt;
-pub use rustc_middle::infer::canonical::*;
+use crate::infer::{InferCtxt, RegionVariableOrigin};
 
 mod canonicalizer;
 mod instantiate;
@@ -85,14 +81,14 @@ impl<'tcx> InferCtxt<'tcx> {
     fn instantiate_canonical_vars(
         &self,
         span: Span,
-        variables: &List<CanonicalVarInfo<'tcx>>,
+        variables: &List<CanonicalVarKind<'tcx>>,
         universe_map: impl Fn(ty::UniverseIndex) -> ty::UniverseIndex,
     ) -> CanonicalVarValues<'tcx> {
         CanonicalVarValues {
             var_values: self.tcx.mk_args_from_iter(
                 variables
                     .iter()
-                    .map(|info| self.instantiate_canonical_var(span, info, &universe_map)),
+                    .map(|kind| self.instantiate_canonical_var(span, kind, &universe_map)),
             ),
         }
     }
@@ -108,16 +104,15 @@ impl<'tcx> InferCtxt<'tcx> {
     pub fn instantiate_canonical_var(
         &self,
         span: Span,
-        cv_info: CanonicalVarInfo<'tcx>,
+        kind: CanonicalVarKind<'tcx>,
         universe_map: impl Fn(ty::UniverseIndex) -> ty::UniverseIndex,
     ) -> GenericArg<'tcx> {
-        match cv_info.kind {
+        match kind {
             CanonicalVarKind::Ty(ty_kind) => {
                 let ty = match ty_kind {
-                    CanonicalTyVarKind::General(ui) => self.next_ty_var_in_universe(
-                        TypeVariableOrigin { param_def_id: None, span },
-                        universe_map(ui),
-                    ),
+                    CanonicalTyVarKind::General(ui) => {
+                        self.next_ty_var_in_universe(span, universe_map(ui))
+                    }
 
                     CanonicalTyVarKind::Int => self.next_int_var(),
 
@@ -145,27 +140,13 @@ impl<'tcx> InferCtxt<'tcx> {
                 ty::Region::new_placeholder(self.tcx, placeholder_mapped).into()
             }
 
-            CanonicalVarKind::Const(ui, ty) => self
-                .next_const_var_in_universe(
-                    ty,
-                    ConstVariableOrigin { param_def_id: None, span },
-                    universe_map(ui),
-                )
-                .into(),
-            CanonicalVarKind::Effect => {
-                let vid = self
-                    .inner
-                    .borrow_mut()
-                    .effect_unification_table()
-                    .new_key(EffectVarValue::Unknown)
-                    .vid;
-                ty::Const::new_infer(self.tcx, ty::InferConst::EffectVar(vid), self.tcx.types.bool)
-                    .into()
+            CanonicalVarKind::Const(ui) => {
+                self.next_const_var_in_universe(span, universe_map(ui)).into()
             }
-            CanonicalVarKind::PlaceholderConst(ty::PlaceholderConst { universe, bound }, ty) => {
+            CanonicalVarKind::PlaceholderConst(ty::PlaceholderConst { universe, bound }) => {
                 let universe_mapped = universe_map(universe);
                 let placeholder_mapped = ty::PlaceholderConst { universe: universe_mapped, bound };
-                ty::Const::new_placeholder(self.tcx, placeholder_mapped, ty).into()
+                ty::Const::new_placeholder(self.tcx, placeholder_mapped).into()
             }
         }
     }

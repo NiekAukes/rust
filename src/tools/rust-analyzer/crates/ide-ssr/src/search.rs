@@ -1,17 +1,16 @@
 //! Searching for matches.
 
 use crate::{
-    matching,
+    Match, MatchFinder, matching,
     resolving::{ResolvedPath, ResolvedPattern, ResolvedRule},
-    Match, MatchFinder,
 };
+use hir::FileRange;
 use ide_db::{
-    base_db::{FileId, FileRange},
+    EditionedFileId, FileId, FxHashSet,
     defs::Definition,
     search::{SearchScope, UsageSearchResult},
-    FxHashSet,
 };
-use syntax::{ast, AstNode, SyntaxKind, SyntaxNode};
+use syntax::{AstNode, SyntaxKind, SyntaxNode, ast};
 
 /// A cache for the results of find_usages. This is for when we have multiple patterns that have the
 /// same path. e.g. if the pattern was `foo::Bar` that can parse as a path, an expression, a type
@@ -136,14 +135,18 @@ impl MatchFinder<'_> {
         // seems to get put into a single source root.
         let mut files = Vec::new();
         self.search_files_do(|file_id| {
-            files.push(file_id);
+            files.push(
+                self.sema
+                    .attach_first_edition(file_id)
+                    .unwrap_or_else(|| EditionedFileId::current_edition(self.sema.db, file_id)),
+            );
         });
         SearchScope::files(&files)
     }
 
     fn slow_scan(&self, rule: &ResolvedRule, matches_out: &mut Vec<Match>) {
         self.search_files_do(|file_id| {
-            let file = self.sema.parse(file_id);
+            let file = self.sema.parse_guess_edition(file_id);
             let code = file.syntax();
             self.slow_scan_node(code, rule, &None, matches_out);
         })
@@ -152,10 +155,10 @@ impl MatchFinder<'_> {
     fn search_files_do(&self, mut callback: impl FnMut(FileId)) {
         if self.restrict_ranges.is_empty() {
             // Unrestricted search.
-            use ide_db::base_db::SourceDatabaseExt;
+            use ide_db::base_db::SourceDatabase;
             use ide_db::symbol_index::SymbolsDatabase;
             for &root in self.sema.db.local_roots().iter() {
-                let sr = self.sema.db.source_root(root);
+                let sr = self.sema.db.source_root(root).source_root(self.sema.db);
                 for file_id in sr.iter() {
                     callback(file_id);
                 }
@@ -185,13 +188,13 @@ impl MatchFinder<'_> {
         // If we've got a macro call, we already tried matching it pre-expansion, which is the only
         // way to match the whole macro, now try expanding it and matching the expansion.
         if let Some(macro_call) = ast::MacroCall::cast(code.clone()) {
-            if let Some(expanded) = self.sema.expand(&macro_call) {
+            if let Some(expanded) = self.sema.expand_macro_call(&macro_call) {
                 if let Some(tt) = macro_call.token_tree() {
                     // When matching within a macro expansion, we only want to allow matches of
                     // nodes that originated entirely from within the token tree of the macro call.
                     // i.e. we don't want to match something that came from the macro itself.
                     if let Some(range) = self.sema.original_range_opt(tt.syntax()) {
-                        self.slow_scan_node(&expanded, rule, &Some(range), matches_out);
+                        self.slow_scan_node(&expanded.value, rule, &Some(range), matches_out);
                     }
                 }
             }
@@ -226,7 +229,9 @@ impl MatchFinder<'_> {
         }
         let Some(node_range) = self.sema.original_range_opt(code) else { return false };
         for range in &self.restrict_ranges {
-            if range.file_id == node_range.file_id && range.range.contains_range(node_range.range) {
+            if range.file_id == node_range.file_id.file_id(self.sema.db)
+                && range.range.contains_range(node_range.range)
+            {
                 return true;
             }
         }

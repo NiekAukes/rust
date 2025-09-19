@@ -2,7 +2,6 @@
 #![deny(improper_ctypes)]
 #![feature(ptr_internals)]
 #![feature(transparent_unions)]
-#![feature(result_ffi_guarantees)]
 
 use std::num;
 
@@ -41,6 +40,20 @@ enum Isize {
     C,
 }
 
+#[repr(u128)]
+enum U128 {
+    A,
+    B,
+    C,
+}
+
+#[repr(i128)]
+enum I128 {
+    A,
+    B,
+    C,
+}
+
 #[repr(transparent)]
 struct TransparentStruct<T>(T, std::marker::PhantomData<Z>);
 
@@ -72,6 +85,8 @@ extern "C" {
     fn repr_c(x: ReprC);
     fn repr_u8(x: U8);
     fn repr_isize(x: Isize);
+    fn repr_u128(x: U128);
+    fn repr_i128(x: I128);
     fn option_ref(x: Option<&'static u8>);
     fn option_fn(x: Option<extern "C" fn()>);
     fn option_nonnull(x: Option<std::ptr::NonNull<u8>>);
@@ -81,20 +96,19 @@ extern "C" {
     fn option_nonzero_u32(x: Option<num::NonZero<u32>>);
     fn option_nonzero_u64(x: Option<num::NonZero<u64>>);
     fn option_nonzero_u128(x: Option<num::NonZero<u128>>);
-    //~^ ERROR `extern` block uses type `u128`
     fn option_nonzero_usize(x: Option<num::NonZero<usize>>);
     fn option_nonzero_i8(x: Option<num::NonZero<i8>>);
     fn option_nonzero_i16(x: Option<num::NonZero<i16>>);
     fn option_nonzero_i32(x: Option<num::NonZero<i32>>);
     fn option_nonzero_i64(x: Option<num::NonZero<i64>>);
     fn option_nonzero_i128(x: Option<num::NonZero<i128>>);
-    //~^ ERROR `extern` block uses type `i128`
     fn option_nonzero_isize(x: Option<num::NonZero<isize>>);
     fn option_transparent_struct(x: Option<TransparentStruct<num::NonZero<u8>>>);
     fn option_transparent_enum(x: Option<TransparentEnum<num::NonZero<u8>>>);
     fn option_transparent_union(x: Option<TransparentUnion<num::NonZero<u8>>>);
     //~^ ERROR `extern` block uses type
     fn option_repr_rust(x: Option<Rust<num::NonZero<u8>>>); //~ ERROR `extern` block uses type
+    fn option_u8(x: Option<u8>); //~ ERROR `extern` block uses type
 
     fn result_ref_t(x: Result<&'static u8, ()>);
     fn result_fn_t(x: Result<extern "C" fn(), ()>);
@@ -105,14 +119,12 @@ extern "C" {
     fn result_nonzero_u32_t(x: Result<num::NonZero<u32>, ()>);
     fn result_nonzero_u64_t(x: Result<num::NonZero<u64>, ()>);
     fn result_nonzero_u128_t(x: Result<num::NonZero<u128>, ()>);
-    //~^ ERROR `extern` block uses type `u128`
     fn result_nonzero_usize_t(x: Result<num::NonZero<usize>, ()>);
     fn result_nonzero_i8_t(x: Result<num::NonZero<i8>, ()>);
     fn result_nonzero_i16_t(x: Result<num::NonZero<i16>, ()>);
     fn result_nonzero_i32_t(x: Result<num::NonZero<i32>, ()>);
     fn result_nonzero_i64_t(x: Result<num::NonZero<i64>, ()>);
     fn result_nonzero_i128_t(x: Result<num::NonZero<i128>, ()>);
-    //~^ ERROR `extern` block uses type `i128`
     fn result_nonzero_isize_t(x: Result<num::NonZero<isize>, ()>);
     fn result_transparent_struct_t(x: Result<TransparentStruct<num::NonZero<u8>>, ()>);
     fn result_transparent_enum_t(x: Result<TransparentEnum<num::NonZero<u8>>, ()>);
@@ -143,14 +155,12 @@ extern "C" {
     fn result_nonzero_u32_e(x: Result<(), num::NonZero<u32>>);
     fn result_nonzero_u64_e(x: Result<(), num::NonZero<u64>>);
     fn result_nonzero_u128_e(x: Result<(), num::NonZero<u128>>);
-    //~^ ERROR `extern` block uses type `u128`
     fn result_nonzero_usize_e(x: Result<(), num::NonZero<usize>>);
     fn result_nonzero_i8_e(x: Result<(), num::NonZero<i8>>);
     fn result_nonzero_i16_e(x: Result<(), num::NonZero<i16>>);
     fn result_nonzero_i32_e(x: Result<(), num::NonZero<i32>>);
     fn result_nonzero_i64_e(x: Result<(), num::NonZero<i64>>);
     fn result_nonzero_i128_e(x: Result<(), num::NonZero<i128>>);
-    //~^ ERROR `extern` block uses type `i128`
     fn result_nonzero_isize_e(x: Result<(), num::NonZero<isize>>);
     fn result_transparent_struct_e(x: Result<(), TransparentStruct<num::NonZero<u8>>>);
     fn result_transparent_enum_e(x: Result<(), TransparentEnum<num::NonZero<u8>>>);

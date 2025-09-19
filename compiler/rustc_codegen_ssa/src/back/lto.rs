@@ -1,12 +1,14 @@
-use super::write::CodegenContext;
-use crate::traits::*;
-use crate::ModuleCodegen;
+use std::ffi::CString;
+use std::sync::Arc;
 
+use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
 use rustc_data_structures::memmap::Mmap;
 use rustc_errors::FatalError;
 
-use std::ffi::CString;
-use std::sync::Arc;
+use super::write::CodegenContext;
+use crate::ModuleCodegen;
+use crate::back::write::ModuleConfig;
+use crate::traits::*;
 
 pub struct ThinModule<B: WriteBackendMethods> {
     pub shared: Arc<ThinShared<B>>,
@@ -41,34 +43,25 @@ pub struct ThinShared<B: WriteBackendMethods> {
 }
 
 pub enum LtoModuleCodegen<B: WriteBackendMethods> {
-    Fat {
-        module: ModuleCodegen<B::Module>,
-        _serialized_bitcode: Vec<SerializedModule<B::ModuleBuffer>>,
-    },
-
+    Fat(ModuleCodegen<B::Module>),
     Thin(ThinModule<B>),
 }
 
 impl<B: WriteBackendMethods> LtoModuleCodegen<B> {
     pub fn name(&self) -> &str {
         match *self {
-            LtoModuleCodegen::Fat { .. } => "everything",
+            LtoModuleCodegen::Fat(_) => "everything",
             LtoModuleCodegen::Thin(ref m) => m.name(),
         }
     }
 
     /// Optimize this module within the given codegen context.
-    ///
-    /// This function is unsafe as it'll return a `ModuleCodegen` still
-    /// points to LLVM data structures owned by this `LtoModuleCodegen`.
-    /// It's intended that the module returned is immediately code generated and
-    /// dropped, and then this LTO module is dropped.
-    pub unsafe fn optimize(
+    pub fn optimize(
         self,
         cgcx: &CodegenContext<B>,
     ) -> Result<ModuleCodegen<B::Module>, FatalError> {
         match self {
-            LtoModuleCodegen::Fat { mut module, .. } => {
+            LtoModuleCodegen::Fat(mut module) => {
                 B::optimize_fat(cgcx, &mut module)?;
                 Ok(module)
             }
@@ -81,9 +74,26 @@ impl<B: WriteBackendMethods> LtoModuleCodegen<B> {
     pub fn cost(&self) -> u64 {
         match *self {
             // Only one module with fat LTO, so the cost doesn't matter.
-            LtoModuleCodegen::Fat { .. } => 0,
+            LtoModuleCodegen::Fat(_) => 0,
             LtoModuleCodegen::Thin(ref m) => m.cost(),
         }
+    }
+
+    /// Run autodiff on Fat LTO module
+    pub fn autodiff(
+        self,
+        cgcx: &CodegenContext<B>,
+        diff_fncs: Vec<AutoDiffItem>,
+        config: &ModuleConfig,
+    ) -> Result<LtoModuleCodegen<B>, FatalError> {
+        match &self {
+            LtoModuleCodegen::Fat(module) => {
+                B::autodiff(cgcx, &module, diff_fncs, config)?;
+            }
+            _ => panic!("autodiff called with non-fat LTO module"),
+        }
+
+        Ok(self)
     }
 }
 

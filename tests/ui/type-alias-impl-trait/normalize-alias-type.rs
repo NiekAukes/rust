@@ -8,25 +8,27 @@ pub trait Tr {
 
 impl Tr for (u32,) {
     #[inline]
-    fn get(&self) -> u32 { self.0 }
+    fn get(&self) -> u32 {
+        self.0
+    }
 }
 
 pub fn tr1() -> impl Tr {
     (32,)
 }
 
-pub fn tr2() -> impl Tr {
-    struct Inner {
-        x: X,
+struct Inner {
+    x: X,
+}
+impl Tr for Inner {
+    fn get(&self) -> u32 {
+        self.x.get()
     }
-    type X = impl Tr;
-    impl Tr for Inner {
-        fn get(&self) -> u32 {
-            self.x.get()
-        }
-    }
+}
 
-    Inner {
-        x: tr1(),
-    }
+pub type X = impl Tr;
+
+#[define_opaque(X)]
+pub fn tr2() -> impl Tr {
+    Inner { x: tr1() }
 }

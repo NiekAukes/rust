@@ -1,19 +1,19 @@
-use std::{borrow::Cow, io, io::prelude::Write};
+use std::borrow::Cow;
+use std::io;
+use std::io::prelude::Write;
 
 use super::OutputFormatter;
-use crate::{
-    console::{ConsoleTestDiscoveryState, ConsoleTestState, OutputLocation},
-    test_result::TestResult,
-    time,
-    types::TestDesc,
-};
+use crate::console::{ConsoleTestDiscoveryState, ConsoleTestState, OutputLocation};
+use crate::test_result::TestResult;
+use crate::time;
+use crate::types::TestDesc;
 
 pub(crate) struct JsonFormatter<T> {
     out: OutputLocation<T>,
 }
 
 impl<T: Write> JsonFormatter<T> {
-    pub fn new(out: OutputLocation<T>) -> Self {
+    pub(crate) fn new(out: OutputLocation<T>) -> Self {
         Self { out }
     }
 
@@ -167,8 +167,8 @@ impl<T: Write> OutputFormatter for JsonFormatter<T> {
             ),
 
             TestResult::TrBench(ref bs) => {
-                let median = bs.ns_iter_summ.median as usize;
-                let deviation = (bs.ns_iter_summ.max - bs.ns_iter_summ.min) as usize;
+                let median = bs.ns_iter_summ.median;
+                let deviation = bs.ns_iter_summ.max - bs.ns_iter_summ.min;
 
                 let mbps = if bs.mb_s == 0 {
                     String::new()

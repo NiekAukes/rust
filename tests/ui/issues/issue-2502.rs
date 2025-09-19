@@ -3,7 +3,6 @@
 #![allow(non_camel_case_types)]
 
 
-//@ pretty-expanded FIXME #23616
 
 struct font<'a> {
     fontbuf: &'a Vec<u8> ,
@@ -15,7 +14,7 @@ impl<'a> font<'a> {
     }
 }
 
-fn font(fontbuf: &Vec<u8> ) -> font {
+fn font(fontbuf: &Vec<u8> ) -> font<'_> {
     font {
         fontbuf: fontbuf
     }

@@ -1,7 +1,6 @@
-//@ compile-flags: -O -C overflow-checks=on
+//@ compile-flags: -Copt-level=3 -C overflow-checks=on
 
 #![crate_type = "lib"]
-
 
 pub struct S1<'a> {
     data: &'a [u8],
@@ -12,7 +11,7 @@ pub struct S1<'a> {
 #[no_mangle]
 pub fn slice_no_index_order<'a>(s: &'a mut S1, n: usize) -> &'a [u8] {
     // CHECK-NOT: slice_index_order_fail
-    let d = &s.data[s.position..s.position+n];
+    let d = &s.data[s.position..s.position + n];
     s.position += n;
     return d;
 }

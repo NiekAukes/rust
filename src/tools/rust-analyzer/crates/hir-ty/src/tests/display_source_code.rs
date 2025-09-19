@@ -65,13 +65,13 @@ trait A {
 }
 trait B: A {}
 
-fn test(
+fn test<'a>(
     _: &(dyn A<Assoc = ()> + Send),
-  //^ &(dyn A<Assoc = ()> + Send)
-    _: &(dyn Send + A<Assoc = ()>),
-  //^ &(dyn A<Assoc = ()> + Send)
+  //^ &(dyn A<Assoc = ()> + Send + 'static)
+    _: &'a (dyn Send + A<Assoc = ()>),
+  //^ &'a (dyn A<Assoc = ()> + Send + 'static)
     _: &dyn B<Assoc = ()>,
-  //^ &(dyn B<Assoc = ()>)
+  //^ &(dyn B<Assoc = ()> + 'static)
 ) {}
         "#,
     );
@@ -85,7 +85,7 @@ fn render_dyn_for_ty() {
 trait Foo<'a> {}
 
 fn foo(foo: &dyn for<'a> Foo<'a>) {}
-    // ^^^ &dyn Foo<'_>
+    // ^^^ &(dyn Foo<'?> + 'static)
 "#,
     );
 }

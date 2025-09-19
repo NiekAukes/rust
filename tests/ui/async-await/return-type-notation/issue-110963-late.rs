@@ -2,7 +2,6 @@
 //@ check-pass
 
 #![feature(return_type_notation)]
-//~^ WARN the feature `return_type_notation` is incomplete
 
 trait HealthCheck {
     async fn check(&mut self) -> bool;
@@ -10,7 +9,7 @@ trait HealthCheck {
 
 async fn do_health_check_par<HC>(hc: HC)
 where
-    HC: HealthCheck<check(): Send> + Send + 'static,
+    HC: HealthCheck<check(..): Send> + Send + 'static,
 {
     spawn(async move {
         let mut hc = hc;

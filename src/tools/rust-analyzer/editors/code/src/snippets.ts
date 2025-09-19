@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 
-import { assert } from "./util";
-import { unwrapUndefinable } from "./undefinable";
+import { assert, unwrapUndefinable } from "./util";
 
 export type SnippetTextDocumentEdit = [vscode.Uri, (vscode.TextEdit | vscode.SnippetTextEdit)[]];
 
@@ -25,9 +24,7 @@ export async function applySnippetWorkspaceEdit(
                 for (const indel of edits) {
                     assert(
                         !(indel instanceof vscode.SnippetTextEdit),
-                        `bad ws edit: snippet received with multiple edits: ${JSON.stringify(
-                            edit,
-                        )}`,
+                        `bad ws edit: snippet received with multiple edits: ${JSON.stringify(edit)}`,
                     );
                     builder.replace(indel.range, indel.newText);
                 }

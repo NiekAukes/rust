@@ -1,7 +1,10 @@
+// tidy-alphabetical-start
 #![allow(internal_features)]
-#![feature(rustdoc_internals)]
 #![doc(rust_logo)]
 #![feature(box_patterns)]
+#![feature(negative_impls)]
+#![feature(rustdoc_internals)]
+// tidy-alphabetical-end
 
 mod helpers;
 pub mod pp;

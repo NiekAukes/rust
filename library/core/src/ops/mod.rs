@@ -156,65 +156,47 @@ mod unsize;
 pub use self::arith::{Add, Div, Mul, Neg, Rem, Sub};
 #[stable(feature = "op_assign_traits", since = "1.8.0")]
 pub use self::arith::{AddAssign, DivAssign, MulAssign, RemAssign, SubAssign};
-
+#[unstable(feature = "async_fn_traits", issue = "none")]
+pub use self::async_function::{AsyncFn, AsyncFnMut, AsyncFnOnce};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::bit::{BitAnd, BitOr, BitXor, Not, Shl, Shr};
 #[stable(feature = "op_assign_traits", since = "1.8.0")]
 pub use self::bit::{BitAndAssign, BitOrAssign, BitXorAssign, ShlAssign, ShrAssign};
-
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use self::deref::{Deref, DerefMut};
-
-#[unstable(feature = "deref_pure_trait", issue = "87121")]
-pub use self::deref::DerefPure;
-
-#[unstable(feature = "receiver_trait", issue = "none")]
-pub use self::deref::Receiver;
-
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use self::drop::Drop;
-
-pub(crate) use self::drop::fallback_surface_drop;
-
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use self::function::{Fn, FnMut, FnOnce};
-
-#[unstable(feature = "async_fn_traits", issue = "none")]
-pub use self::async_function::{AsyncFn, AsyncFnMut, AsyncFnOnce};
-
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use self::index::{Index, IndexMut};
-
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use self::range::{Range, RangeFrom, RangeFull, RangeTo};
-
-pub(crate) use self::index_range::IndexRange;
-
-#[stable(feature = "inclusive_range", since = "1.26.0")]
-pub use self::range::{Bound, RangeBounds, RangeInclusive, RangeToInclusive};
-
-#[unstable(feature = "one_sided_range", issue = "69780")]
-pub use self::range::OneSidedRange;
-
-#[unstable(feature = "try_trait_v2", issue = "84277")]
-pub use self::try_trait::{FromResidual, Try};
-
-#[unstable(feature = "try_trait_v2_yeet", issue = "96374")]
-pub use self::try_trait::Yeet;
-
-#[unstable(feature = "try_trait_v2_residual", issue = "91285")]
-pub use self::try_trait::Residual;
-
-pub(crate) use self::try_trait::{ChangeOutputType, NeverShortCircuit};
-
+#[stable(feature = "control_flow_enum_type", since = "1.55.0")]
+pub use self::control_flow::ControlFlow;
 #[unstable(feature = "coroutine_trait", issue = "43122")]
 pub use self::coroutine::{Coroutine, CoroutineState};
-
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+pub use self::deref::DerefPure;
+#[unstable(feature = "legacy_receiver_trait", issue = "none")]
+pub use self::deref::LegacyReceiver;
+#[unstable(feature = "arbitrary_self_types", issue = "44874")]
+pub use self::deref::Receiver;
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::deref::{Deref, DerefMut};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::drop::Drop;
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::function::{Fn, FnMut, FnOnce};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::index::{Index, IndexMut};
+pub(crate) use self::index_range::IndexRange;
+#[unstable(feature = "range_into_bounds", issue = "136903")]
+pub use self::range::IntoBounds;
+#[stable(feature = "inclusive_range", since = "1.26.0")]
+pub use self::range::{Bound, RangeBounds, RangeInclusive, RangeToInclusive};
+#[unstable(feature = "one_sided_range", issue = "69780")]
+pub use self::range::{OneSidedRange, OneSidedRangeBound};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::range::{Range, RangeFrom, RangeFull, RangeTo};
+#[unstable(feature = "try_trait_v2_residual", issue = "91285")]
+pub use self::try_trait::Residual;
+#[unstable(feature = "try_trait_v2_yeet", issue = "96374")]
+pub use self::try_trait::Yeet;
+pub(crate) use self::try_trait::{ChangeOutputType, NeverShortCircuit};
+#[unstable(feature = "try_trait_v2", issue = "84277", old_name = "try_trait")]
+pub use self::try_trait::{FromResidual, Try};
 #[unstable(feature = "coerce_unsized", issue = "18598")]
 pub use self::unsize::CoerceUnsized;
-
 #[unstable(feature = "dispatch_from_dyn", issue = "none")]
 pub use self::unsize::DispatchFromDyn;
-
-#[unstable(feature = "control_flow_enum", reason = "new API", issue = "75744")]
-pub use self::control_flow::ControlFlow;

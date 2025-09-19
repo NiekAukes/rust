@@ -75,7 +75,7 @@ or if you modify a test file to add a test case.
 > _Note:_ This command may update more files than you intended. In that case
 > only commit the files you wanted to update.
 
-[UI test]: https://rustc-dev-guide.rust-lang.org/tests/adding.html#guide-to-the-ui-tests
+[UI test]: https://rustc-dev-guide.rust-lang.org/tests/adding.html#ui-test-walkthrough
 
 ## `cargo dev`
 
@@ -107,7 +107,7 @@ More about [intellij] command usage and reasons.
 
 ## lintcheck
 
-`cargo lintcheck` will build and run clippy on a fixed set of crates and
+`cargo lintcheck` will build and run Clippy on a fixed set of crates and
 generate a log of the results.  You can `git diff` the updated log against its
 previous version and see what impact your lint made on a small set of crates.
 If you add a new lint, please audit the resulting warnings and make sure there
@@ -145,42 +145,32 @@ unclear to you.
 If you are hacking on Clippy and want to install it from source, do the
 following:
 
-First, take note of the toolchain
-[override](https://rust-lang.github.io/rustup/overrides.html) in
-`/rust-toolchain`. We will use this override to install Clippy into the right
-toolchain.
-
-> Tip: You can view the active toolchain for the current directory with `rustup
-> show active-toolchain`.
-
 From the Clippy project root, run the following command to build the Clippy
-binaries and copy them into the toolchain directory. This will override the
-currently installed Clippy component.
+binaries and copy them into the toolchain directory. This will create a new
+toolchain called `clippy` by default, see `cargo dev setup toolchain --help`
+for other options.
 
 ```terminal
-cargo build --release --bin cargo-clippy --bin clippy-driver -Zunstable-options --out-dir "$(rustc --print=sysroot)/bin"
+cargo dev setup toolchain
 ```
 
-Now you may run `cargo clippy` in any project, using the toolchain where you
-just installed Clippy.
+Now you may run `cargo +clippy clippy` in any project using the new toolchain.
 
 ```terminal
 cd my-project
-cargo +nightly-2021-07-01 clippy
+cargo +clippy clippy
 ```
 
 ...or `clippy-driver`
 
 ```terminal
-clippy-driver +nightly-2021-07-01 <filename>
+clippy-driver +clippy <filename>
 ```
 
-If you need to restore the default Clippy installation, run the following (from
-the Clippy project root).
+If you no longer need the toolchain it can be uninstalled using `rustup`:
 
 ```terminal
-rustup component remove clippy
-rustup component add clippy
+rustup toolchain uninstall clippy
 ```
 
 > **DO NOT** install using `cargo install --path . --force` since this will

@@ -3,14 +3,13 @@
 //! This module is responsible for installing the standard library,
 //! compiler, and documentation.
 
-use std::env;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::{env, fs};
 
 use crate::core::build_steps::dist;
 use crate::core::builder::{Builder, RunConfig, ShouldRun, Step};
 use crate::core::config::{Config, TargetSelection};
+use crate::utils::exec::command;
 use crate::utils::helpers::t;
 use crate::utils::tarball::GeneratedTarball;
 use crate::{Compiler, Kind};
@@ -22,9 +21,9 @@ const SHELL: &str = "sh";
 
 /// We have to run a few shell scripts, which choke quite a bit on both `\`
 /// characters and on `C:\` paths, so normalize both of them away.
-fn sanitize_sh(path: &Path) -> String {
+fn sanitize_sh(path: &Path, is_cygwin: bool) -> String {
     let path = path.to_str().unwrap().replace('\\', "/");
-    return change_drive(unc_to_lfs(&path)).unwrap_or(path);
+    return if is_cygwin { path } else { change_drive(unc_to_lfs(&path)).unwrap_or(path) };
 
     fn unc_to_lfs(s: &str) -> &str {
         s.strip_prefix("//?/").unwrap_or(s)
@@ -39,7 +38,9 @@ fn sanitize_sh(path: &Path) -> String {
         if ch.next() != Some('/') {
             return None;
         }
-        Some(format!("/{}/{}", drive, &s[drive.len_utf8() + 2..]))
+        // The prefix for Windows drives in Cygwin/MSYS2 is configurable, but
+        // /proc/cygdrive is available regardless of configuration since 1.7.33
+        Some(format!("/proc/cygdrive/{}/{}", drive, &s[drive.len_utf8() + 2..]))
     }
 }
 
@@ -54,7 +55,7 @@ fn is_dir_writable_for_user(dir: &Path) -> bool {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 false
             } else {
-                panic!("Failed the write access check for the current user. {}", e);
+                panic!("Failed the write access check for the current user. {e}");
             }
         }
     }
@@ -72,6 +73,7 @@ fn install_sh(
     let prefix = default_path(&builder.config.prefix, "/usr/local");
     let sysconfdir = prefix.join(default_path(&builder.config.sysconfdir, "/etc"));
     let destdir_env = env::var_os("DESTDIR").map(PathBuf::from);
+    let is_cygwin = builder.config.host_target.is_cygwin();
 
     // Sanity checks on the write access of user.
     //
@@ -85,11 +87,11 @@ fn install_sh(
     } else {
         assert!(
             is_dir_writable_for_user(&prefix),
-            "User doesn't have write access on `install.prefix` path in the `config.toml`.",
+            "User doesn't have write access on `install.prefix` path in the `bootstrap.toml`.",
         );
         assert!(
             is_dir_writable_for_user(&sysconfdir),
-            "User doesn't have write access on `install.sysconfdir` path in `config.toml`."
+            "User doesn't have write access on `install.sysconfdir` path in `bootstrap.toml`."
         );
     }
 
@@ -102,18 +104,18 @@ fn install_sh(
     let empty_dir = builder.out.join("tmp/empty_dir");
     t!(fs::create_dir_all(&empty_dir));
 
-    let mut cmd = Command::new(SHELL);
+    let mut cmd = command(SHELL);
     cmd.current_dir(&empty_dir)
-        .arg(sanitize_sh(&tarball.decompressed_output().join("install.sh")))
-        .arg(format!("--prefix={}", prepare_dir(&destdir_env, prefix)))
-        .arg(format!("--sysconfdir={}", prepare_dir(&destdir_env, sysconfdir)))
-        .arg(format!("--datadir={}", prepare_dir(&destdir_env, datadir)))
-        .arg(format!("--docdir={}", prepare_dir(&destdir_env, docdir)))
-        .arg(format!("--bindir={}", prepare_dir(&destdir_env, bindir)))
-        .arg(format!("--libdir={}", prepare_dir(&destdir_env, libdir)))
-        .arg(format!("--mandir={}", prepare_dir(&destdir_env, mandir)))
+        .arg(sanitize_sh(&tarball.decompressed_output().join("install.sh"), is_cygwin))
+        .arg(format!("--prefix={}", prepare_dir(&destdir_env, prefix, is_cygwin)))
+        .arg(format!("--sysconfdir={}", prepare_dir(&destdir_env, sysconfdir, is_cygwin)))
+        .arg(format!("--datadir={}", prepare_dir(&destdir_env, datadir, is_cygwin)))
+        .arg(format!("--docdir={}", prepare_dir(&destdir_env, docdir, is_cygwin)))
+        .arg(format!("--bindir={}", prepare_dir(&destdir_env, bindir, is_cygwin)))
+        .arg(format!("--libdir={}", prepare_dir(&destdir_env, libdir, is_cygwin)))
+        .arg(format!("--mandir={}", prepare_dir(&destdir_env, mandir, is_cygwin)))
         .arg("--disable-ldconfig");
-    builder.run(&mut cmd);
+    cmd.run(builder);
     t!(fs::remove_dir_all(&empty_dir));
 }
 
@@ -121,7 +123,7 @@ fn default_path(config: &Option<PathBuf>, default: &str) -> PathBuf {
     config.as_ref().cloned().unwrap_or_else(|| PathBuf::from(default))
 }
 
-fn prepare_dir(destdir_env: &Option<PathBuf>, mut path: PathBuf) -> String {
+fn prepare_dir(destdir_env: &Option<PathBuf>, mut path: PathBuf, is_cygwin: bool) -> String {
     // The DESTDIR environment variable is a standard way to install software in a subdirectory
     // while keeping the original directory structure, even if the prefix or other directories
     // contain absolute paths.
@@ -147,7 +149,7 @@ fn prepare_dir(destdir_env: &Option<PathBuf>, mut path: PathBuf) -> String {
         assert!(path.is_absolute(), "could not make the path relative");
     }
 
-    sanitize_sh(&path)
+    sanitize_sh(&path, is_cygwin)
 }
 
 macro_rules! install {
@@ -185,7 +187,7 @@ macro_rules! install {
 
             fn make_run(run: RunConfig<'_>) {
                 run.builder.ensure($name {
-                    compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
+                    compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.host_target),
                     target: run.target,
                 });
             }
@@ -244,7 +246,7 @@ install!((self, builder, _config),
             );
         }
     };
-    LlvmTools, alias = "llvm-tools", Self::should_build(_config), only_hosts: true, {
+    LlvmTools, alias = "llvm-tools", _config.llvm_tools_enabled && _config.llvm_enabled(_config.host_target), only_hosts: true, {
         if let Some(tarball) = builder.ensure(dist::LlvmTools { target: self.target }) {
             install_sh(builder, "llvm-tools", self.compiler.stage, Some(self.target), &tarball);
         } else {
@@ -262,22 +264,6 @@ install!((self, builder, _config),
         } else {
             builder.info(
                 &format!("skipping Install Rustfmt stage{} ({})", self.compiler.stage, self.target),
-            );
-        }
-    };
-    RustDemangler, alias = "rust-demangler", Self::should_build(_config), only_hosts: true, {
-        // NOTE: Even though `should_build` may return true for `extended` default tools,
-        // dist::RustDemangler may still return None, unless the target-dependent `profiler` config
-        // is also true, or the `tools` array explicitly includes "rust-demangler".
-        if let Some(tarball) = builder.ensure(dist::RustDemangler {
-            compiler: self.compiler,
-            target: self.target
-        }) {
-            install_sh(builder, "rust-demangler", self.compiler.stage, Some(self.target), &tarball);
-        } else {
-            builder.info(
-                &format!("skipping Install RustDemangler stage{} ({})",
-                         self.compiler.stage, self.target),
             );
         }
     };
@@ -323,7 +309,7 @@ impl Step for Src {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let config = &run.builder.config;
-        let cond = config.extended && config.tools.as_ref().map_or(true, |t| t.contains("src"));
+        let cond = config.extended && config.tools.as_ref().is_none_or(|t| t.contains("src"));
         run.path("src").default_condition(cond)
     }
 

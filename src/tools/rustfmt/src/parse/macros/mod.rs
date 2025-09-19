@@ -1,11 +1,10 @@
-use rustc_ast::token::{Delimiter, NonterminalKind, TokenKind};
+use rustc_ast::token::{Delimiter, NonterminalKind, NtExprKind::*, NtPatKind::*, TokenKind};
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::{ast, ptr};
+use rustc_parse::MACRO_ARGUMENTS;
 use rustc_parse::parser::{ForceCollect, Parser, Recovery};
-use rustc_parse::{stream_to_parser, MACRO_ARGUMENTS};
 use rustc_session::parse::ParseSess;
-use rustc_span::symbol::{self, kw};
-use rustc_span::Symbol;
+use rustc_span::symbol;
 
 use crate::macros::MacroArg;
 use crate::rewrite::RewriteContext;
@@ -15,7 +14,7 @@ pub(crate) mod cfg_if;
 pub(crate) mod lazy_static;
 
 fn build_stream_parser<'a>(psess: &'a ParseSess, tokens: TokenStream) -> Parser<'a> {
-    stream_to_parser(psess, tokens, MACRO_ARGUMENTS).recovery(Recovery::Forbidden)
+    Parser::new(psess, tokens, MACRO_ARGUMENTS).recovery(Recovery::Forbidden)
 }
 
 fn build_parser<'a>(context: &RewriteContext<'a>, tokens: TokenStream) -> Parser<'a> {
@@ -29,8 +28,8 @@ fn parse_macro_arg<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
             if Parser::nonterminal_may_begin_with($nt_kind, &cloned_parser.token) {
                 match $try_parse(&mut cloned_parser) {
                     Ok(x) => {
-                        if parser.psess.dcx.has_errors().is_some() {
-                            parser.psess.dcx.reset_err_count();
+                        if parser.psess.dcx().has_errors().is_some() {
+                            parser.psess.dcx().reset_err_count();
                         } else {
                             // Parsing succeeded.
                             *parser = cloned_parser;
@@ -39,7 +38,7 @@ fn parse_macro_arg<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
                     }
                     Err(e) => {
                         e.cancel();
-                        parser.psess.dcx.reset_err_count();
+                        parser.psess.dcx().reset_err_count();
                     }
                 }
             }
@@ -48,7 +47,7 @@ fn parse_macro_arg<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
 
     parse_macro_arg!(
         Expr,
-        NonterminalKind::Expr,
+        NonterminalKind::Expr(Expr),
         |parser: &mut Parser<'b>| parser.parse_expr(),
         |x: ptr::P<ast::Expr>| Some(x)
     );
@@ -60,7 +59,7 @@ fn parse_macro_arg<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
     );
     parse_macro_arg!(
         Pat,
-        NonterminalKind::PatParam { inferred: false },
+        NonterminalKind::Pat(PatParam { inferred: false }),
         |parser: &mut Parser<'b>| parser.parse_pat_no_top_alt(None, None),
         |x: ptr::P<ast::Pat>| Some(x)
     );
@@ -82,20 +81,18 @@ pub(crate) struct ParsedMacroArgs {
 }
 
 fn check_keyword<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
-    for &keyword in RUST_KW.iter() {
-        if parser.token.is_keyword(keyword)
-            && parser.look_ahead(1, |t| {
-                t.kind == TokenKind::Eof || t.kind == TokenKind::Comma
-            })
-        {
-            parser.bump();
-            return Some(MacroArg::Keyword(
-                symbol::Ident::with_dummy_span(keyword),
-                parser.prev_token.span,
-            ));
-        }
+    if parser.token.is_reserved_ident()
+        && parser.look_ahead(1, |t| *t == TokenKind::Eof || *t == TokenKind::Comma)
+    {
+        let keyword = parser.token.ident().unwrap().0.name;
+        parser.bump();
+        Some(MacroArg::Keyword(
+            symbol::Ident::with_dummy_span(keyword),
+            parser.prev_token.span,
+        ))
+    } else {
+        None
     }
-    None
 }
 
 pub(crate) fn parse_macro_args(
@@ -131,7 +128,7 @@ pub(crate) fn parse_macro_args(
                                 Some(arg) => {
                                     args.push(arg);
                                     parser.bump();
-                                    if parser.token.kind == TokenKind::Eof && args.len() == 2 {
+                                    if parser.token == TokenKind::Eof && args.len() == 2 {
                                         vec_with_semi = true;
                                         break;
                                     }
@@ -150,7 +147,7 @@ pub(crate) fn parse_macro_args(
 
             parser.bump();
 
-            if parser.token.kind == TokenKind::Eof {
+            if parser.token == TokenKind::Eof {
                 trailing_comma = true;
                 break;
             }
@@ -171,65 +168,3 @@ pub(crate) fn parse_expr(
     let mut parser = build_parser(context, tokens);
     parser.parse_expr().ok()
 }
-
-const RUST_KW: [Symbol; 59] = [
-    kw::PathRoot,
-    kw::DollarCrate,
-    kw::Underscore,
-    kw::As,
-    kw::Box,
-    kw::Break,
-    kw::Const,
-    kw::Continue,
-    kw::Crate,
-    kw::Else,
-    kw::Enum,
-    kw::Extern,
-    kw::False,
-    kw::Fn,
-    kw::For,
-    kw::If,
-    kw::Impl,
-    kw::In,
-    kw::Let,
-    kw::Loop,
-    kw::Match,
-    kw::Mod,
-    kw::Move,
-    kw::Mut,
-    kw::Pub,
-    kw::Ref,
-    kw::Return,
-    kw::SelfLower,
-    kw::SelfUpper,
-    kw::Static,
-    kw::Struct,
-    kw::Super,
-    kw::Trait,
-    kw::True,
-    kw::Type,
-    kw::Unsafe,
-    kw::Use,
-    kw::Where,
-    kw::While,
-    kw::Abstract,
-    kw::Become,
-    kw::Do,
-    kw::Final,
-    kw::Macro,
-    kw::Override,
-    kw::Priv,
-    kw::Typeof,
-    kw::Unsized,
-    kw::Virtual,
-    kw::Yield,
-    kw::Dyn,
-    kw::Async,
-    kw::Try,
-    kw::UnderscoreLifetime,
-    kw::StaticLifetime,
-    kw::Auto,
-    kw::Catch,
-    kw::Default,
-    kw::Union,
-];

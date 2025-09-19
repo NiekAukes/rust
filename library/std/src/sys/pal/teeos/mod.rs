@@ -2,37 +2,25 @@
 //!
 //! This module contains the facade (aka platform-specific) implementations of
 //! OS level functionality for Teeos.
-#![allow(unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
-pub use self::rand::hashmap_random_keys;
-
-pub mod alloc;
-#[path = "../unsupported/args.rs"]
-pub mod args;
-#[path = "../unsupported/env.rs"]
-pub mod env;
-//pub mod fd;
-#[path = "../unsupported/fs.rs"]
-pub mod fs;
-#[path = "../unsupported/io.rs"]
-pub mod io;
-pub mod net;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
-#[path = "../unsupported/process.rs"]
-pub mod process;
-mod rand;
-pub mod stdio;
 pub mod thread;
-pub mod thread_local_dtor;
-#[path = "../unix/thread_local_key.rs"]
-pub mod thread_local_key;
 #[allow(non_upper_case_globals)]
 #[path = "../unix/time.rs"]
 pub mod time;
+
+#[path = "../unix/sync"]
+pub mod sync {
+    mod condvar;
+    mod mutex;
+    pub use condvar::Condvar;
+    pub use mutex::Mutex;
+}
 
 use crate::io::ErrorKind;
 
@@ -70,7 +58,7 @@ pub fn decode_error_kind(errno: i32) -> ErrorKind {
         libc::ECONNREFUSED => ConnectionRefused,
         libc::ECONNRESET => ConnectionReset,
         libc::EDEADLK => Deadlock,
-        libc::EDQUOT => FilesystemQuotaExceeded,
+        libc::EDQUOT => QuotaExceeded,
         libc::EEXIST => AlreadyExists,
         libc::EFBIG => FileTooLarge,
         libc::EHOSTUNREACH => HostUnreachable,
@@ -150,5 +138,5 @@ pub fn unsupported<T>() -> std_io::Result<T> {
 }
 
 pub fn unsupported_err() -> std_io::Error {
-    std_io::Error::new(std_io::ErrorKind::Unsupported, "operation not supported on this platform")
+    std_io::Error::UNSUPPORTED_PLATFORM
 }

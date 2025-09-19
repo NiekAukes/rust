@@ -67,26 +67,20 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(test)]
-mod tests;
+use core::clone::CloneToUninit;
 
 use crate::borrow::{Borrow, Cow};
-use crate::cmp;
 use crate::collections::TryReserveError;
 use crate::error::Error;
-use crate::fmt;
-use crate::fs;
+use crate::ffi::{OsStr, OsString, os_str};
 use crate::hash::{Hash, Hasher};
-use crate::io;
 use crate::iter::FusedIterator;
 use crate::ops::{self, Deref};
 use crate::rc::Rc;
 use crate::str::FromStr;
 use crate::sync::Arc;
-
-use crate::ffi::{os_str, OsStr, OsString};
-use crate::sys;
-use crate::sys::path::{is_sep_byte, is_verbatim_sep, parse_prefix, MAIN_SEP_STR};
+use crate::sys::path::{MAIN_SEP_STR, is_sep_byte, is_verbatim_sep, parse_prefix};
+use crate::{cmp, fmt, fs, io, sys};
 
 ////////////////////////////////////////////////////////////////////////////////
 // GENERAL NOTES
@@ -266,6 +260,7 @@ pub fn is_separator(c: char) -> bool {
 ///
 /// For example, `/` on Unix and `\` on Windows.
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "path_main_separator")]
 pub const MAIN_SEPARATOR: char = crate::sys::path::MAIN_SEP;
 
 /// The primary separator of path components for the current platform.
@@ -297,11 +292,6 @@ where
         }
         iter = iter_next;
     }
-}
-
-// Detect scheme on Redox
-fn has_redox_scheme(s: &[u8]) -> bool {
-    cfg!(target_os = "redox") && s.contains(&b':')
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -360,6 +350,15 @@ fn split_file_at_dot(file: &OsStr) -> (&OsStr, Option<&OsStr>) {
             OsStr::from_encoded_bytes_unchecked(before),
             Some(OsStr::from_encoded_bytes_unchecked(after)),
         )
+    }
+}
+
+/// Checks whether the string is valid as a file extension, or panics otherwise.
+fn validate_extension(extension: &OsStr) {
+    for &b in extension.as_encoded_bytes() {
+        if is_sep_byte(b) {
+            panic!("extension cannot contain path separators: {extension:?}");
+        }
     }
 }
 
@@ -1156,6 +1155,23 @@ impl FusedIterator for Ancestors<'_> {}
 /// ```
 ///
 /// Which method works best depends on what kind of situation you're in.
+///
+/// Note that `PathBuf` does not always sanitize arguments, for example
+/// [`push`] allows paths built from strings which include separators:
+///
+/// ```
+/// use std::path::PathBuf;
+///
+/// let mut path = PathBuf::new();
+///
+/// path.push(r"C:\");
+/// path.push("windows");
+/// path.push(r"..\otherdir");
+/// path.push("system32");
+/// ```
+///
+/// The behavior of `PathBuf` may be changed to a panic on such inputs
+/// in the future. [`Extend::extend`] should be used to add multi-part paths.
 #[cfg_attr(not(test), rustc_diagnostic_item = "PathBuf")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct PathBuf {
@@ -1163,11 +1179,6 @@ pub struct PathBuf {
 }
 
 impl PathBuf {
-    #[inline]
-    fn as_mut_vec(&mut self) -> &mut Vec<u8> {
-        self.inner.as_mut_vec_for_path_buf()
-    }
-
     /// Allocates an empty `PathBuf`.
     ///
     /// # Examples
@@ -1180,7 +1191,8 @@ impl PathBuf {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[must_use]
     #[inline]
-    pub fn new() -> PathBuf {
+    #[rustc_const_unstable(feature = "const_pathbuf_osstring_new", issue = "141520")]
+    pub const fn new() -> PathBuf {
         PathBuf { inner: OsString::new() }
     }
 
@@ -1219,11 +1231,31 @@ impl PathBuf {
     /// let p = PathBuf::from("/test");
     /// assert_eq!(Path::new("/test"), p.as_path());
     /// ```
+    #[cfg_attr(not(test), rustc_diagnostic_item = "pathbuf_as_path")]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[must_use]
     #[inline]
     pub fn as_path(&self) -> &Path {
         self
+    }
+
+    /// Consumes and leaks the `PathBuf`, returning a mutable reference to the contents,
+    /// `&'a mut Path`.
+    ///
+    /// The caller has free choice over the returned lifetime, including 'static.
+    /// Indeed, this function is ideally used for data that lives for the remainder of
+    /// the program’s life, as dropping the returned reference will cause a memory leak.
+    ///
+    /// It does not reallocate or shrink the `PathBuf`, so the leaked allocation may include
+    /// unused capacity that is not part of the returned slice. If you want to discard excess
+    /// capacity, call [`into_boxed_path`], and then [`Box::leak`] instead.
+    /// However, keep in mind that trimming the capacity may result in a reallocation and copy.
+    ///
+    /// [`into_boxed_path`]: Self::into_boxed_path
+    #[stable(feature = "os_string_pathbuf_leak", since = "CURRENT_RUSTC_VERSION")]
+    #[inline]
+    pub fn leak<'a>(self) -> &'a mut Path {
+        Path::from_inner_mut(self.inner.leak())
     }
 
     /// Extends `self` with `path`.
@@ -1271,7 +1303,8 @@ impl PathBuf {
 
     fn _push(&mut self, path: &Path) {
         // in general, a separator is needed if the rightmost byte is not a separator
-        let mut need_sep = self.as_mut_vec().last().map(|c| !is_sep_byte(*c)).unwrap_or(false);
+        let buf = self.inner.as_encoded_bytes();
+        let mut need_sep = buf.last().map(|c| !is_sep_byte(*c)).unwrap_or(false);
 
         // in the special case of `C:` on Windows, do *not* add a separator
         let comps = self.components();
@@ -1283,9 +1316,18 @@ impl PathBuf {
             need_sep = false
         }
 
+        let need_clear = if cfg!(target_os = "cygwin") {
+            // If path is absolute and its prefix is none, it is like `/foo`,
+            // and will be handled below.
+            path.prefix().is_some()
+        } else {
+            // On Unix: prefix is always None.
+            path.is_absolute() || path.prefix().is_some()
+        };
+
         // absolute `path` replaces `self`
-        if path.is_absolute() || path.prefix().is_some() {
-            self.as_mut_vec().truncate(0);
+        if need_clear {
+            self.inner.truncate(0);
 
         // verbatim paths need . and .. removed
         } else if comps.prefix_verbatim() && !path.inner.is_empty() {
@@ -1330,7 +1372,7 @@ impl PathBuf {
         // `path` has a root but no prefix, e.g., `\windows` (Windows only)
         } else if path.has_root() {
             let prefix_len = self.components().prefix_remaining();
-            self.as_mut_vec().truncate(prefix_len);
+            self.inner.truncate(prefix_len);
 
         // `path` is a pure relative path
         } else if need_sep {
@@ -1363,7 +1405,7 @@ impl PathBuf {
     pub fn pop(&mut self) -> bool {
         match self.parent().map(|p| p.as_u8_slice().len()) {
             Some(len) => {
-                self.as_mut_vec().truncate(len);
+                self.inner.truncate(len);
                 true
             }
             None => false,
@@ -1378,6 +1420,9 @@ impl PathBuf {
     /// Otherwise it is equivalent to calling [`pop`] and then pushing
     /// `file_name`. The new path will be a sibling of the original path.
     /// (That is, it will have the same parent.)
+    ///
+    /// The argument is not sanitized, so can include separators. This
+    /// behavior may be changed to a panic in the future.
     ///
     /// [`self.file_name`]: Path::file_name
     /// [`pop`]: PathBuf::pop
@@ -1399,6 +1444,12 @@ impl PathBuf {
     ///
     /// buf.set_file_name("baz");
     /// assert!(buf == PathBuf::from("/baz"));
+    ///
+    /// buf.set_file_name("../b/c.txt");
+    /// assert!(buf == PathBuf::from("/../b/c.txt"));
+    ///
+    /// buf.set_file_name("baz");
+    /// assert!(buf == PathBuf::from("/../b/baz"));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn set_file_name<S: AsRef<OsStr>>(&mut self, file_name: S) {
@@ -1424,6 +1475,11 @@ impl PathBuf {
     ///
     /// If `extension` is the empty string, [`self.extension`] will be [`None`]
     /// afterwards, not `Some("")`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the passed extension contains a path separator (see
+    /// [`is_separator`]).
     ///
     /// # Caveats
     ///
@@ -1470,6 +1526,8 @@ impl PathBuf {
     }
 
     fn _set_extension(&mut self, extension: &OsStr) -> bool {
+        validate_extension(extension);
+
         let file_stem = match self.file_stem() {
             None => return false,
             Some(f) => f.as_encoded_bytes(),
@@ -1478,15 +1536,93 @@ impl PathBuf {
         // truncate until right after the file stem
         let end_file_stem = file_stem[file_stem.len()..].as_ptr().addr();
         let start = self.inner.as_encoded_bytes().as_ptr().addr();
-        let v = self.as_mut_vec();
-        v.truncate(end_file_stem.wrapping_sub(start));
+        self.inner.truncate(end_file_stem.wrapping_sub(start));
 
         // add the new extension, if any
         let new = extension.as_encoded_bytes();
         if !new.is_empty() {
-            v.reserve_exact(new.len() + 1);
-            v.push(b'.');
-            v.extend_from_slice(new);
+            self.inner.reserve_exact(new.len() + 1);
+            self.inner.push(".");
+            // SAFETY: Since a UTF-8 string was just pushed, it is not possible
+            // for the buffer to end with a surrogate half.
+            unsafe { self.inner.extend_from_slice_unchecked(new) };
+        }
+
+        true
+    }
+
+    /// Append [`self.extension`] with `extension`.
+    ///
+    /// Returns `false` and does nothing if [`self.file_name`] is [`None`],
+    /// returns `true` and updates the extension otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the passed extension contains a path separator (see
+    /// [`is_separator`]).
+    ///
+    /// # Caveats
+    ///
+    /// The appended `extension` may contain dots and will be used in its entirety,
+    /// but only the part after the final dot will be reflected in
+    /// [`self.extension`].
+    ///
+    /// See the examples below.
+    ///
+    /// [`self.file_name`]: Path::file_name
+    /// [`self.extension`]: Path::extension
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(path_add_extension)]
+    ///
+    /// use std::path::{Path, PathBuf};
+    ///
+    /// let mut p = PathBuf::from("/feel/the");
+    ///
+    /// p.add_extension("formatted");
+    /// assert_eq!(Path::new("/feel/the.formatted"), p.as_path());
+    ///
+    /// p.add_extension("dark.side");
+    /// assert_eq!(Path::new("/feel/the.formatted.dark.side"), p.as_path());
+    ///
+    /// p.set_extension("cookie");
+    /// assert_eq!(Path::new("/feel/the.formatted.dark.cookie"), p.as_path());
+    ///
+    /// p.set_extension("");
+    /// assert_eq!(Path::new("/feel/the.formatted.dark"), p.as_path());
+    ///
+    /// p.add_extension("");
+    /// assert_eq!(Path::new("/feel/the.formatted.dark"), p.as_path());
+    /// ```
+    #[unstable(feature = "path_add_extension", issue = "127292")]
+    pub fn add_extension<S: AsRef<OsStr>>(&mut self, extension: S) -> bool {
+        self._add_extension(extension.as_ref())
+    }
+
+    fn _add_extension(&mut self, extension: &OsStr) -> bool {
+        validate_extension(extension);
+
+        let file_name = match self.file_name() {
+            None => return false,
+            Some(f) => f.as_encoded_bytes(),
+        };
+
+        let new = extension.as_encoded_bytes();
+        if !new.is_empty() {
+            // truncate until right after the file name
+            // this is necessary for trimming the trailing slash
+            let end_file_name = file_name[file_name.len()..].as_ptr().addr();
+            let start = self.inner.as_encoded_bytes().as_ptr().addr();
+            self.inner.truncate(end_file_name.wrapping_sub(start));
+
+            // append the new extension
+            self.inner.reserve_exact(new.len() + 1);
+            self.inner.push(".");
+            // SAFETY: Since a UTF-8 string was just pushed, it is not possible
+            // for the buffer to end with a surrogate half.
+            unsafe { self.inner.extend_from_slice_unchecked(new) };
         }
 
         true
@@ -1644,6 +1780,16 @@ impl From<&Path> for Box<Path> {
     }
 }
 
+#[stable(feature = "box_from_mut_slice", since = "1.84.0")]
+impl From<&mut Path> for Box<Path> {
+    /// Creates a boxed [`Path`] from a reference.
+    ///
+    /// This will allocate and clone `path` to it.
+    fn from(path: &mut Path) -> Box<Path> {
+        Self::from(&*path)
+    }
+}
+
 #[stable(feature = "box_from_cow", since = "1.45.0")]
 impl From<Cow<'_, Path>> for Box<Path> {
     /// Creates a boxed [`Path`] from a clone-on-write pointer.
@@ -1702,7 +1848,7 @@ impl<T: ?Sized + AsRef<OsStr>> From<&T> for PathBuf {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl From<OsString> for PathBuf {
-    /// Converts an [`OsString`] into a [`PathBuf`]
+    /// Converts an [`OsString`] into a [`PathBuf`].
     ///
     /// This conversion does not allocate or copy memory.
     #[inline]
@@ -1745,6 +1891,19 @@ impl FromStr for PathBuf {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<P: AsRef<Path>> FromIterator<P> for PathBuf {
+    /// Creates a new `PathBuf` from the [`Path`] elements of an iterator.
+    ///
+    /// This uses [`push`](Self::push) to add each element, so can be used to adjoin multiple path
+    /// [components](Components).
+    ///
+    /// # Examples
+    /// ```
+    /// # use std::path::PathBuf;
+    /// let path = PathBuf::from_iter(["/tmp", "foo", "bar"]);
+    /// assert_eq!(path, PathBuf::from("/tmp/foo/bar"));
+    /// ```
+    ///
+    /// See documentation for [`push`](Self::push) for more details on how the path is constructed.
     fn from_iter<I: IntoIterator<Item = P>>(iter: I) -> PathBuf {
         let mut buf = PathBuf::new();
         buf.extend(iter);
@@ -1754,6 +1913,20 @@ impl<P: AsRef<Path>> FromIterator<P> for PathBuf {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<P: AsRef<Path>> Extend<P> for PathBuf {
+    /// Extends `self` with [`Path`] elements from `iter`.
+    ///
+    /// This uses [`push`](Self::push) to add each element, so can be used to adjoin multiple path
+    /// [components](Components).
+    ///
+    /// # Examples
+    /// ```
+    /// # use std::path::PathBuf;
+    /// let mut path = PathBuf::from("/tmp");
+    /// path.extend(["foo", "bar", "file.txt"]);
+    /// assert_eq!(path, PathBuf::from("/tmp/foo/bar/file.txt"));
+    /// ```
+    ///
+    /// See documentation for [`push`](Self::push) for more details on how the path is constructed.
     fn extend<I: IntoIterator<Item = P>>(&mut self, iter: I) {
         iter.into_iter().for_each(move |p| self.push(p.as_ref()));
     }
@@ -1872,6 +2045,15 @@ impl From<&Path> for Arc<Path> {
     }
 }
 
+#[stable(feature = "shared_from_mut_slice", since = "1.84.0")]
+impl From<&mut Path> for Arc<Path> {
+    /// Converts a [`Path`] into an [`Arc`] by copying the [`Path`] data into a new [`Arc`] buffer.
+    #[inline]
+    fn from(s: &mut Path) -> Arc<Path> {
+        Arc::from(&*s)
+    }
+}
+
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<PathBuf> for Rc<Path> {
     /// Converts a [`PathBuf`] into an <code>[Rc]<[Path]></code> by moving the [`PathBuf`] data into
@@ -1890,6 +2072,15 @@ impl From<&Path> for Rc<Path> {
     fn from(s: &Path) -> Rc<Path> {
         let rc: Rc<OsStr> = Rc::from(s.as_os_str());
         unsafe { Rc::from_raw(Rc::into_raw(rc) as *const Path) }
+    }
+}
+
+#[stable(feature = "shared_from_mut_slice", since = "1.84.0")]
+impl From<&mut Path> for Rc<Path> {
+    /// Converts a [`Path`] into an [`Rc`] by copying the [`Path`] data into a new [`Rc`] buffer.
+    #[inline]
+    fn from(s: &mut Path) -> Rc<Path> {
+        Rc::from(&*s)
     }
 }
 
@@ -1982,12 +2173,10 @@ impl AsRef<OsStr> for PathBuf {
 /// ```
 #[cfg_attr(not(test), rustc_diagnostic_item = "Path")]
 #[stable(feature = "rust1", since = "1.0.0")]
-// `Path::new` current implementation relies
+// `Path::new` and `impl CloneToUninit for Path` current implementation relies
 // on `Path` being layout-compatible with `OsStr`.
-// However, `Path` layout is considered an implementation detail and must not be relied upon. We
-// want `repr(transparent)` but we don't want it to show up in rustdoc, so we hide it under
-// `cfg(doc)`. This is an ad-hoc implementation of attribute privacy.
-#[cfg_attr(not(doc), repr(transparent))]
+// However, `Path` layout is considered an implementation detail and must not be relied upon.
+#[repr(transparent)]
 pub struct Path {
     inner: OsStr,
 }
@@ -2002,6 +2191,13 @@ pub struct Path {
 #[stable(since = "1.7.0", feature = "strip_prefix")]
 pub struct StripPrefixError(());
 
+/// An error returned from [`Path::normalize_lexically`] if a `..` parent reference
+/// would escape the path.
+#[unstable(feature = "normalize_lexically", issue = "134694")]
+#[derive(Debug, PartialEq)]
+#[non_exhaustive]
+pub struct NormalizeError;
+
 impl Path {
     // The following (private!) function allows construction of a path from a u8
     // slice, which is only safe when it is known to follow the OsStr encoding.
@@ -2009,7 +2205,7 @@ impl Path {
         unsafe { Path::new(OsStr::from_encoded_bytes_unchecked(s)) }
     }
     // The following (private!) function reveals the byte encoding used for OsStr.
-    fn as_u8_slice(&self) -> &[u8] {
+    pub(crate) fn as_u8_slice(&self) -> &[u8] {
         self.inner.as_encoded_bytes()
     }
 
@@ -2110,7 +2306,7 @@ impl Path {
 
     /// Converts a `Path` to a [`Cow<str>`].
     ///
-    /// Any non-Unicode sequences are replaced with
+    /// Any non-UTF-8 sequences are replaced with
     /// [`U+FFFD REPLACEMENT CHARACTER`][U+FFFD].
     ///
     /// [U+FFFD]: super::char::REPLACEMENT_CHARACTER
@@ -2150,6 +2346,7 @@ impl Path {
     #[must_use = "this returns the result of the operation, \
                   without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "path_to_pathbuf")]
     pub fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(self.inner.to_os_string())
     }
@@ -2176,12 +2373,7 @@ impl Path {
     #[must_use]
     #[allow(deprecated)]
     pub fn is_absolute(&self) -> bool {
-        if cfg!(target_os = "redox") {
-            // FIXME: Allow Redox prefixes
-            self.has_root() || has_redox_scheme(self.as_u8_slice())
-        } else {
-            self.has_root() && (cfg!(any(unix, target_os = "wasi")) || self.prefix().is_some())
-        }
+        sys::path::is_absolute(self)
     }
 
     /// Returns `true` if the `Path` is relative, i.e., not absolute.
@@ -2204,7 +2396,7 @@ impl Path {
         !self.is_absolute()
     }
 
-    fn prefix(&self) -> Option<Prefix<'_>> {
+    pub(crate) fn prefix(&self) -> Option<Prefix<'_>> {
         self.components().prefix
     }
 
@@ -2359,6 +2551,7 @@ impl Path {
     /// assert_eq!(path.strip_prefix("/test/haha/foo.txt/"), Ok(Path::new("")));
     ///
     /// assert!(path.strip_prefix("test").is_err());
+    /// assert!(path.strip_prefix("/te").is_err());
     /// assert!(path.strip_prefix("/haha").is_err());
     ///
     /// let prefix = PathBuf::from("/test/");
@@ -2590,15 +2783,30 @@ impl Path {
     /// # Examples
     ///
     /// ```
-    /// use std::path::{Path, PathBuf};
+    /// use std::path::Path;
     ///
     /// let path = Path::new("foo.rs");
-    /// assert_eq!(path.with_extension("txt"), PathBuf::from("foo.txt"));
+    /// assert_eq!(path.with_extension("txt"), Path::new("foo.txt"));
+    /// assert_eq!(path.with_extension(""), Path::new("foo"));
+    /// ```
+    ///
+    /// Handling multiple extensions:
+    ///
+    /// ```
+    /// use std::path::Path;
     ///
     /// let path = Path::new("foo.tar.gz");
-    /// assert_eq!(path.with_extension(""), PathBuf::from("foo.tar"));
-    /// assert_eq!(path.with_extension("xz"), PathBuf::from("foo.tar.xz"));
-    /// assert_eq!(path.with_extension("").with_extension("txt"), PathBuf::from("foo.txt"));
+    /// assert_eq!(path.with_extension("xz"), Path::new("foo.tar.xz"));
+    /// assert_eq!(path.with_extension("").with_extension("txt"), Path::new("foo.txt"));
+    /// ```
+    ///
+    /// Adding an extension where one did not exist:
+    ///
+    /// ```
+    /// use std::path::Path;
+    ///
+    /// let path = Path::new("foo");
+    /// assert_eq!(path.with_extension("rs"), Path::new("foo.rs"));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn with_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
@@ -2613,19 +2821,46 @@ impl Path {
             None => {
                 // Enough capacity for the extension and the dot
                 let capacity = self_len + extension.len() + 1;
-                let whole_path = self_bytes.iter();
+                let whole_path = self_bytes;
                 (capacity, whole_path)
             }
             Some(previous_extension) => {
                 let capacity = self_len + extension.len() - previous_extension.len();
-                let path_till_dot = self_bytes[..self_len - previous_extension.len()].iter();
+                let path_till_dot = &self_bytes[..self_len - previous_extension.len()];
                 (capacity, path_till_dot)
             }
         };
 
         let mut new_path = PathBuf::with_capacity(new_capacity);
-        new_path.as_mut_vec().extend(slice_to_copy);
+        // SAFETY: The path is empty, so cannot have surrogate halves.
+        unsafe { new_path.inner.extend_from_slice_unchecked(slice_to_copy) };
         new_path.set_extension(extension);
+        new_path
+    }
+
+    /// Creates an owned [`PathBuf`] like `self` but with the extension added.
+    ///
+    /// See [`PathBuf::add_extension`] for more details.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(path_add_extension)]
+    ///
+    /// use std::path::{Path, PathBuf};
+    ///
+    /// let path = Path::new("foo.rs");
+    /// assert_eq!(path.with_added_extension("txt"), PathBuf::from("foo.rs.txt"));
+    ///
+    /// let path = Path::new("foo.tar.gz");
+    /// assert_eq!(path.with_added_extension(""), PathBuf::from("foo.tar.gz"));
+    /// assert_eq!(path.with_added_extension("xz"), PathBuf::from("foo.tar.gz.xz"));
+    /// assert_eq!(path.with_added_extension("").with_added_extension("txt"), PathBuf::from("foo.tar.gz.txt"));
+    /// ```
+    #[unstable(feature = "path_add_extension", issue = "127292")]
+    pub fn with_added_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
+        let mut new_path = self.to_path_buf();
+        new_path.add_extension(extension);
         new_path
     }
 
@@ -2668,8 +2903,7 @@ impl Path {
         Components {
             path: self.as_u8_slice(),
             prefix,
-            has_physical_root: has_physical_root(self.as_u8_slice(), prefix)
-                || has_redox_scheme(self.as_u8_slice()),
+            has_physical_root: has_physical_root(self.as_u8_slice(), prefix),
             front: State::Prefix,
             back: State::Body,
         }
@@ -2786,6 +3020,67 @@ impl Path {
         fs::canonicalize(self)
     }
 
+    /// Normalize a path, including `..` without traversing the filesystem.
+    ///
+    /// Returns an error if normalization would leave leading `..` components.
+    ///
+    /// <div class="warning">
+    ///
+    /// This function always resolves `..` to the "lexical" parent.
+    /// That is "a/b/../c" will always resolve to `a/c` which can change the meaning of the path.
+    /// In particular, `a/c` and `a/b/../c` are distinct on many systems because `b` may be a symbolic link, so its parent isn’t `a`.
+    ///
+    /// </div>
+    ///
+    /// [`path::absolute`](absolute) is an alternative that preserves `..`.
+    /// Or [`Path::canonicalize`] can be used to resolve any `..` by querying the filesystem.
+    #[unstable(feature = "normalize_lexically", issue = "134694")]
+    pub fn normalize_lexically(&self) -> Result<PathBuf, NormalizeError> {
+        let mut lexical = PathBuf::new();
+        let mut iter = self.components().peekable();
+
+        // Find the root, if any, and add it to the lexical path.
+        // Here we treat the Windows path "C:\" as a single "root" even though
+        // `components` splits it into two: (Prefix, RootDir).
+        let root = match iter.peek() {
+            Some(Component::ParentDir) => return Err(NormalizeError),
+            Some(p @ Component::RootDir) | Some(p @ Component::CurDir) => {
+                lexical.push(p);
+                iter.next();
+                lexical.as_os_str().len()
+            }
+            Some(Component::Prefix(prefix)) => {
+                lexical.push(prefix.as_os_str());
+                iter.next();
+                if let Some(p @ Component::RootDir) = iter.peek() {
+                    lexical.push(p);
+                    iter.next();
+                }
+                lexical.as_os_str().len()
+            }
+            None => return Ok(PathBuf::new()),
+            Some(Component::Normal(_)) => 0,
+        };
+
+        for component in iter {
+            match component {
+                Component::RootDir => unreachable!(),
+                Component::Prefix(_) => return Err(NormalizeError),
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    // It's an error if ParentDir causes us to go above the "root".
+                    if lexical.as_os_str().len() == root {
+                        return Err(NormalizeError);
+                    } else {
+                        lexical.pop();
+                    }
+                }
+                Component::Normal(path) => lexical.push(path),
+            }
+        }
+        Ok(lexical)
+    }
+
     /// Reads a symbolic link, returning the file that the link points to.
     ///
     /// This is an alias to [`fs::read_link`].
@@ -2875,6 +3170,8 @@ impl Path {
     /// prevent time-of-check to time-of-use (TOCTOU) bugs. You should only use it in scenarios
     /// where those bugs are not an issue.
     ///
+    /// This is an alias for [`std::fs::exists`](crate::fs::exists).
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -2887,7 +3184,7 @@ impl Path {
     #[stable(feature = "path_try_exists", since = "1.63.0")]
     #[inline]
     pub fn try_exists(&self) -> io::Result<bool> {
-        fs::try_exists(self)
+        fs::exists(self)
     }
 
     /// Returns `true` if the path exists on disk and is pointing at a regular file.
@@ -2986,10 +3283,20 @@ impl Path {
     /// allocating.
     #[stable(feature = "into_boxed_path", since = "1.20.0")]
     #[must_use = "`self` will be dropped if the result is not used"]
-    pub fn into_path_buf(self: Box<Path>) -> PathBuf {
+    pub fn into_path_buf(self: Box<Self>) -> PathBuf {
         let rw = Box::into_raw(self) as *mut OsStr;
         let inner = unsafe { Box::from_raw(rw) };
         PathBuf { inner: OsString::from(inner) }
+    }
+}
+
+#[unstable(feature = "clone_to_uninit", issue = "126799")]
+unsafe impl CloneToUninit for Path {
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    unsafe fn clone_to_uninit(&self, dst: *mut u8) {
+        // SAFETY: Path is just a transparent wrapper around OsStr
+        unsafe { self.inner.clone_to_uninit(dst) }
     }
 }
 
@@ -3069,15 +3376,19 @@ impl Hash for Path {
         let bytes = &bytes[prefix_len..];
 
         let mut component_start = 0;
-        let mut bytes_hashed = 0;
+        // track some extra state to avoid prefix collisions.
+        // ["foo", "bar"] and ["foobar"], will have the same payload bytes
+        // but result in different chunk_bits
+        let mut chunk_bits: usize = 0;
 
         for i in 0..bytes.len() {
             let is_sep = if verbatim { is_verbatim_sep(bytes[i]) } else { is_sep_byte(bytes[i]) };
             if is_sep {
                 if i > component_start {
                     let to_hash = &bytes[component_start..i];
+                    chunk_bits = chunk_bits.wrapping_add(to_hash.len());
+                    chunk_bits = chunk_bits.rotate_right(2);
                     h.write(to_hash);
-                    bytes_hashed += to_hash.len();
                 }
 
                 // skip over separator and optionally a following CurDir item
@@ -3089,7 +3400,7 @@ impl Hash for Path {
                 if !verbatim {
                     component_start += match tail {
                         [b'.'] => 1,
-                        [b'.', sep @ _, ..] if is_sep_byte(*sep) => 1,
+                        [b'.', sep, ..] if is_sep_byte(*sep) => 1,
                         _ => 0,
                     };
                 }
@@ -3098,11 +3409,12 @@ impl Hash for Path {
 
         if component_start < bytes.len() {
             let to_hash = &bytes[component_start..];
+            chunk_bits = chunk_bits.wrapping_add(to_hash.len());
+            chunk_bits = chunk_bits.rotate_right(2);
             h.write(to_hash);
-            bytes_hashed += to_hash.len();
         }
 
-        h.write_usize(bytes_hashed);
+        h.write_usize(chunk_bits);
     }
 }
 
@@ -3310,75 +3622,104 @@ impl Error for StripPrefixError {
     }
 }
 
+#[unstable(feature = "normalize_lexically", issue = "134694")]
+impl fmt::Display for NormalizeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("parent reference `..` points outside of base directory")
+    }
+}
+#[unstable(feature = "normalize_lexically", issue = "134694")]
+impl Error for NormalizeError {}
+
 /// Makes the path absolute without accessing the filesystem.
 ///
 /// If the path is relative, the current directory is used as the base directory.
-/// All intermediate components will be resolved according to platforms-specific
-/// rules but unlike [`canonicalize`][crate::fs::canonicalize] this does not
+/// All intermediate components will be resolved according to platform-specific
+/// rules, but unlike [`canonicalize`][crate::fs::canonicalize], this does not
 /// resolve symlinks and may succeed even if the path does not exist.
 ///
 /// If the `path` is empty or getting the
-/// [current directory][crate::env::current_dir] fails then an error will be
+/// [current directory][crate::env::current_dir] fails, then an error will be
 /// returned.
+///
+/// # Platform-specific behavior
+///
+/// On POSIX platforms, the path is resolved using [POSIX semantics][posix-semantics],
+/// except that it stops short of resolving symlinks. This means it will keep `..`
+/// components and trailing slashes.
+///
+/// On Windows, for verbatim paths, this will simply return the path as given. For other
+/// paths, this is currently equivalent to calling
+/// [`GetFullPathNameW`][windows-path].
+///
+/// On Cygwin, this is currently equivalent to calling [`cygwin_conv_path`][cygwin-path]
+/// with mode `CCP_WIN_A_TO_POSIX`, and then being processed like other POSIX platforms.
+/// If a Windows path is given, it will be converted to an absolute POSIX path without
+/// keeping `..`.
+///
+/// Note that these [may change in the future][changes].
+///
+/// # Errors
+///
+/// This function may return an error in the following situations:
+///
+/// * If `path` is syntactically invalid; in particular, if it is empty.
+/// * If getting the [current directory][crate::env::current_dir] fails.
 ///
 /// # Examples
 ///
-/// ## Posix paths
+/// ## POSIX paths
 ///
 /// ```
 /// # #[cfg(unix)]
 /// fn main() -> std::io::Result<()> {
-///   use std::path::{self, Path};
+///     use std::path::{self, Path};
 ///
-///   // Relative to absolute
-///   let absolute = path::absolute("foo/./bar")?;
-///   assert!(absolute.ends_with("foo/bar"));
+///     // Relative to absolute
+///     let absolute = path::absolute("foo/./bar")?;
+///     assert!(absolute.ends_with("foo/bar"));
 ///
-///   // Absolute to absolute
-///   let absolute = path::absolute("/foo//test/.././bar.rs")?;
-///   assert_eq!(absolute, Path::new("/foo/test/../bar.rs"));
-///   Ok(())
+///     // Absolute to absolute
+///     let absolute = path::absolute("/foo//test/.././bar.rs")?;
+///     assert_eq!(absolute, Path::new("/foo/test/../bar.rs"));
+///     Ok(())
 /// }
 /// # #[cfg(not(unix))]
 /// # fn main() {}
 /// ```
-///
-/// The path is resolved using [POSIX semantics][posix-semantics] except that
-/// it stops short of resolving symlinks. This means it will keep `..`
-/// components and trailing slashes.
 ///
 /// ## Windows paths
 ///
 /// ```
 /// # #[cfg(windows)]
 /// fn main() -> std::io::Result<()> {
-///   use std::path::{self, Path};
+///     use std::path::{self, Path};
 ///
-///   // Relative to absolute
-///   let absolute = path::absolute("foo/./bar")?;
-///   assert!(absolute.ends_with(r"foo\bar"));
+///     // Relative to absolute
+///     let absolute = path::absolute("foo/./bar")?;
+///     assert!(absolute.ends_with(r"foo\bar"));
 ///
-///   // Absolute to absolute
-///   let absolute = path::absolute(r"C:\foo//test\..\./bar.rs")?;
+///     // Absolute to absolute
+///     let absolute = path::absolute(r"C:\foo//test\..\./bar.rs")?;
 ///
-///   assert_eq!(absolute, Path::new(r"C:\foo\bar.rs"));
-///   Ok(())
+///     assert_eq!(absolute, Path::new(r"C:\foo\bar.rs"));
+///     Ok(())
 /// }
 /// # #[cfg(not(windows))]
 /// # fn main() {}
 /// ```
 ///
-/// For verbatim paths this will simply return the path as given. For other
-/// paths this is currently equivalent to calling [`GetFullPathNameW`][windows-path]
-/// This may change in the future.
+/// Note that this [may change in the future][changes].
 ///
+/// [changes]: io#platform-specific-behavior
 /// [posix-semantics]: https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap04.html#tag_04_13
 /// [windows-path]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfullpathnamew
+/// [cygwin-path]: https://cygwin.com/cygwin-api/func-cygwin-conv-path.html
 #[stable(feature = "absolute_path", since = "1.79.0")]
 pub fn absolute<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     let path = path.as_ref();
     if path.as_os_str().is_empty() {
-        Err(io::const_io_error!(io::ErrorKind::InvalidInput, "cannot make an empty path absolute",))
+        Err(io::const_error!(io::ErrorKind::InvalidInput, "cannot make an empty path absolute"))
     } else {
         sys::path::absolute(path)
     }

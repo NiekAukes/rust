@@ -1,10 +1,12 @@
 #![feature(coverage_attribute)]
 #![feature(custom_inner_attributes)] // for #![rustfmt::skip]
-#![feature(noop_waker)]
 #![allow(unused_assignments, dead_code)]
 #![rustfmt::skip]
 //@ edition: 2018
 //@ compile-flags: -Copt-level=1
+
+//@ aux-build: executor.rs
+extern crate executor;
 
 async fn c(x: u8) -> u8 {
     if x == 8 {
@@ -54,15 +56,7 @@ fn j(x: u8) {
     // non-async versions of `c()`, `d()`, and `f()` to make it similar to async `i()`.
     fn c(x: u8) -> u8 {
         if x == 8 {
-            1 // This line appears covered, but the 1-character expression span covering the `1`
-              // is not executed. (`llvm-cov show` displays a `^0` below the `1` ). This is because
-              // `fn j()` executes the open brace for the function body, followed by the function's
-              // first executable statement, `match x`. Inner function declarations are not
-              // "visible" to the MIR for `j()`, so the code region counts all lines between the
-              // open brace and the first statement as executed, which is, in a sense, true.
-              // `llvm-cov show` overcomes this kind of situation by showing the actual counts
-              // of the enclosed coverages, (that is, the `1` expression was not executed, and
-              // accurately displays a `0`).
+            1
         } else {
             0
         }
@@ -102,22 +96,4 @@ fn main() {
     l(6);
     let _ = m(5);
     executor::block_on(future.as_mut());
-}
-
-mod executor {
-    use core::future::Future;
-    use core::pin::pin;
-    use core::task::{Context, Poll, Waker};
-
-    #[coverage(off)]
-    pub fn block_on<F: Future>(mut future: F) -> F::Output {
-        let mut future = pin!(future);
-        let mut context = Context::from_waker(Waker::noop());
-
-        loop {
-            if let Poll::Ready(val) = future.as_mut().poll(&mut context) {
-                break val;
-            }
-        }
-    }
 }

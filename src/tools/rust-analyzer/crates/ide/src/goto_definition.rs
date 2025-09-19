@@ -1,18 +1,29 @@
 use std::{iter, mem::discriminant};
 
 use crate::{
-    doc_links::token_as_doc_comment, navigation_target::ToNav, FilePosition, NavigationTarget,
-    RangeInfo, TryToNav,
+    FilePosition, NavigationTarget, RangeInfo, TryToNav, UpmappingResult,
+    doc_links::token_as_doc_comment,
+    navigation_target::{self, ToNav},
 };
-use hir::{AsAssocItem, AssocItem, DescendPreference, MacroFileIdExt, ModuleDef, Semantics};
+use hir::{
+    AsAssocItem, AssocItem, CallableKind, FileRange, HasCrate, InFile, ModuleDef, Semantics, sym,
+};
 use ide_db::{
-    base_db::{AnchoredPath, FileId, FileLoader},
+    RootDatabase, SymbolKind,
+    base_db::{AnchoredPath, SourceDatabase},
     defs::{Definition, IdentClass},
+    famous_defs::FamousDefs,
     helpers::pick_best_token,
-    RootDatabase,
 };
 use itertools::Itertools;
-use syntax::{ast, AstNode, AstToken, SyntaxKind::*, SyntaxToken, TextRange, T};
+use span::{Edition, FileId};
+use syntax::{
+    AstNode, AstToken,
+    SyntaxKind::*,
+    SyntaxNode, SyntaxToken, T, TextRange,
+    ast::{self, HasLoopBody},
+    match_ast,
+};
 
 // Feature: Go to Definition
 //
@@ -20,19 +31,19 @@ use syntax::{ast, AstNode, AstToken, SyntaxKind::*, SyntaxToken, TextRange, T};
 //
 // For outline modules, this will navigate to the source file of the module.
 //
-// |===
-// | Editor  | Shortcut
+// | Editor  | Shortcut |
+// |---------|----------|
+// | VS Code | <kbd>F12</kbd> |
 //
-// | VS Code | kbd:[F12]
-// |===
-//
-// image::https://user-images.githubusercontent.com/48062697/113065563-025fbe00-91b1-11eb-83e4-a5a703610b23.gif[]
+// ![Go to Definition](https://user-images.githubusercontent.com/48062697/113065563-025fbe00-91b1-11eb-83e4-a5a703610b23.gif)
 pub(crate) fn goto_definition(
     db: &RootDatabase,
     FilePosition { file_id, offset }: FilePosition,
 ) -> Option<RangeInfo<Vec<NavigationTarget>>> {
     let sema = &Semantics::new(db);
-    let file = sema.parse(file_id).syntax().clone();
+    let file = sema.parse_guess_edition(file_id).syntax().clone();
+    let edition =
+        sema.attach_first_edition(file_id).map(|it| it.edition(db)).unwrap_or(Edition::CURRENT);
     let original_token = pick_best_token(file.token_at_offset(offset), |kind| match kind {
         IDENT
         | INT_NUMBER
@@ -44,7 +55,7 @@ pub(crate) fn goto_definition(
         | COMMENT => 4,
         // index and prefix ops
         T!['['] | T![']'] | T![?] | T![*] | T![-] | T![!] => 3,
-        kind if kind.is_keyword() => 2,
+        kind if kind.is_keyword(edition) => 2,
         T!['('] | T![')'] => 2,
         kind if kind.is_trivia() => 0,
         _ => 1,
@@ -56,7 +67,7 @@ pub(crate) fn goto_definition(
         });
     }
 
-    if let Some((range, resolution)) =
+    if let Some((range, _, _, resolution)) =
         sema.check_for_format_args_template(original_token.clone(), offset)
     {
         return Some(RangeInfo::new(
@@ -68,28 +79,40 @@ pub(crate) fn goto_definition(
         ));
     }
 
+    if let Some(navs) = handle_control_flow_keywords(sema, &original_token) {
+        return Some(RangeInfo::new(original_token.text_range(), navs));
+    }
+
+    if let Some(navs) = find_definition_for_known_blanket_dual_impls(sema, &original_token) {
+        return Some(RangeInfo::new(original_token.text_range(), navs));
+    }
+
     let navs = sema
-        .descend_into_macros(DescendPreference::None, original_token.clone())
+        .descend_into_macros_no_opaque(original_token.clone(), false)
         .into_iter()
         .filter_map(|token| {
-            let parent = token.parent()?;
+            let parent = token.value.parent()?;
 
-            if let Some(token) = ast::String::cast(token.clone()) {
-                if let Some(x) = try_lookup_include_path(sema, token, file_id) {
+            let token_file_id = token.file_id;
+            if let Some(token) = ast::String::cast(token.value.clone()) {
+                if let Some(x) =
+                    try_lookup_include_path(sema, InFile::new(token_file_id, token), file_id)
+                {
                     return Some(vec![x]);
                 }
             }
 
             if ast::TokenTree::can_cast(parent.kind()) {
-                if let Some(x) = try_lookup_macro_def_in_macro_use(sema, token) {
+                if let Some(x) = try_lookup_macro_def_in_macro_use(sema, token.value) {
                     return Some(vec![x]);
                 }
             }
+
             Some(
                 IdentClass::classify_node(sema, &parent)?
                     .definitions()
                     .into_iter()
-                    .flat_map(|def| {
+                    .flat_map(|(def, _)| {
                         if let Definition::ExternCrateDecl(crate_def) = def {
                             return crate_def
                                 .resolved_crate(db)
@@ -111,22 +134,95 @@ pub(crate) fn goto_definition(
     Some(RangeInfo::new(original_token.text_range(), navs))
 }
 
+// If the token is into(), try_into(), search the definition of From, TryFrom.
+fn find_definition_for_known_blanket_dual_impls(
+    sema: &Semantics<'_, RootDatabase>,
+    original_token: &SyntaxToken,
+) -> Option<Vec<NavigationTarget>> {
+    let method_call = ast::MethodCallExpr::cast(original_token.parent()?.parent()?)?;
+    let callable = sema.resolve_method_call_as_callable(&method_call)?;
+    let CallableKind::Function(f) = callable.kind() else { return None };
+    let assoc = f.as_assoc_item(sema.db)?;
+
+    let return_type = callable.return_type();
+    let fd = FamousDefs(sema, return_type.krate(sema.db));
+
+    let t = match assoc.container(sema.db) {
+        hir::AssocItemContainer::Trait(t) => t,
+        hir::AssocItemContainer::Impl(impl_)
+            if impl_.self_ty(sema.db).is_str() && f.name(sema.db) == sym::parse =>
+        {
+            let t = fd.core_convert_FromStr()?;
+            let t_f = t.function(sema.db, &sym::from_str)?;
+            return sema
+                .resolve_trait_impl_method(
+                    return_type.clone(),
+                    t,
+                    t_f,
+                    [return_type.type_arguments().next()?],
+                )
+                .map(|f| def_to_nav(sema.db, f.into()));
+        }
+        hir::AssocItemContainer::Impl(_) => return None,
+    };
+
+    let fn_name = f.name(sema.db);
+    let f = if fn_name == sym::into && fd.core_convert_Into() == Some(t) {
+        let dual = fd.core_convert_From()?;
+        let dual_f = dual.function(sema.db, &sym::from)?;
+        sema.resolve_trait_impl_method(
+            return_type.clone(),
+            dual,
+            dual_f,
+            [return_type, callable.receiver_param(sema.db)?.1],
+        )?
+    } else if fn_name == sym::try_into && fd.core_convert_TryInto() == Some(t) {
+        let dual = fd.core_convert_TryFrom()?;
+        let dual_f = dual.function(sema.db, &sym::try_from)?;
+        sema.resolve_trait_impl_method(
+            return_type.clone(),
+            dual,
+            dual_f,
+            // Extract the `T` from `Result<T, ..>`
+            [return_type.type_arguments().next()?, callable.receiver_param(sema.db)?.1],
+        )?
+    } else if fn_name == sym::to_string && fd.alloc_string_ToString() == Some(t) {
+        let dual = fd.core_fmt_Display()?;
+        let dual_f = dual.function(sema.db, &sym::fmt)?;
+        sema.resolve_trait_impl_method(
+            return_type.clone(),
+            dual,
+            dual_f,
+            [callable.receiver_param(sema.db)?.1.strip_reference()],
+        )?
+    } else {
+        return None;
+    };
+    // Assert that we got a trait impl function, if we are back in a trait definition we didn't
+    // succeed
+    let _t = f.as_assoc_item(sema.db)?.implemented_trait(sema.db)?;
+    let def = Definition::from(f);
+    Some(def_to_nav(sema.db, def))
+}
+
 fn try_lookup_include_path(
     sema: &Semantics<'_, RootDatabase>,
-    token: ast::String,
+    token: InFile<ast::String>,
     file_id: FileId,
 ) -> Option<NavigationTarget> {
-    let file = sema.hir_file_for(&token.syntax().parent()?).macro_file()?;
+    let file = token.file_id.macro_file()?;
+
+    // Check that we are in the eager argument expansion of an include macro
+    // that is we are the string input of it
     if !iter::successors(Some(file), |file| file.parent(sema.db).macro_file())
-        // Check that we are in the eager argument expansion of an include macro
         .any(|file| file.is_include_like_macro(sema.db) && file.eager_arg(sema.db).is_none())
     {
         return None;
     }
-    let path = token.value()?;
+    let path = token.value.value().ok()?;
 
     let file_id = sema.db.resolve_path(AnchoredPath { anchor: file_id, path: &path })?;
-    let size = sema.db.file_text(file_id).len().try_into().ok()?;
+    let size = sema.db.file_text(file_id).text(sema.db).len().try_into().ok()?;
     Some(NavigationTarget {
         file_id,
         full_range: TextRange::new(0.into(), size),
@@ -150,7 +246,7 @@ fn try_lookup_macro_def_in_macro_use(
 
     for mod_def in krate.root_module().declarations(sema.db) {
         if let ModuleDef::Macro(mac) = mod_def {
-            if mac.name(sema.db).as_str() == Some(token.text()) {
+            if mac.name(sema.db).as_str() == token.text() {
                 if let Some(nav) = mac.try_to_nav(sema.db) {
                     return Some(nav.call_site);
                 }
@@ -179,30 +275,238 @@ fn try_filter_trait_item_definition(
         AssocItem::Const(..) | AssocItem::TypeAlias(..) => {
             let trait_ = assoc.implemented_trait(db)?;
             let name = def.name(db)?;
-            let discri_value = discriminant(&assoc);
+            let discriminant_value = discriminant(&assoc);
             trait_
                 .items(db)
                 .iter()
-                .filter(|itm| discriminant(*itm) == discri_value)
+                .filter(|itm| discriminant(*itm) == discriminant_value)
                 .find_map(|itm| (itm.name(db)? == name).then(|| itm.try_to_nav(db)).flatten())
                 .map(|it| it.collect())
         }
     }
 }
 
+fn handle_control_flow_keywords(
+    sema: &Semantics<'_, RootDatabase>,
+    token: &SyntaxToken,
+) -> Option<Vec<NavigationTarget>> {
+    match token.kind() {
+        // For `fn` / `loop` / `while` / `for` / `async`, return the keyword it self,
+        // so that VSCode will find the references when using `ctrl + click`
+        T![fn] | T![async] | T![try] | T![return] => nav_for_exit_points(sema, token),
+        T![loop] | T![while] | T![break] | T![continue] => nav_for_break_points(sema, token),
+        T![for] if token.parent().and_then(ast::ForExpr::cast).is_some() => {
+            nav_for_break_points(sema, token)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn find_fn_or_blocks(
+    sema: &Semantics<'_, RootDatabase>,
+    token: &SyntaxToken,
+) -> Vec<SyntaxNode> {
+    let find_ancestors = |token: SyntaxToken| {
+        let token_kind = token.kind();
+
+        for anc in sema.token_ancestors_with_macros(token) {
+            let node = match_ast! {
+                match anc {
+                    ast::Fn(fn_) => fn_.syntax().clone(),
+                    ast::ClosureExpr(c) => c.syntax().clone(),
+                    ast::BlockExpr(blk) => {
+                        match blk.modifier() {
+                            Some(ast::BlockModifier::Async(_)) => blk.syntax().clone(),
+                            Some(ast::BlockModifier::Try(_)) if token_kind != T![return] => blk.syntax().clone(),
+                            _ => continue,
+                        }
+                    },
+                    _ => continue,
+                }
+            };
+
+            return Some(node);
+        }
+        None
+    };
+
+    sema.descend_into_macros(token.clone()).into_iter().filter_map(find_ancestors).collect_vec()
+}
+
+fn nav_for_exit_points(
+    sema: &Semantics<'_, RootDatabase>,
+    token: &SyntaxToken,
+) -> Option<Vec<NavigationTarget>> {
+    let db = sema.db;
+    let token_kind = token.kind();
+
+    let navs = find_fn_or_blocks(sema, token)
+        .into_iter()
+        .filter_map(|node| {
+            let file_id = sema.hir_file_for(&node);
+
+            match_ast! {
+                match node {
+                    ast::Fn(fn_) => {
+                        let mut nav = sema.to_def(&fn_)?.try_to_nav(db)?;
+                        // For async token, we navigate to itself, which triggers
+                        // VSCode to find the references
+                        let focus_token = if matches!(token_kind, T![async]) {
+                            fn_.async_token()?
+                        } else {
+                            fn_.fn_token()?
+                        };
+
+                        let focus_frange = InFile::new(file_id, focus_token.text_range())
+                            .original_node_file_range_opt(db)
+                            .map(|(frange, _)| frange);
+
+                        if let Some(FileRange { file_id, range }) = focus_frange {
+                            let contains_frange = |nav: &NavigationTarget| {
+                                nav.file_id == file_id.file_id(db) && nav.full_range.contains_range(range)
+                            };
+
+                            if let Some(def_site) = nav.def_site.as_mut() {
+                                if contains_frange(def_site) {
+                                    def_site.focus_range = Some(range);
+                                }
+                            } else if contains_frange(&nav.call_site) {
+                                nav.call_site.focus_range = Some(range);
+                            }
+                        }
+
+                        Some(nav)
+                    },
+                    ast::ClosureExpr(c) => {
+                        let pipe_tok = c.param_list().and_then(|it| it.pipe_token())?.text_range();
+                        let closure_in_file = InFile::new(file_id, c.into());
+                        Some(expr_to_nav(db, closure_in_file, Some(pipe_tok)))
+                    },
+                    ast::BlockExpr(blk) => {
+                        match blk.modifier() {
+                            Some(ast::BlockModifier::Async(_)) => {
+                                let async_tok = blk.async_token()?.text_range();
+                                let blk_in_file = InFile::new(file_id, blk.into());
+                                Some(expr_to_nav(db, blk_in_file, Some(async_tok)))
+                            },
+                            Some(ast::BlockModifier::Try(_)) if token_kind != T![return] => {
+                                let try_tok = blk.try_token()?.text_range();
+                                let blk_in_file = InFile::new(file_id, blk.into());
+                                Some(expr_to_nav(db, blk_in_file, Some(try_tok)))
+                            },
+                            _ => None,
+                        }
+                    },
+                    _ => None,
+                }
+            }
+        })
+        .flatten()
+        .collect_vec();
+
+    Some(navs)
+}
+
+pub(crate) fn find_loops(
+    sema: &Semantics<'_, RootDatabase>,
+    token: &SyntaxToken,
+) -> Option<Vec<ast::Expr>> {
+    let parent = token.parent()?;
+    let lbl = match_ast! {
+        match parent {
+            ast::BreakExpr(break_) => break_.lifetime(),
+            ast::ContinueExpr(continue_) => continue_.lifetime(),
+            _ => None,
+        }
+    };
+    let label_matches =
+        |it: Option<ast::Label>| match (lbl.as_ref(), it.and_then(|it| it.lifetime())) {
+            (Some(lbl), Some(it)) => lbl.text() == it.text(),
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
+
+    let find_ancestors = |token: SyntaxToken| {
+        for anc in sema.token_ancestors_with_macros(token).filter_map(ast::Expr::cast) {
+            let node = match &anc {
+                ast::Expr::LoopExpr(loop_) if label_matches(loop_.label()) => anc,
+                ast::Expr::WhileExpr(while_) if label_matches(while_.label()) => anc,
+                ast::Expr::ForExpr(for_) if label_matches(for_.label()) => anc,
+                ast::Expr::BlockExpr(blk)
+                    if blk.label().is_some() && label_matches(blk.label()) =>
+                {
+                    anc
+                }
+                _ => continue,
+            };
+
+            return Some(node);
+        }
+        None
+    };
+
+    sema.descend_into_macros(token.clone())
+        .into_iter()
+        .filter_map(find_ancestors)
+        .collect_vec()
+        .into()
+}
+
+fn nav_for_break_points(
+    sema: &Semantics<'_, RootDatabase>,
+    token: &SyntaxToken,
+) -> Option<Vec<NavigationTarget>> {
+    let db = sema.db;
+
+    let navs = find_loops(sema, token)?
+        .into_iter()
+        .filter_map(|expr| {
+            let file_id = sema.hir_file_for(expr.syntax());
+            let expr_in_file = InFile::new(file_id, expr.clone());
+            let focus_range = match expr {
+                ast::Expr::LoopExpr(loop_) => loop_.loop_token()?.text_range(),
+                ast::Expr::WhileExpr(while_) => while_.while_token()?.text_range(),
+                ast::Expr::ForExpr(for_) => for_.for_token()?.text_range(),
+                // We guarantee that the label exists
+                ast::Expr::BlockExpr(blk) => blk.label().unwrap().syntax().text_range(),
+                _ => return None,
+            };
+            let nav = expr_to_nav(db, expr_in_file, Some(focus_range));
+            Some(nav)
+        })
+        .flatten()
+        .collect_vec();
+
+    Some(navs)
+}
+
 fn def_to_nav(db: &RootDatabase, def: Definition) -> Vec<NavigationTarget> {
     def.try_to_nav(db).map(|it| it.collect()).unwrap_or_default()
 }
 
+fn expr_to_nav(
+    db: &RootDatabase,
+    InFile { file_id, value }: InFile<ast::Expr>,
+    focus_range: Option<TextRange>,
+) -> UpmappingResult<NavigationTarget> {
+    let kind = SymbolKind::Label;
+
+    let value_range = value.syntax().text_range();
+    let navs = navigation_target::orig_range_with_focus_r(db, file_id, value_range, focus_range);
+    navs.map(|(hir::FileRangeWrapper { file_id, range }, focus_range)| {
+        NavigationTarget::from_syntax(file_id, "<expr>".into(), focus_range, range, kind)
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use ide_db::base_db::FileRange;
-    use itertools::Itertools;
-
     use crate::fixture;
+    use ide_db::FileRange;
+    use itertools::Itertools;
+    use syntax::SmolStr;
 
     #[track_caller]
-    fn check(ra_fixture: &str) {
+    fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
         let (analysis, position, expected) = fixture::annotations(ra_fixture);
         let navs = analysis.goto_definition(position).unwrap().expect("no definition found").info;
 
@@ -221,11 +525,175 @@ mod tests {
         assert_eq!(expected, navs);
     }
 
-    fn check_unresolved(ra_fixture: &str) {
+    fn check_unresolved(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
         let (analysis, position) = fixture::position(ra_fixture);
         let navs = analysis.goto_definition(position).unwrap().expect("no definition found").info;
 
         assert!(navs.is_empty(), "didn't expect this to resolve anywhere: {navs:?}")
+    }
+
+    fn check_name(expected_name: &str, #[rust_analyzer::rust_fixture] ra_fixture: &str) {
+        let (analysis, position, _) = fixture::annotations(ra_fixture);
+        let navs = analysis.goto_definition(position).unwrap().expect("no definition found").info;
+        assert!(navs.len() < 2, "expected single navigation target but encountered {}", navs.len());
+        let Some(target) = navs.into_iter().next() else {
+            panic!("expected single navigation target but encountered none");
+        };
+        assert_eq!(target.name, SmolStr::new_inline(expected_name));
+    }
+
+    #[test]
+    fn goto_def_pat_range_to_inclusive() {
+        check_name(
+            "RangeToInclusive",
+            r#"
+//- minicore: range
+fn f(ch: char) -> bool {
+    match ch {
+        ..$0='z' => true,
+        _ => false
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_pat_range_to() {
+        check_name(
+            "RangeTo",
+            r#"
+//- minicore: range
+fn f(ch: char) -> bool {
+    match ch {
+        .$0.'z' => true,
+        _ => false
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_pat_range() {
+        check_name(
+            "Range",
+            r#"
+//- minicore: range
+fn f(ch: char) -> bool {
+    match ch {
+        'a'.$0.'z' => true,
+        _ => false
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_pat_range_inclusive() {
+        check_name(
+            "RangeInclusive",
+            r#"
+//- minicore: range
+fn f(ch: char) -> bool {
+    match ch {
+        'a'..$0='z' => true,
+        _ => false
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_pat_range_from() {
+        check_name(
+            "RangeFrom",
+            r#"
+//- minicore: range
+fn f(ch: char) -> bool {
+    match ch {
+        'a'..$0 => true,
+        _ => false
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_expr_range() {
+        check_name(
+            "Range",
+            r#"
+//- minicore: range
+let x = 0.$0.1;
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_expr_range_from() {
+        check_name(
+            "RangeFrom",
+            r#"
+//- minicore: range
+fn f(arr: &[i32]) -> &[i32] {
+    &arr[0.$0.]
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_expr_range_inclusive() {
+        check_name(
+            "RangeInclusive",
+            r#"
+//- minicore: range
+let x = 0.$0.=1;
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_expr_range_full() {
+        check_name(
+            "RangeFull",
+            r#"
+//- minicore: range
+fn f(arr: &[i32]) -> &[i32] {
+    &arr[.$0.]
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_expr_range_to() {
+        check_name(
+            "RangeTo",
+            r#"
+//- minicore: range
+fn f(arr: &[i32]) -> &[i32] {
+    &arr[.$0.10]
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_expr_range_to_inclusive() {
+        check_name(
+            "RangeToInclusive",
+            r#"
+//- minicore: range
+fn f(arr: &[i32]) -> &[i32] {
+    &arr[.$0.=10]
+}
+"#,
+        );
     }
 
     #[test]
@@ -270,6 +738,44 @@ fn main() {
     foo();
 }
 
+//- /a.rs
+fn func_in_include() {
+ //^^^^^^^^^^^^^^^
+}
+
+fn foo() {
+    func_in_include$0();
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_in_included_file_inside_mod() {
+        check(
+            r#"
+//- minicore:include
+//- /main.rs
+mod a {
+    include!("b.rs");
+}
+//- /b.rs
+fn func_in_include() {
+ //^^^^^^^^^^^^^^^
+}
+fn foo() {
+    func_in_include$0();
+}
+"#,
+        );
+
+        check(
+            r#"
+//- minicore:include
+//- /main.rs
+mod a {
+    include!("a.rs");
+}
 //- /a.rs
 fn func_in_include() {
  //^^^^^^^^^^^^^^^
@@ -1417,6 +1923,74 @@ pub fn foo() { }
     }
 
     #[test]
+    fn goto_def_for_intra_doc_link_outer_same_file() {
+        check(
+            r#"
+/// [`S$0`]
+mod m {
+    //! [`super::S`]
+}
+struct S;
+     //^
+            "#,
+        );
+
+        check(
+            r#"
+/// [`S$0`]
+mod m {}
+struct S;
+     //^
+            "#,
+        );
+
+        check(
+            r#"
+/// [`S$0`]
+fn f() {
+    //! [`S`]
+}
+struct S;
+     //^
+            "#,
+        );
+    }
+
+    #[test]
+    fn goto_def_for_intra_doc_link_inner_same_file() {
+        check(
+            r#"
+/// [`S`]
+mod m {
+    //! [`super::S$0`]
+}
+struct S;
+     //^
+            "#,
+        );
+
+        check(
+            r#"
+mod m {
+    //! [`super::S$0`]
+}
+struct S;
+     //^
+            "#,
+        );
+
+        check(
+            r#"
+fn f() {
+    //! [`S$0`]
+}
+struct S;
+     //^
+            "#,
+        );
+    }
+
+    #[test]
     fn goto_def_for_intra_doc_link_inner() {
         check(
             r#"
@@ -1546,7 +2120,10 @@ fn main() {
         );
     }
 
+    // macros in this position are not yet supported
     #[test]
+    // FIXME
+    #[should_panic]
     fn goto_doc_include_str() {
         check(
             r#"
@@ -1689,8 +2266,8 @@ where T : Bound
 struct A;
 impl Bound for A{}
 fn f() {
-    let gen = Gen::<A>(A);
-    gen.g$0();
+    let g = Gen::<A>(A);
+    g.g$0();
 }
                 "#,
             );
@@ -1715,8 +2292,8 @@ where T : Bound
 struct A;
 impl Bound for A{}
 fn f() {
-    let gen = Gen::<A>(A);
-    gen.g$0();
+    let g = Gen::<A>(A);
+    g.g$0();
 }
 "#,
             );
@@ -2287,6 +2864,754 @@ macro_rules! baz {
     () => {};
 }
             "#,
+        );
+    }
+
+    #[test]
+    fn goto_shadowed_preludes_in_block_module() {
+        check(
+            r#"
+//- /main.rs crate:main edition:2021 deps:core
+pub struct S;
+         //^
+
+fn main() {
+    fn f() -> S$0 {
+        fn inner() {} // forces a block def map
+        return S;
+    }
+}
+//- /core.rs crate:core
+pub mod prelude {
+    pub mod rust_2021 {
+        pub enum S;
+    }
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn goto_def_on_return_kw() {
+        check(
+            r#"
+macro_rules! N {
+    ($i:ident, $x:expr, $blk:expr) => {
+        for $i in 0..$x {
+            $blk
+        }
+    };
+}
+
+fn main() {
+    fn f() {
+ // ^^
+        N!(i, 5, {
+            println!("{}", i);
+            return$0;
+        });
+
+        for i in 1..5 {
+            return;
+        }
+       (|| {
+            return;
+        })();
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_return_kw_in_closure() {
+        check(
+            r#"
+macro_rules! N {
+    ($i:ident, $x:expr, $blk:expr) => {
+        for $i in 0..$x {
+            $blk
+        }
+    };
+}
+
+fn main() {
+    fn f() {
+        N!(i, 5, {
+            println!("{}", i);
+            return;
+        });
+
+        for i in 1..5 {
+            return;
+        }
+       (|| {
+     // ^
+            return$0;
+        })();
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_break_kw() {
+        check(
+            r#"
+fn main() {
+    for i in 1..5 {
+ // ^^^
+        break$0;
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_continue_kw() {
+        check(
+            r#"
+fn main() {
+    for i in 1..5 {
+ // ^^^
+        continue$0;
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_break_kw_for_block() {
+        check(
+            r#"
+fn main() {
+    'a:{
+ // ^^^
+        break$0 'a;
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_break_with_label() {
+        check(
+            r#"
+fn foo() {
+    'outer: loop {
+         // ^^^^
+         'inner: loop {
+            'innermost: loop {
+            }
+            break$0 'outer;
+        }
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn label_inside_macro() {
+        check(
+            r#"
+macro_rules! m {
+    ($s:stmt) => { $s };
+}
+
+fn foo() {
+    'label: loop {
+ // ^^^^^^
+        m!(continue 'label$0);
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_def_on_return_in_try() {
+        check(
+            r#"
+fn main() {
+    fn f() {
+ // ^^
+        try {
+            return$0;
+        }
+
+        return;
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_break_in_try() {
+        check(
+            r#"
+fn main() {
+    for i in 1..100 {
+ // ^^^
+        let x: Result<(), ()> = try {
+            break$0;
+        };
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_return_in_async_block() {
+        check(
+            r#"
+fn main() {
+    async {
+ // ^^^^^
+        return$0;
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_for_kw() {
+        check(
+            r#"
+fn main() {
+    for$0 i in 1..5 {}
+ // ^^^
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn goto_def_on_fn_kw() {
+        check(
+            r#"
+fn main() {
+    fn$0 foo() {}
+ // ^^
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn shadow_builtin_macro() {
+        check(
+            r#"
+//- minicore: column
+//- /a.rs crate:a
+#[macro_export]
+macro_rules! column { () => {} }
+          // ^^^^^^
+
+//- /b.rs crate:b deps:a
+use a::column;
+fn foo() {
+    $0column!();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn issue_18138() {
+        check(
+            r#"
+mod foo {
+    macro_rules! x {
+        () => {
+            pub struct Foo;
+                    // ^^^
+        };
+    }
+    pub(crate) use x as m;
+}
+
+mod bar {
+    use crate::m;
+
+    m!();
+ // ^^^^^
+
+    fn qux() {
+        Foo$0;
+    }
+}
+
+mod m {}
+
+use foo::m;
+"#,
+        );
+    }
+
+    #[test]
+    fn macro_label_hygiene() {
+        check(
+            r#"
+macro_rules! m {
+    ($x:stmt) => {
+        'bar: loop { $x }
+    };
+}
+
+fn foo() {
+    'bar: loop {
+ // ^^^^
+        m!(continue 'bar$0);
+    }
+}
+"#,
+        );
+    }
+    #[test]
+    fn into_call_to_from_definition() {
+        check(
+            r#"
+//- minicore: from
+struct A;
+
+struct B;
+
+impl From<A> for B {
+    fn from(value: A) -> Self {
+     //^^^^
+        B
+    }
+}
+
+fn f() {
+    let a = A;
+    let b: B = a.into$0();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn into_call_to_from_definition_with_trait_bounds() {
+        check(
+            r#"
+//- minicore: from, iterator
+struct A;
+
+impl<T> From<T> for A
+where
+    T: IntoIterator<Item = i64>,
+{
+    fn from(value: T) -> Self {
+     //^^^^
+        A
+    }
+}
+
+fn f() {
+    let a: A = [1, 2, 3].into$0();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn goto_into_definition_if_exists() {
+        check(
+            r#"
+//- minicore: from
+struct A;
+
+struct B;
+
+impl Into<B> for A {
+    fn into(self) -> B {
+     //^^^^
+        B
+    }
+}
+
+fn f() {
+    let a = A;
+    let b: B = a.into$0();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn try_into_call_to_try_from_definition() {
+        check(
+            r#"
+//- minicore: from
+struct A;
+
+struct B;
+
+impl TryFrom<A> for B {
+    type Error = String;
+
+    fn try_from(value: A) -> Result<Self, Self::Error> {
+     //^^^^^^^^
+        Ok(B)
+    }
+}
+
+fn f() {
+    let a = A;
+    let b: Result<B, _> = a.try_into$0();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn goto_try_into_definition_if_exists() {
+        check(
+            r#"
+//- minicore: from
+struct A;
+
+struct B;
+
+impl TryInto<B> for A {
+    type Error = String;
+
+    fn try_into(self) -> Result<B, Self::Error> {
+     //^^^^^^^^
+        Ok(B)
+    }
+}
+
+fn f() {
+    let a = A;
+    let b: Result<B, _> = a.try_into$0();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn parse_call_to_from_str_definition() {
+        check(
+            r#"
+//- minicore: from, str
+struct A;
+impl FromStr for A {
+    type Error = String;
+    fn from_str(value: &str) -> Result<Self, Self::Error> {
+     //^^^^^^^^
+        Ok(A)
+    }
+}
+fn f() {
+    let a: Result<A, _> = "aaaaaa".parse$0();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn to_string_call_to_display_definition() {
+        check(
+            r#"
+//- minicore:fmt
+//- /alloc.rs crate:alloc
+pub mod string {
+    pub struct String;
+    pub trait ToString {
+        fn to_string(&self) -> String;
+    }
+
+    impl<T: core::fmt::Display> ToString for T {
+        fn to_string(&self) -> String { String }
+    }
+}
+//- /lib.rs crate:lib deps:alloc
+use alloc::string::ToString;
+struct A;
+impl core::fmt::Display for A {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {}
+    // ^^^
+}
+fn f() {
+    A.to_string$0();
+}
+        "#,
+        );
+    }
+
+    #[test]
+    fn use_inside_body() {
+        check(
+            r#"
+fn main() {
+    mod nice_module {
+        pub(super) struct NiceStruct;
+                       // ^^^^^^^^^^
+    }
+
+    use nice_module::NiceStruct$0;
+
+    let _ = NiceStruct;
+}
+    "#,
+        );
+    }
+
+    #[test]
+    fn shadow_builtin_type_by_module() {
+        check(
+            r#"
+mod Foo{
+pub mod str {
+     // ^^^
+    pub fn foo() {}
+}
+}
+
+fn main() {
+    use Foo::str;
+    let s = st$0r::foo();
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn not_goto_module_because_str_is_builtin_type() {
+        check(
+            r#"
+mod str {
+pub fn foo() {}
+}
+
+fn main() {
+    let s = st$0r::f();
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn struct_shadow_by_module() {
+        check(
+            r#"
+mod foo {
+    pub mod bar {
+         // ^^^
+        pub type baz = usize;
+    }
+}
+struct bar;
+fn main() {
+    use foo::bar;
+    let x: ba$0r::baz = 5;
+
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn type_alias_shadow_by_module() {
+        check(
+            r#"
+mod foo {
+    pub mod bar {
+         // ^^^
+        pub fn baz() {}
+    }
+}
+
+trait Qux {}
+
+fn item<bar: Qux>() {
+    use foo::bar;
+    ba$0r::baz();
+}
+}
+"#,
+        );
+
+        check(
+            r#"
+mod foo {
+    pub mod bar {
+         // ^^^
+        pub fn baz() {}
+    }
+}
+
+fn item<bar>(x: bar) {
+    use foo::bar;
+    let x: bar$0 = x;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn trait_shadow_by_module() {
+        check(
+            r#"
+pub mod foo {
+    pub mod Bar {}
+         // ^^^
+}
+
+trait Bar {}
+
+fn main() {
+    use foo::Bar;
+    fn f<Qux: B$0ar>() {}
+}
+            "#,
+        );
+    }
+
+    #[test]
+    fn const_shadow_by_module() {
+        check(
+            r#"
+pub mod foo {
+    pub struct u8 {}
+    pub mod bar {
+        pub mod u8 {}
+    }
+}
+
+fn main() {
+    use foo::u8;
+    {
+        use foo::bar::u8;
+
+        fn f1<const N: u$08>() {}
+    }
+    fn f2<const N: u8>() {}
+}
+"#,
+        );
+
+        check(
+            r#"
+pub mod foo {
+    pub struct u8 {}
+            // ^^
+    pub mod bar {
+        pub mod u8 {}
+    }
+}
+
+fn main() {
+    use foo::u8;
+    {
+        use foo::bar::u8;
+
+        fn f1<const N: u8>() {}
+    }
+    fn f2<const N: u$08>() {}
+}
+"#,
+        );
+
+        check(
+            r#"
+pub mod foo {
+    pub struct buz {}
+    pub mod bar {
+        pub mod buz {}
+             // ^^^
+    }
+}
+
+fn main() {
+    use foo::buz;
+    {
+        use foo::bar::buz;
+
+        fn f1<const N: buz$0>() {}
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn offset_of() {
+        check(
+            r#"
+//- minicore: offset_of
+struct Foo {
+    field: i32,
+ // ^^^^^
+}
+
+fn foo() {
+    let _ = core::mem::offset_of!(Foo, fiel$0d);
+}
+        "#,
+        );
+
+        check(
+            r#"
+//- minicore: offset_of
+struct Bar(Foo);
+struct Foo {
+    field: i32,
+ // ^^^^^
+}
+
+fn foo() {
+    let _ = core::mem::offset_of!(Bar, 0.fiel$0d);
+}
+        "#,
+        );
+
+        check(
+            r#"
+//- minicore: offset_of
+struct Bar(Baz);
+enum Baz {
+    Abc(Foo),
+    None,
+}
+struct Foo {
+    field: i32,
+ // ^^^^^
+}
+
+fn foo() {
+    let _ = core::mem::offset_of!(Bar, 0.Abc.0.fiel$0d);
+}
+        "#,
+        );
+
+        check(
+            r#"
+//- minicore: offset_of
+struct Bar(Baz);
+enum Baz {
+    Abc(Foo),
+ // ^^^
+    None,
+}
+struct Foo {
+    field: i32,
+}
+
+fn foo() {
+    let _ = core::mem::offset_of!(Bar, 0.Ab$0c.0.field);
+}
+        "#,
         );
     }
 }

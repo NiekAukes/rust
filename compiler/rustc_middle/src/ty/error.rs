@@ -1,91 +1,28 @@
-use crate::ty::print::{with_forced_trimmed_paths, FmtPrinter, PrettyPrinter};
-use crate::ty::{self, BoundRegionKind, Region, Ty, TyCtxt};
+use std::borrow::Cow;
+use std::fs::File;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
 use rustc_errors::pluralize;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind};
-use rustc_hir::def_id::DefId;
-use rustc_macros::{TypeFoldable, TypeVisitable};
-use rustc_span::symbol::Symbol;
-use rustc_target::spec::abi;
-use std::borrow::Cow;
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
+use rustc_macros::extension;
+pub use rustc_type_ir::error::ExpectedFound;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, TypeFoldable, TypeVisitable)]
-pub struct ExpectedFound<T> {
-    pub expected: T,
-    pub found: T,
-}
+use crate::ty::print::{FmtPrinter, Print, with_forced_trimmed_paths};
+use crate::ty::{self, Lift, Ty, TyCtxt};
 
-impl<T> ExpectedFound<T> {
-    pub fn new(a_is_expected: bool, a: T, b: T) -> Self {
-        if a_is_expected {
-            ExpectedFound { expected: a, found: b }
-        } else {
-            ExpectedFound { expected: b, found: a }
-        }
-    }
-}
+pub type TypeError<'tcx> = rustc_type_ir::error::TypeError<TyCtxt<'tcx>>;
 
-// Data structures used in type unification
-#[derive(Copy, Clone, Debug, TypeVisitable, PartialEq, Eq)]
-#[rustc_pass_by_value]
-pub enum TypeError<'tcx> {
-    Mismatch,
-    ConstnessMismatch(ExpectedFound<ty::BoundConstness>),
-    PolarityMismatch(ExpectedFound<ty::PredicatePolarity>),
-    UnsafetyMismatch(ExpectedFound<hir::Unsafety>),
-    AbiMismatch(ExpectedFound<abi::Abi>),
-    Mutability,
-    ArgumentMutability(usize),
-    TupleSize(ExpectedFound<usize>),
-    FixedArraySize(ExpectedFound<u64>),
-    ArgCount,
-    FieldMisMatch(Symbol, Symbol),
-
-    RegionsDoesNotOutlive(Region<'tcx>, Region<'tcx>),
-    RegionsInsufficientlyPolymorphic(BoundRegionKind, Region<'tcx>),
-    RegionsPlaceholderMismatch,
-
-    Sorts(ExpectedFound<Ty<'tcx>>),
-    ArgumentSorts(ExpectedFound<Ty<'tcx>>, usize),
-    IntMismatch(ExpectedFound<ty::IntVarValue>),
-    FloatMismatch(ExpectedFound<ty::FloatTy>),
-    Traits(ExpectedFound<DefId>),
-    VariadicMismatch(ExpectedFound<bool>),
-
-    /// Instantiating a type variable with the given type would have
-    /// created a cycle (because it appears somewhere within that
-    /// type).
-    CyclicTy(Ty<'tcx>),
-    CyclicConst(ty::Const<'tcx>),
-    ProjectionMismatched(ExpectedFound<DefId>),
-    ExistentialMismatch(ExpectedFound<&'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>>),
-    ConstMismatch(ExpectedFound<ty::Const<'tcx>>),
-
-    IntrinsicCast,
-    /// Safe `#[target_feature]` functions are not assignable to safe function pointers.
-    TargetFeatureCast(DefId),
-}
-
-impl TypeError<'_> {
-    pub fn involves_regions(self) -> bool {
-        match self {
-            TypeError::RegionsDoesNotOutlive(_, _)
-            | TypeError::RegionsInsufficientlyPolymorphic(_, _)
-            | TypeError::RegionsPlaceholderMismatch => true,
-            _ => false,
-        }
-    }
-}
-
-/// Explains the source of a type err in a short, human readable way. This is meant to be placed
-/// in parentheses after some larger message. You should also invoke `note_and_explain_type_err()`
-/// afterwards to present additional details, particularly when it comes to lifetime-related
-/// errors.
+/// Explains the source of a type err in a short, human readable way.
+/// This is meant to be placed in parentheses after some larger message.
+/// You should also invoke `note_and_explain_type_err()` afterwards
+/// to present additional details, particularly when it comes to lifetime-
+/// related errors.
+#[extension(pub trait TypeErrorToStringExt<'tcx>)]
 impl<'tcx> TypeError<'tcx> {
-    pub fn to_string(self, tcx: TyCtxt<'tcx>) -> Cow<'static, str> {
-        use self::TypeError::*;
+    fn to_string(self, tcx: TyCtxt<'tcx>) -> Cow<'static, str> {
         fn report_maybe_different(expected: &str, found: &str) -> String {
             // A naive approach to making sure that we're not reporting silly errors such as:
             // (expected closure, found closure).
@@ -97,24 +34,23 @@ impl<'tcx> TypeError<'tcx> {
         }
 
         match self {
-            CyclicTy(_) => "cyclic type of infinite size".into(),
-            CyclicConst(_) => "encountered a self-referencing constant".into(),
-            Mismatch => "types differ".into(),
-            ConstnessMismatch(values) => {
-                format!("expected {} bound, found {} bound", values.expected, values.found).into()
-            }
-            PolarityMismatch(values) => {
+            TypeError::CyclicTy(_) => "cyclic type of infinite size".into(),
+            TypeError::CyclicConst(_) => "encountered a self-referencing constant".into(),
+            TypeError::Mismatch => "types differ".into(),
+            TypeError::PolarityMismatch(values) => {
                 format!("expected {} polarity, found {} polarity", values.expected, values.found)
                     .into()
             }
-            UnsafetyMismatch(values) => {
+            TypeError::SafetyMismatch(values) => {
                 format!("expected {} fn, found {} fn", values.expected, values.found).into()
             }
-            AbiMismatch(values) => {
+            TypeError::AbiMismatch(values) => {
                 format!("expected {} fn, found {} fn", values.expected, values.found).into()
             }
-            ArgumentMutability(_) | Mutability => "types differ in mutability".into(),
-            TupleSize(values) => format!(
+            TypeError::ArgumentMutability(_) | TypeError::Mutability => {
+                "types differ in mutability".into()
+            }
+            TypeError::TupleSize(values) => format!(
                 "expected a tuple with {} element{}, found one with {} element{}",
                 values.expected,
                 pluralize!(values.expected),
@@ -122,28 +58,26 @@ impl<'tcx> TypeError<'tcx> {
                 pluralize!(values.found)
             )
             .into(),
-            FixedArraySize(values) => format!(
-                "expected an array with a fixed size of {} element{}, found one with {} element{}",
-                values.expected,
-                pluralize!(values.expected),
-                values.found,
-                pluralize!(values.found)
+            TypeError::ArraySize(values) => format!(
+                "expected an array with a size of {}, found one with a size of {}",
+                values.expected, values.found,
             )
             .into(),
-            ArgCount => "incorrect number of function parameters".into(),
-            FieldMisMatch(adt, field) => format!("field type mismatch: {adt}.{field}").into(),
-            RegionsDoesNotOutlive(..) => "lifetime mismatch".into(),
+            TypeError::ArgCount => "incorrect number of function parameters".into(),
+            TypeError::RegionsDoesNotOutlive(..) => "lifetime mismatch".into(),
             // Actually naming the region here is a bit confusing because context is lacking
-            RegionsInsufficientlyPolymorphic(..) => {
+            TypeError::RegionsInsufficientlyPolymorphic(..) => {
                 "one type is more general than the other".into()
             }
-            RegionsPlaceholderMismatch => "one type is more general than the other".into(),
-            ArgumentSorts(values, _) | Sorts(values) => {
+            TypeError::RegionsPlaceholderMismatch => {
+                "one type is more general than the other".into()
+            }
+            TypeError::ArgumentSorts(values, _) | TypeError::Sorts(values) => {
                 let expected = values.expected.sort_string(tcx);
                 let found = values.found.sort_string(tcx);
                 report_maybe_different(&expected, &found).into()
             }
-            Traits(values) => {
+            TypeError::Traits(values) => {
                 let (mut expected, mut found) = with_forced_trimmed_paths!((
                     tcx.def_path_str(values.expected),
                     tcx.def_path_str(values.found),
@@ -155,73 +89,33 @@ impl<'tcx> TypeError<'tcx> {
                 report_maybe_different(&format!("trait `{expected}`"), &format!("trait `{found}`"))
                     .into()
             }
-            IntMismatch(ref values) => {
-                let expected = match values.expected {
-                    ty::IntVarValue::IntType(ty) => ty.name_str(),
-                    ty::IntVarValue::UintType(ty) => ty.name_str(),
-                };
-                let found = match values.found {
-                    ty::IntVarValue::IntType(ty) => ty.name_str(),
-                    ty::IntVarValue::UintType(ty) => ty.name_str(),
-                };
-                format!("expected `{expected}`, found `{found}`").into()
-            }
-            FloatMismatch(ref values) => format!(
-                "expected `{}`, found `{}`",
-                values.expected.name_str(),
-                values.found.name_str()
-            )
-            .into(),
-            VariadicMismatch(ref values) => format!(
+            TypeError::VariadicMismatch(ref values) => format!(
                 "expected {} fn, found {} function",
                 if values.expected { "variadic" } else { "non-variadic" },
                 if values.found { "variadic" } else { "non-variadic" }
             )
             .into(),
-            ProjectionMismatched(ref values) => format!(
+            TypeError::ProjectionMismatched(ref values) => format!(
                 "expected `{}`, found `{}`",
                 tcx.def_path_str(values.expected),
                 tcx.def_path_str(values.found)
             )
             .into(),
-            ExistentialMismatch(ref values) => report_maybe_different(
+            TypeError::ExistentialMismatch(ref values) => report_maybe_different(
                 &format!("trait `{}`", values.expected),
                 &format!("trait `{}`", values.found),
             )
             .into(),
-            ConstMismatch(ref values) => {
+            TypeError::ConstMismatch(ref values) => {
                 format!("expected `{}`, found `{}`", values.expected, values.found).into()
             }
-            IntrinsicCast => "cannot coerce intrinsics to function pointers".into(),
-            TargetFeatureCast(_) => {
+            TypeError::ForceInlineCast => {
+                "cannot coerce functions which must be inlined to function pointers".into()
+            }
+            TypeError::IntrinsicCast => "cannot coerce intrinsics to function pointers".into(),
+            TypeError::TargetFeatureCast(_) => {
                 "cannot coerce functions with `#[target_feature]` to safe function pointers".into()
             }
-        }
-    }
-}
-
-impl<'tcx> TypeError<'tcx> {
-    pub fn must_include_note(self) -> bool {
-        use self::TypeError::*;
-        match self {
-            CyclicTy(_) | CyclicConst(_) | UnsafetyMismatch(_) | ConstnessMismatch(_)
-            | PolarityMismatch(_) | Mismatch | AbiMismatch(_) | FixedArraySize(_)
-            | ArgumentSorts(..) | Sorts(_) | IntMismatch(_) | FloatMismatch(_)
-            | VariadicMismatch(_) | TargetFeatureCast(_) => false,
-
-            Mutability
-            | ArgumentMutability(_)
-            | TupleSize(_)
-            | ArgCount
-            | FieldMisMatch(..)
-            | RegionsDoesNotOutlive(..)
-            | RegionsInsufficientlyPolymorphic(..)
-            | RegionsPlaceholderMismatch
-            | Traits(_)
-            | ProjectionMismatched(_)
-            | ExistentialMismatch(_)
-            | ConstMismatch(_)
-            | IntrinsicCast => true,
         }
     }
 }
@@ -235,7 +129,7 @@ impl<'tcx> Ty<'tcx> {
                 DefKind::Ctor(CtorOf::Variant, _) => "enum constructor".into(),
                 _ => "fn item".into(),
             },
-            ty::FnPtr(_) => "fn pointer".into(),
+            ty::FnPtr(..) => "fn pointer".into(),
             ty::Dynamic(inner, ..) if let Some(principal) = inner.principal() => {
                 format!("`dyn {}`", tcx.def_path_str(principal.def_id())).into()
             }
@@ -265,8 +159,8 @@ impl<'tcx> Ty<'tcx> {
             ty::Error(_) => "type error".into(),
             _ => {
                 let width = tcx.sess.diagnostic_width();
-                let length_limit = std::cmp::max(width / 4, 15);
-                format!("`{}`", tcx.ty_string_with_limit(self, length_limit)).into()
+                let length_limit = std::cmp::max(width / 4, 40);
+                format!("`{}`", tcx.string_with_limit(self, length_limit)).into()
             }
         }
     }
@@ -299,7 +193,8 @@ impl<'tcx> Ty<'tcx> {
                 DefKind::Ctor(CtorOf::Variant, _) => "enum constructor".into(),
                 _ => "fn item".into(),
             },
-            ty::FnPtr(_) => "fn pointer".into(),
+            ty::FnPtr(..) => "fn pointer".into(),
+            ty::UnsafeBinder(_) => "unsafe binder".into(),
             ty::Dynamic(..) => "trait object".into(),
             ty::Closure(..) | ty::CoroutineClosure(..) => "closure".into(),
             ty::Coroutine(def_id, ..) => {
@@ -310,7 +205,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Placeholder(..) => "higher-ranked type".into(),
             ty::Bound(..) => "bound type variable".into(),
             ty::Alias(ty::Projection | ty::Inherent, _) => "associated type".into(),
-            ty::Alias(ty::Weak, _) => "type alias".into(),
+            ty::Alias(ty::Free, _) => "type alias".into(),
             ty::Param(_) => "type parameter".into(),
             ty::Alias(ty::Opaque, ..) => "opaque type".into(),
         }
@@ -318,10 +213,13 @@ impl<'tcx> Ty<'tcx> {
 }
 
 impl<'tcx> TyCtxt<'tcx> {
-    pub fn ty_string_with_limit(self, ty: Ty<'tcx>, length_limit: usize) -> String {
+    pub fn string_with_limit<T>(self, p: T, length_limit: usize) -> String
+    where
+        T: Copy + for<'a, 'b> Lift<TyCtxt<'b>, Lifted: Print<'b, FmtPrinter<'a, 'b>>>,
+    {
         let mut type_limit = 50;
         let regular = FmtPrinter::print_string(self, hir::def::Namespace::TypeNS, |cx| {
-            cx.pretty_print_type(ty)
+            self.lift(p).expect("could not lift for printing").print(cx)
         })
         .expect("could not write to `String`");
         if regular.len() <= length_limit {
@@ -336,7 +234,10 @@ impl<'tcx> TyCtxt<'tcx> {
                     hir::def::Namespace::TypeNS,
                     rustc_session::Limit(type_limit),
                 );
-                cx.pretty_print_type(ty).expect("could not write to `String`");
+                self.lift(p)
+                    .expect("could not lift for printing")
+                    .print(&mut cx)
+                    .expect("could not print type");
                 cx.into_buffer()
             });
             if short.len() <= length_limit || type_limit == 0 {
@@ -347,9 +248,16 @@ impl<'tcx> TyCtxt<'tcx> {
         short
     }
 
-    pub fn short_ty_string(self, ty: Ty<'tcx>, path: &mut Option<PathBuf>) -> String {
+    /// When calling this after a `Diag` is constructed, the preferred way of doing so is
+    /// `tcx.short_string(ty, diag.long_ty_path())`. The diagnostic itself is the one that keeps
+    /// the existence of a "long type" anywhere in the diagnostic, so the note telling the user
+    /// where we wrote the file to is only printed once.
+    pub fn short_string<T>(self, p: T, path: &mut Option<PathBuf>) -> String
+    where
+        T: Copy + Hash + for<'a, 'b> Lift<TyCtxt<'b>, Lifted: Print<'b, FmtPrinter<'a, 'b>>>,
+    {
         let regular = FmtPrinter::print_string(self, hir::def::Namespace::TypeNS, |cx| {
-            cx.pretty_print_type(ty)
+            self.lift(p).expect("could not lift for printing").print(cx)
         })
         .expect("could not write to `String`");
 
@@ -358,22 +266,35 @@ impl<'tcx> TyCtxt<'tcx> {
         }
 
         let width = self.sess.diagnostic_width();
-        let length_limit = width.saturating_sub(30);
-        if regular.len() <= width {
+        let length_limit = width / 2;
+        if regular.len() <= width * 2 / 3 {
             return regular;
         }
-        let short = self.ty_string_with_limit(ty, length_limit);
+        let short = self.string_with_limit(p, length_limit);
         if regular == short {
             return regular;
         }
         // Ensure we create an unique file for the type passed in when we create a file.
         let mut s = DefaultHasher::new();
-        ty.hash(&mut s);
+        p.hash(&mut s);
         let hash = s.finish();
         *path = Some(path.take().unwrap_or_else(|| {
-            self.output_filenames(()).temp_path_ext(&format!("long-type-{hash}.txt"), None)
+            self.output_filenames(()).temp_path_for_diagnostic(&format!("long-type-{hash}.txt"))
         }));
-        match std::fs::write(path.as_ref().unwrap(), &format!("{regular}\n")) {
+        let Ok(mut file) =
+            File::options().create(true).read(true).append(true).open(&path.as_ref().unwrap())
+        else {
+            return regular;
+        };
+
+        // Do not write the same type to the file multiple times.
+        let mut contents = String::new();
+        let _ = file.read_to_string(&mut contents);
+        if let Some(_) = contents.lines().find(|line| line == &regular) {
+            return short;
+        }
+
+        match write!(file, "{regular}\n") {
             Ok(_) => short,
             Err(_) => regular,
         }

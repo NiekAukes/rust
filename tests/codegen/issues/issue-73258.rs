@@ -1,4 +1,4 @@
-//@ compile-flags: -O
+//@ compile-flags: -Copt-level=3
 
 #![crate_type = "lib"]
 
@@ -7,7 +7,10 @@
 #[derive(Clone, Copy)]
 #[repr(u8)]
 pub enum Foo {
-    A, B, C, D,
+    A,
+    B,
+    C,
+    D,
 }
 
 // CHECK-LABEL: @issue_73258(

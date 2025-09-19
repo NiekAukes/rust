@@ -4,15 +4,13 @@
 // ensures that we do not have such a round-trip for AtomicPtr::swap, because LLVM supports pointer
 // arguments to `atomicrmw xchg`.
 
-//@ compile-flags: -O -Cno-prepopulate-passes
+//@ compile-flags: -Copt-level=3 -Cno-prepopulate-passes
 #![crate_type = "lib"]
-
-#![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
 
+use std::ptr::without_provenance_mut;
 use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering::Relaxed;
-use std::ptr::without_provenance_mut;
 
 // Portability hack so that we can say [[USIZE]] instead of i64/i32/i16 for usize.
 // CHECK: @helper([[USIZE:i[0-9]+]] noundef %_1)

@@ -1,8 +1,7 @@
 use crate::ffi::{CStr, CString};
 use crate::mem::MaybeUninit;
 use crate::path::Path;
-use crate::slice;
-use crate::{io, ptr};
+use crate::{io, ptr, slice};
 
 // Make sure to stay under 4096 so the compiler doesn't insert a probe frame:
 // https://docs.rs/compiler_builtins/latest/compiler_builtins/probestack/index.html
@@ -12,7 +11,7 @@ const MAX_STACK_ALLOCATION: usize = 384;
 const MAX_STACK_ALLOCATION: usize = 32;
 
 const NUL_ERR: io::Error =
-    io::const_io_error!(io::ErrorKind::InvalidInput, "file name contained an unexpected NUL byte");
+    io::const_error!(io::ErrorKind::InvalidInput, "file name contained an unexpected NUL byte");
 
 #[inline]
 pub fn run_path_with_cstr<T>(path: &Path, f: &dyn Fn(&CStr) -> io::Result<T>) -> io::Result<T> {

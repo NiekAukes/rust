@@ -1,13 +1,14 @@
-#![feature(alloc_layout_extra)]
+// tidy-alphabetical-start
+#![cfg_attr(test, feature(test))]
 #![feature(never_type)]
-#![allow(unused_variables)]
+// tidy-alphabetical-end
 
 pub(crate) use rustc_data_structures::fx::{FxIndexMap as Map, FxIndexSet as Set};
 
 pub mod layout;
 mod maybe_transmutable;
 
-#[derive(Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct Assume {
     pub alignment: bool,
     pub lifetimes: bool,
@@ -18,23 +19,29 @@ pub struct Assume {
 /// Either transmutation is allowed, we have an error, or we have an optional
 /// Condition that must hold.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub enum Answer<R> {
+pub enum Answer<R, T> {
     Yes,
-    No(Reason<R>),
-    If(Condition<R>),
+    No(Reason<T>),
+    If(Condition<R, T>),
 }
 
 /// A condition which must hold for safe transmutation to be possible.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub enum Condition<R> {
+pub enum Condition<R, T> {
     /// `Src` is transmutable into `Dst`, if `src` is transmutable into `dst`.
-    IfTransmutable { src: R, dst: R },
+    Transmutable { src: T, dst: T },
+
+    /// The region `long` must outlive `short`.
+    Outlives { long: R, short: R },
+
+    /// The `ty` is immutable.
+    Immutable { ty: T },
 
     /// `Src` is transmutable into `Dst`, if all of the enclosed requirements are met.
-    IfAll(Vec<Condition<R>>),
+    IfAll(Vec<Condition<R, T>>),
 
     /// `Src` is transmutable into `Dst` if any of the enclosed requirements are met.
-    IfAny(Vec<Condition<R>>),
+    IfAny(Vec<Condition<R, T>>),
 }
 
 /// Answers "why wasn't the source type transmutable into the destination type?"
@@ -52,12 +59,16 @@ pub enum Reason<T> {
     DstMayHaveSafetyInvariants,
     /// `Dst` is larger than `Src`, and the excess bytes were not exclusively uninitialized.
     DstIsTooBig,
-    /// A referent of `Dst` is larger than a referent in `Src`.
+    /// `Dst` is larger `Src`.
     DstRefIsTooBig {
         /// The referent of the source type.
         src: T,
+        /// The size of the source type's referent.
+        src_size: usize,
         /// The too-large referent of the destination type.
         dst: T,
+        /// The size of the destination type's referent.
+        dst_size: usize,
     },
     /// Src should have a stricter alignment than Dst, but it does not.
     DstHasStricterAlignment { src_min_align: usize, dst_min_align: usize },
@@ -77,21 +88,13 @@ pub enum Reason<T> {
 
 #[cfg(feature = "rustc")]
 mod rustc {
+    use rustc_hir::lang_items::LangItem;
+    use rustc_middle::ty::{Const, Region, Ty, TyCtxt};
+
     use super::*;
 
-    use rustc_hir::lang_items::LangItem;
-    use rustc_infer::infer::InferCtxt;
-    use rustc_macros::TypeVisitable;
-    use rustc_middle::traits::ObligationCause;
-    use rustc_middle::ty::Const;
-    use rustc_middle::ty::ParamEnv;
-    use rustc_middle::ty::Ty;
-    use rustc_middle::ty::TyCtxt;
-    use rustc_middle::ty::ValTree;
-    use rustc_span::DUMMY_SP;
-
     /// The source and destination types of a transmutation.
-    #[derive(TypeVisitable, Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy)]
     pub struct Types<'tcx> {
         /// The source type.
         pub src: Ty<'tcx>,
@@ -99,27 +102,22 @@ mod rustc {
         pub dst: Ty<'tcx>,
     }
 
-    pub struct TransmuteTypeEnv<'cx, 'tcx> {
-        infcx: &'cx InferCtxt<'tcx>,
+    pub struct TransmuteTypeEnv<'tcx> {
+        tcx: TyCtxt<'tcx>,
     }
 
-    impl<'cx, 'tcx> TransmuteTypeEnv<'cx, 'tcx> {
-        pub fn new(infcx: &'cx InferCtxt<'tcx>) -> Self {
-            Self { infcx }
+    impl<'tcx> TransmuteTypeEnv<'tcx> {
+        pub fn new(tcx: TyCtxt<'tcx>) -> Self {
+            Self { tcx }
         }
 
-        #[allow(unused)]
         pub fn is_transmutable(
             &mut self,
-            cause: ObligationCause<'tcx>,
             types: Types<'tcx>,
             assume: crate::Assume,
-        ) -> crate::Answer<crate::layout::rustc::Ref<'tcx>> {
+        ) -> crate::Answer<Region<'tcx>, Ty<'tcx>> {
             crate::maybe_transmutable::MaybeTransmutableQuery::new(
-                types.src,
-                types.dst,
-                assume,
-                self.infcx.tcx,
+                types.src, types.dst, assume, self.tcx,
             )
             .answer()
         }
@@ -127,44 +125,31 @@ mod rustc {
 
     impl Assume {
         /// Constructs an `Assume` from a given const-`Assume`.
-        pub fn from_const<'tcx>(
-            tcx: TyCtxt<'tcx>,
-            param_env: ParamEnv<'tcx>,
-            c: Const<'tcx>,
-        ) -> Option<Self> {
+        pub fn from_const<'tcx>(tcx: TyCtxt<'tcx>, ct: Const<'tcx>) -> Option<Self> {
             use rustc_middle::ty::ScalarInt;
-            use rustc_span::symbol::sym;
+            use rustc_span::sym;
 
-            let Ok(cv) = c.eval(tcx, param_env, DUMMY_SP) else {
+            let Some(cv) = ct.try_to_value() else {
+                return None;
+            };
+
+            let adt_def = cv.ty.ty_adt_def()?;
+
+            if !tcx.is_lang_item(adt_def.did(), LangItem::TransmuteOpts) {
+                tcx.dcx().delayed_bug(format!(
+                    "The given `const` was not marked with the `{}` lang item.",
+                    LangItem::TransmuteOpts.name()
+                ));
                 return Some(Self {
                     alignment: true,
                     lifetimes: true,
                     safety: true,
                     validity: true,
                 });
-            };
-
-            let adt_def = c.ty().ty_adt_def()?;
-
-            assert_eq!(
-                tcx.require_lang_item(LangItem::TransmuteOpts, None),
-                adt_def.did(),
-                "The given `Const` was not marked with the `{}` lang item.",
-                LangItem::TransmuteOpts.name(),
-            );
+            }
 
             let variant = adt_def.non_enum_variant();
-            let fields = match cv {
-                ValTree::Branch(branch) => branch,
-                _ => {
-                    return Some(Self {
-                        alignment: true,
-                        lifetimes: true,
-                        safety: true,
-                        validity: true,
-                    });
-                }
-            };
+            let fields = cv.valtree.unwrap_branch();
 
             let get_field = |name| {
                 let (field_idx, _) = variant

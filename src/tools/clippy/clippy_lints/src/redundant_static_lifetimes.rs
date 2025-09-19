@@ -1,5 +1,6 @@
-use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::msrvs::{self, MsrvStack};
 use clippy_utils::source::snippet;
 use rustc_ast::ast::{ConstItem, Item, ItemKind, StaticItem, Ty, TyKind};
 use rustc_errors::Applicability;
@@ -34,13 +35,14 @@ declare_clippy_lint! {
 }
 
 pub struct RedundantStaticLifetimes {
-    msrv: Msrv,
+    msrv: MsrvStack,
 }
 
 impl RedundantStaticLifetimes {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: MsrvStack::new(conf.msrv),
+        }
     }
 }
 
@@ -113,5 +115,5 @@ impl EarlyLintPass for RedundantStaticLifetimes {
         }
     }
 
-    extract_msrv_attr!(EarlyContext);
+    extract_msrv_attr!();
 }

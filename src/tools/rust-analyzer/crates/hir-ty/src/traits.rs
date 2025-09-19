@@ -1,24 +1,24 @@
 //! Trait solving using Chalk.
 
+use core::fmt;
 use std::env::var;
 
-use chalk_ir::{fold::TypeFoldable, DebruijnIndex, GoalData};
+use chalk_ir::{DebruijnIndex, GoalData, fold::TypeFoldable};
 use chalk_recursive::Cache;
-use chalk_solve::{logging_db::LoggingRustIrDatabase, rust_ir, Solver};
+use chalk_solve::{Solver, logging_db::LoggingRustIrDatabase, rust_ir};
 
-use base_db::CrateId;
-use hir_def::{
-    lang_item::{LangItem, LangItemTarget},
-    BlockId, TraitId,
-};
-use hir_expand::name::{name, Name};
-use stdx::panic_context;
+use base_db::Crate;
+use hir_def::{BlockId, TraitId, lang_item::LangItem};
+use hir_expand::name::Name;
+use intern::sym;
+use span::Edition;
+use stdx::{never, panic_context};
 use triomphe::Arc;
 
 use crate::{
-    db::HirDatabase, infer::unify::InferenceTable, utils::UnevaluatedConstEvaluatorFolder, AliasEq,
-    AliasTy, Canonical, DomainGoal, Goal, Guidance, InEnvironment, Interner, ProjectionTy,
-    ProjectionTyExt, Solution, TraitRefExt, Ty, TyKind, WhereClause,
+    AliasEq, AliasTy, Canonical, DomainGoal, Goal, Guidance, InEnvironment, Interner, ProjectionTy,
+    ProjectionTyExt, Solution, TraitRefExt, Ty, TyKind, TypeFlags, WhereClause, db::HirDatabase,
+    infer::unify::InferenceTable, utils::UnevaluatedConstEvaluatorFolder,
 };
 
 /// This controls how much 'time' we give the Chalk solver before giving up.
@@ -27,7 +27,7 @@ const CHALK_SOLVER_FUEL: i32 = 1000;
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct ChalkContext<'a> {
     pub(crate) db: &'a dyn HirDatabase,
-    pub(crate) krate: CrateId,
+    pub(crate) krate: Crate,
     pub(crate) block: Option<BlockId>,
 }
 
@@ -45,7 +45,7 @@ fn create_chalk_solver() -> chalk_recursive::RecursiveSolver<Interner> {
 /// we assume that `T: Default`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TraitEnvironment {
-    pub krate: CrateId,
+    pub krate: Crate,
     pub block: Option<BlockId>,
     // FIXME make this a BTreeMap
     traits_from_clauses: Box<[(Ty, TraitId)]>,
@@ -53,7 +53,7 @@ pub struct TraitEnvironment {
 }
 
 impl TraitEnvironment {
-    pub fn empty(krate: CrateId) -> Arc<Self> {
+    pub fn empty(krate: Crate) -> Arc<Self> {
         Arc::new(TraitEnvironment {
             krate,
             block: None,
@@ -63,7 +63,7 @@ impl TraitEnvironment {
     }
 
     pub fn new(
-        krate: CrateId,
+        krate: Crate,
         block: Option<BlockId>,
         traits_from_clauses: Box<[(Ty, TraitId)]>,
         env: chalk_ir::Environment<Interner>,
@@ -88,6 +88,16 @@ pub(crate) fn normalize_projection_query(
     projection: ProjectionTy,
     env: Arc<TraitEnvironment>,
 ) -> Ty {
+    if projection.substitution.iter(Interner).any(|arg| {
+        arg.ty(Interner)
+            .is_some_and(|ty| ty.data(Interner).flags.intersects(TypeFlags::HAS_TY_INFER))
+    }) {
+        never!(
+            "Invoking `normalize_projection_query` with a projection type containing inference var"
+        );
+        return TyKind::Error.intern(Interner);
+    }
+
     let mut table = InferenceTable::new(db, env);
     let ty = table.normalize_projection_ty(projection);
     table.resolve_completely(ty)
@@ -96,19 +106,20 @@ pub(crate) fn normalize_projection_query(
 /// Solve a trait goal using Chalk.
 pub(crate) fn trait_solve_query(
     db: &dyn HirDatabase,
-    krate: CrateId,
+    krate: Crate,
     block: Option<BlockId>,
     goal: Canonical<InEnvironment<Goal>>,
 ) -> Option<Solution> {
-    let detail = match &goal.value.goal.data(Interner) {
-        GoalData::DomainGoal(DomainGoal::Holds(WhereClause::Implemented(it))) => {
-            db.trait_data(it.hir_trait_id()).name.display(db.upcast()).to_string()
-        }
+    let _p = tracing::info_span!("trait_solve_query", detail = ?match &goal.value.goal.data(Interner) {
+        GoalData::DomainGoal(DomainGoal::Holds(WhereClause::Implemented(it))) => db
+            .trait_signature(it.hir_trait_id())
+            .name
+            .display(db, Edition::LATEST)
+            .to_string(),
         GoalData::DomainGoal(DomainGoal::Holds(WhereClause::AliasEq(_))) => "alias_eq".to_owned(),
         _ => "??".to_owned(),
-    };
-    let _p = tracing::span!(tracing::Level::INFO, "trait_solve_query", ?detail).entered();
-    tracing::info!("trait_solve_query({:?})", goal.value.goal);
+    })
+    .entered();
 
     if let GoalData::DomainGoal(DomainGoal::Holds(WhereClause::AliasEq(AliasEq {
         alias: AliasTy::Projection(projection_ty),
@@ -135,11 +146,11 @@ pub(crate) fn trait_solve_query(
 
 fn solve(
     db: &dyn HirDatabase,
-    krate: CrateId,
+    krate: Crate,
     block: Option<BlockId>,
     goal: &chalk_ir::UCanonical<chalk_ir::InEnvironment<chalk_ir::Goal<Interner>>>,
 ) -> Option<chalk_solve::Solution<Interner>> {
-    let _p = tracing::span!(tracing::Level::INFO, "solve", ?krate, ?block).entered();
+    let _p = tracing::info_span!("solve", ?krate, ?block).entered();
     let context = ChalkContext { db, krate, block };
     tracing::debug!("solve goal: {:?}", goal);
     let mut solver = create_chalk_solver();
@@ -147,7 +158,7 @@ fn solve(
     let fuel = std::cell::Cell::new(CHALK_SOLVER_FUEL);
 
     let should_continue = || {
-        db.unwind_if_cancelled();
+        db.unwind_if_revision_cancelled();
         let remaining = fuel.get();
         fuel.set(remaining - 1);
         if remaining == 0 {
@@ -177,11 +188,7 @@ fn solve(
 
     // don't set the TLS for Chalk unless Chalk debugging is active, to make
     // extra sure we only use it for debugging
-    if is_chalk_debug() {
-        crate::tls::set_current_program(db, solve)
-    } else {
-        solve()
-    }
+    if is_chalk_debug() { crate::tls::set_current_program(db, solve) } else { solve() }
 }
 
 struct LoggingRustIrDatabaseLoggingOnDrop<'a>(LoggingRustIrDatabase<Interner, ChalkContext<'a>>);
@@ -207,14 +214,45 @@ pub enum FnTrait {
     FnOnce,
     FnMut,
     Fn,
+
+    AsyncFnOnce,
+    AsyncFnMut,
+    AsyncFn,
+}
+
+impl fmt::Display for FnTrait {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FnTrait::FnOnce => write!(f, "FnOnce"),
+            FnTrait::FnMut => write!(f, "FnMut"),
+            FnTrait::Fn => write!(f, "Fn"),
+            FnTrait::AsyncFnOnce => write!(f, "AsyncFnOnce"),
+            FnTrait::AsyncFnMut => write!(f, "AsyncFnMut"),
+            FnTrait::AsyncFn => write!(f, "AsyncFn"),
+        }
+    }
 }
 
 impl FnTrait {
+    pub const fn function_name(&self) -> &'static str {
+        match self {
+            FnTrait::FnOnce => "call_once",
+            FnTrait::FnMut => "call_mut",
+            FnTrait::Fn => "call",
+            FnTrait::AsyncFnOnce => "async_call_once",
+            FnTrait::AsyncFnMut => "async_call_mut",
+            FnTrait::AsyncFn => "async_call",
+        }
+    }
+
     const fn lang_item(self) -> LangItem {
         match self {
             FnTrait::FnOnce => LangItem::FnOnce,
             FnTrait::FnMut => LangItem::FnMut,
             FnTrait::Fn => LangItem::Fn,
+            FnTrait::AsyncFnOnce => LangItem::AsyncFnOnce,
+            FnTrait::AsyncFnMut => LangItem::AsyncFnMut,
+            FnTrait::AsyncFn => LangItem::AsyncFn,
         }
     }
 
@@ -223,31 +261,39 @@ impl FnTrait {
             LangItem::FnOnce => Some(FnTrait::FnOnce),
             LangItem::FnMut => Some(FnTrait::FnMut),
             LangItem::Fn => Some(FnTrait::Fn),
+            LangItem::AsyncFnOnce => Some(FnTrait::AsyncFnOnce),
+            LangItem::AsyncFnMut => Some(FnTrait::AsyncFnMut),
+            LangItem::AsyncFn => Some(FnTrait::AsyncFn),
             _ => None,
         }
     }
 
     pub const fn to_chalk_ir(self) -> rust_ir::ClosureKind {
+        // Chalk doesn't support async fn traits.
         match self {
-            FnTrait::FnOnce => rust_ir::ClosureKind::FnOnce,
-            FnTrait::FnMut => rust_ir::ClosureKind::FnMut,
-            FnTrait::Fn => rust_ir::ClosureKind::Fn,
+            FnTrait::AsyncFnOnce | FnTrait::FnOnce => rust_ir::ClosureKind::FnOnce,
+            FnTrait::AsyncFnMut | FnTrait::FnMut => rust_ir::ClosureKind::FnMut,
+            FnTrait::AsyncFn | FnTrait::Fn => rust_ir::ClosureKind::Fn,
         }
     }
 
     pub fn method_name(self) -> Name {
         match self {
-            FnTrait::FnOnce => name!(call_once),
-            FnTrait::FnMut => name!(call_mut),
-            FnTrait::Fn => name!(call),
+            FnTrait::FnOnce => Name::new_symbol_root(sym::call_once),
+            FnTrait::FnMut => Name::new_symbol_root(sym::call_mut),
+            FnTrait::Fn => Name::new_symbol_root(sym::call),
+            FnTrait::AsyncFnOnce => Name::new_symbol_root(sym::async_call_once),
+            FnTrait::AsyncFnMut => Name::new_symbol_root(sym::async_call_mut),
+            FnTrait::AsyncFn => Name::new_symbol_root(sym::async_call),
         }
     }
 
-    pub fn get_id(self, db: &dyn HirDatabase, krate: CrateId) -> Option<TraitId> {
-        let target = db.lang_item(krate, self.lang_item())?;
-        match target {
-            LangItemTarget::Trait(t) => Some(t),
-            _ => None,
-        }
+    pub fn get_id(self, db: &dyn HirDatabase, krate: Crate) -> Option<TraitId> {
+        self.lang_item().resolve_trait(db, krate)
+    }
+
+    #[inline]
+    pub(crate) fn is_async(self) -> bool {
+        matches!(self, FnTrait::AsyncFn | FnTrait::AsyncFnMut | FnTrait::AsyncFnOnce)
     }
 }

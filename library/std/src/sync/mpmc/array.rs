@@ -13,17 +13,16 @@ use super::error::*;
 use super::select::{Operation, Selected, Token};
 use super::utils::{Backoff, CachePadded};
 use super::waker::SyncWaker;
-
 use crate::cell::UnsafeCell;
 use crate::mem::MaybeUninit;
 use crate::ptr;
-use crate::sync::atomic::{self, AtomicUsize, Ordering};
+use crate::sync::atomic::{self, Atomic, AtomicUsize, Ordering};
 use crate::time::Instant;
 
 /// A slot in a channel.
 struct Slot<T> {
     /// The current stamp.
-    stamp: AtomicUsize,
+    stamp: Atomic<usize>,
 
     /// The message in this slot. Either read out in `read` or dropped through
     /// `discard_all_messages`.
@@ -56,7 +55,7 @@ pub(crate) struct Channel<T> {
     /// represent the lap. The mark bit in the head is always zero.
     ///
     /// Messages are popped from the head of the channel.
-    head: CachePadded<AtomicUsize>,
+    head: CachePadded<Atomic<usize>>,
 
     /// The tail of the channel.
     ///
@@ -65,7 +64,7 @@ pub(crate) struct Channel<T> {
     /// represent the lap. The mark bit indicates that the channel is disconnected.
     ///
     /// Messages are pushed into the tail of the channel.
-    tail: CachePadded<AtomicUsize>,
+    tail: CachePadded<Atomic<usize>>,
 
     /// The buffer holding slots.
     buffer: Box<[Slot<T>]>,
@@ -200,11 +199,12 @@ impl<T> Channel<T> {
             return Err(msg);
         }
 
-        let slot: &Slot<T> = &*(token.array.slot as *const Slot<T>);
-
         // Write the message into the slot and update the stamp.
-        slot.msg.get().write(MaybeUninit::new(msg));
-        slot.stamp.store(token.array.stamp, Ordering::Release);
+        unsafe {
+            let slot: &Slot<T> = &*(token.array.slot as *const Slot<T>);
+            slot.msg.get().write(MaybeUninit::new(msg));
+            slot.stamp.store(token.array.stamp, Ordering::Release);
+        }
 
         // Wake a sleeping receiver.
         self.receivers.notify();
@@ -291,11 +291,14 @@ impl<T> Channel<T> {
             return Err(());
         }
 
-        let slot: &Slot<T> = &*(token.array.slot as *const Slot<T>);
-
         // Read the message from the slot and update the stamp.
-        let msg = slot.msg.get().read().assume_init();
-        slot.stamp.store(token.array.stamp, Ordering::Release);
+        let msg = unsafe {
+            let slot: &Slot<T> = &*(token.array.slot as *const Slot<T>);
+
+            let msg = slot.msg.get().read().assume_init();
+            slot.stamp.store(token.array.stamp, Ordering::Release);
+            msg
+        };
 
         // Wake a sleeping sender.
         self.senders.notify();
@@ -343,7 +346,8 @@ impl<T> Channel<T> {
                 }
 
                 // Block the current thread.
-                let sel = cx.wait_until(deadline);
+                // SAFETY: the context belongs to the current thread.
+                let sel = unsafe { cx.wait_until(deadline) };
 
                 match sel {
                     Selected::Waiting => unreachable!(),
@@ -394,7 +398,8 @@ impl<T> Channel<T> {
                 }
 
                 // Block the current thread.
-                let sel = cx.wait_until(deadline);
+                // SAFETY: the context belongs to the current thread.
+                let sel = unsafe { cx.wait_until(deadline) };
 
                 match sel {
                     Selected::Waiting => unreachable!(),
@@ -471,7 +476,7 @@ impl<T> Channel<T> {
             false
         };
 
-        self.discard_all_messages(tail);
+        unsafe { self.discard_all_messages(tail) };
         disconnected
     }
 
@@ -481,7 +486,7 @@ impl<T> Channel<T> {
     ///
     /// # Panicking
     /// If a destructor panics, the remaining messages are leaked, matching the
-    /// behaviour of the unbounded channel.
+    /// behavior of the unbounded channel.
     ///
     /// # Safety
     /// This method must only be called when dropping the last receiver. The

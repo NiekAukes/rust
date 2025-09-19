@@ -1,29 +1,28 @@
 // Generic arguments.
 
-use crate::ty::codec::{TyDecoder, TyEncoder};
-use crate::ty::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeSuperFoldable};
-use crate::ty::sty::{ClosureArgs, CoroutineArgs, CoroutineClosureArgs, InlineConstArgs};
-use crate::ty::visit::{TypeVisitable, TypeVisitableExt, TypeVisitor};
-use crate::ty::{self, Lift, List, ParamConst, Ty, TyCtxt};
+use core::intrinsics;
+use std::marker::PhantomData;
+use std::num::NonZero;
+use std::ptr::NonNull;
 
-use rustc_ast_ir::visit::VisitorResult;
-use rustc_ast_ir::walk_visitable_list;
 use rustc_data_structures::intern::Interned;
 use rustc_errors::{DiagArgValue, IntoDiagArg};
 use rustc_hir::def_id::DefId;
-use rustc_macros::{
-    Decodable, Encodable, HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable,
-};
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, extension};
 use rustc_serialize::{Decodable, Encodable};
 use rustc_type_ir::WithCachedTypeInfo;
+use rustc_type_ir::walk::TypeWalker;
 use smallvec::SmallVec;
 
-use core::intrinsics;
-use std::marker::PhantomData;
-use std::mem;
-use std::num::NonZero;
-use std::ops::Deref;
-use std::ptr::NonNull;
+use crate::ty::codec::{TyDecoder, TyEncoder};
+use crate::ty::{
+    self, ClosureArgs, CoroutineArgs, CoroutineClosureArgs, FallibleTypeFolder, InlineConstArgs,
+    Lift, List, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeVisitable, TypeVisitor, VisitorResult,
+    walk_visitable_list,
+};
+
+pub type GenericArgKind<'tcx> = rustc_type_ir::GenericArgKind<TyCtxt<'tcx>>;
+pub type TermKind<'tcx> = rustc_type_ir::TermKind<TyCtxt<'tcx>>;
 
 /// An entity in the Rust type system, which can be one of
 /// several kinds (types, lifetimes, and consts).
@@ -39,12 +38,113 @@ pub struct GenericArg<'tcx> {
     marker: PhantomData<(Ty<'tcx>, ty::Region<'tcx>, ty::Const<'tcx>)>,
 }
 
-#[cfg(parallel_compiler)]
+impl<'tcx> rustc_type_ir::inherent::GenericArg<TyCtxt<'tcx>> for GenericArg<'tcx> {}
+
+impl<'tcx> rustc_type_ir::inherent::GenericArgs<TyCtxt<'tcx>> for ty::GenericArgsRef<'tcx> {
+    fn rebase_onto(
+        self,
+        tcx: TyCtxt<'tcx>,
+        source_ancestor: DefId,
+        target_args: GenericArgsRef<'tcx>,
+    ) -> GenericArgsRef<'tcx> {
+        self.rebase_onto(tcx, source_ancestor, target_args)
+    }
+
+    fn type_at(self, i: usize) -> Ty<'tcx> {
+        self.type_at(i)
+    }
+
+    fn region_at(self, i: usize) -> ty::Region<'tcx> {
+        self.region_at(i)
+    }
+
+    fn const_at(self, i: usize) -> ty::Const<'tcx> {
+        self.const_at(i)
+    }
+
+    fn identity_for_item(tcx: TyCtxt<'tcx>, def_id: DefId) -> ty::GenericArgsRef<'tcx> {
+        GenericArgs::identity_for_item(tcx, def_id)
+    }
+
+    fn extend_with_error(
+        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
+        original_args: &[ty::GenericArg<'tcx>],
+    ) -> ty::GenericArgsRef<'tcx> {
+        ty::GenericArgs::extend_with_error(tcx, def_id, original_args)
+    }
+
+    fn split_closure_args(self) -> ty::ClosureArgsParts<TyCtxt<'tcx>> {
+        match self[..] {
+            [ref parent_args @ .., closure_kind_ty, closure_sig_as_fn_ptr_ty, tupled_upvars_ty] => {
+                ty::ClosureArgsParts {
+                    parent_args,
+                    closure_kind_ty: closure_kind_ty.expect_ty(),
+                    closure_sig_as_fn_ptr_ty: closure_sig_as_fn_ptr_ty.expect_ty(),
+                    tupled_upvars_ty: tupled_upvars_ty.expect_ty(),
+                }
+            }
+            _ => bug!("closure args missing synthetics"),
+        }
+    }
+
+    fn split_coroutine_closure_args(self) -> ty::CoroutineClosureArgsParts<TyCtxt<'tcx>> {
+        match self[..] {
+            [
+                ref parent_args @ ..,
+                closure_kind_ty,
+                signature_parts_ty,
+                tupled_upvars_ty,
+                coroutine_captures_by_ref_ty,
+                coroutine_witness_ty,
+            ] => ty::CoroutineClosureArgsParts {
+                parent_args,
+                closure_kind_ty: closure_kind_ty.expect_ty(),
+                signature_parts_ty: signature_parts_ty.expect_ty(),
+                tupled_upvars_ty: tupled_upvars_ty.expect_ty(),
+                coroutine_captures_by_ref_ty: coroutine_captures_by_ref_ty.expect_ty(),
+                coroutine_witness_ty: coroutine_witness_ty.expect_ty(),
+            },
+            _ => bug!("closure args missing synthetics"),
+        }
+    }
+
+    fn split_coroutine_args(self) -> ty::CoroutineArgsParts<TyCtxt<'tcx>> {
+        match self[..] {
+            [
+                ref parent_args @ ..,
+                kind_ty,
+                resume_ty,
+                yield_ty,
+                return_ty,
+                witness,
+                tupled_upvars_ty,
+            ] => ty::CoroutineArgsParts {
+                parent_args,
+                kind_ty: kind_ty.expect_ty(),
+                resume_ty: resume_ty.expect_ty(),
+                yield_ty: yield_ty.expect_ty(),
+                return_ty: return_ty.expect_ty(),
+                witness: witness.expect_ty(),
+                tupled_upvars_ty: tupled_upvars_ty.expect_ty(),
+            },
+            _ => bug!("coroutine args missing synthetics"),
+        }
+    }
+}
+
+impl<'tcx> rustc_type_ir::inherent::IntoKind for GenericArg<'tcx> {
+    type Kind = GenericArgKind<'tcx>;
+
+    fn kind(self) -> Self::Kind {
+        self.kind()
+    }
+}
+
 unsafe impl<'tcx> rustc_data_structures::sync::DynSend for GenericArg<'tcx> where
     &'tcx (Ty<'tcx>, ty::Region<'tcx>, ty::Const<'tcx>): rustc_data_structures::sync::DynSend
 {
 }
-#[cfg(parallel_compiler)]
 unsafe impl<'tcx> rustc_data_structures::sync::DynSync for GenericArg<'tcx> where
     &'tcx (Ty<'tcx>, ty::Region<'tcx>, ty::Const<'tcx>): rustc_data_structures::sync::DynSync
 {
@@ -59,8 +159,8 @@ unsafe impl<'tcx> Sync for GenericArg<'tcx> where
 }
 
 impl<'tcx> IntoDiagArg for GenericArg<'tcx> {
-    fn into_diag_arg(self) -> DiagArgValue {
-        self.to_string().into_diag_arg()
+    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> DiagArgValue {
+        self.to_string().into_diag_arg(&mut None)
     }
 }
 
@@ -69,30 +169,24 @@ const TYPE_TAG: usize = 0b00;
 const REGION_TAG: usize = 0b01;
 const CONST_TAG: usize = 0b10;
 
-#[derive(Debug, TyEncodable, TyDecodable, PartialEq, Eq, HashStable)]
-pub enum GenericArgKind<'tcx> {
-    Lifetime(ty::Region<'tcx>),
-    Type(Ty<'tcx>),
-    Const(ty::Const<'tcx>),
-}
-
+#[extension(trait GenericArgPackExt<'tcx>)]
 impl<'tcx> GenericArgKind<'tcx> {
     #[inline]
     fn pack(self) -> GenericArg<'tcx> {
         let (tag, ptr) = match self {
             GenericArgKind::Lifetime(lt) => {
                 // Ensure we can use the tag bits.
-                assert_eq!(mem::align_of_val(&*lt.0.0) & TAG_MASK, 0);
+                assert_eq!(align_of_val(&*lt.0.0) & TAG_MASK, 0);
                 (REGION_TAG, NonNull::from(lt.0.0).cast())
             }
             GenericArgKind::Type(ty) => {
                 // Ensure we can use the tag bits.
-                assert_eq!(mem::align_of_val(&*ty.0.0) & TAG_MASK, 0);
+                assert_eq!(align_of_val(&*ty.0.0) & TAG_MASK, 0);
                 (TYPE_TAG, NonNull::from(ty.0.0).cast())
             }
             GenericArgKind::Const(ct) => {
                 // Ensure we can use the tag bits.
-                assert_eq!(mem::align_of_val(&*ct.0.0) & TAG_MASK, 0);
+                assert_eq!(align_of_val(&*ct.0.0) & TAG_MASK, 0);
                 (CONST_TAG, NonNull::from(ct.0.0).cast())
             }
         };
@@ -124,7 +218,7 @@ impl<'tcx> From<ty::Const<'tcx>> for GenericArg<'tcx> {
 
 impl<'tcx> From<ty::Term<'tcx>> for GenericArg<'tcx> {
     fn from(value: ty::Term<'tcx>) -> Self {
-        match value.unpack() {
+        match value.kind() {
             ty::TermKind::Ty(t) => t.into(),
             ty::TermKind::Const(c) => c.into(),
         }
@@ -133,7 +227,7 @@ impl<'tcx> From<ty::Term<'tcx>> for GenericArg<'tcx> {
 
 impl<'tcx> GenericArg<'tcx> {
     #[inline]
-    pub fn unpack(self) -> GenericArgKind<'tcx> {
+    pub fn kind(self) -> GenericArgKind<'tcx> {
         let ptr =
             unsafe { self.ptr.map_addr(|addr| NonZero::new_unchecked(addr.get() & !TAG_MASK)) };
         // SAFETY: use of `Interned::new_unchecked` here is ok because these
@@ -148,7 +242,7 @@ impl<'tcx> GenericArg<'tcx> {
                     ptr.cast::<WithCachedTypeInfo<ty::TyKind<'tcx>>>().as_ref(),
                 ))),
                 CONST_TAG => GenericArgKind::Const(ty::Const(Interned::new_unchecked(
-                    ptr.cast::<WithCachedTypeInfo<ty::ConstData<'tcx>>>().as_ref(),
+                    ptr.cast::<WithCachedTypeInfo<ty::ConstKind<'tcx>>>().as_ref(),
                 ))),
                 _ => intrinsics::unreachable(),
             }
@@ -156,26 +250,35 @@ impl<'tcx> GenericArg<'tcx> {
     }
 
     #[inline]
-    pub fn as_type(self) -> Option<Ty<'tcx>> {
-        match self.unpack() {
-            GenericArgKind::Type(ty) => Some(ty),
-            _ => None,
-        }
-    }
-
-    #[inline]
     pub fn as_region(self) -> Option<ty::Region<'tcx>> {
-        match self.unpack() {
+        match self.kind() {
             GenericArgKind::Lifetime(re) => Some(re),
             _ => None,
         }
     }
 
     #[inline]
+    pub fn as_type(self) -> Option<Ty<'tcx>> {
+        match self.kind() {
+            GenericArgKind::Type(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    #[inline]
     pub fn as_const(self) -> Option<ty::Const<'tcx>> {
-        match self.unpack() {
+        match self.kind() {
             GenericArgKind::Const(ct) => Some(ct),
             _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_term(self) -> Option<ty::Term<'tcx>> {
+        match self.kind() {
+            GenericArgKind::Lifetime(_) => None,
+            GenericArgKind::Type(ty) => Some(ty.into()),
+            GenericArgKind::Const(ct) => Some(ct.into()),
         }
     }
 
@@ -197,19 +300,34 @@ impl<'tcx> GenericArg<'tcx> {
     }
 
     pub fn is_non_region_infer(self) -> bool {
-        match self.unpack() {
+        match self.kind() {
             GenericArgKind::Lifetime(_) => false,
+            // FIXME: This shouldn't return numerical/float.
             GenericArgKind::Type(ty) => ty.is_ty_or_numeric_infer(),
             GenericArgKind::Const(ct) => ct.is_ct_infer(),
         }
     }
+
+    /// Iterator that walks `self` and any types reachable from
+    /// `self`, in depth-first order. Note that just walks the types
+    /// that appear in `self`, it does not descend into the fields of
+    /// structs or variants. For example:
+    ///
+    /// ```text
+    /// isize => { isize }
+    /// Foo<Bar<isize>> => { Foo<Bar<isize>>, Bar<isize>, isize }
+    /// [isize] => { [isize], isize }
+    /// ```
+    pub fn walk(self) -> TypeWalker<TyCtxt<'tcx>> {
+        TypeWalker::new(self)
+    }
 }
 
-impl<'a, 'tcx> Lift<'tcx> for GenericArg<'a> {
+impl<'a, 'tcx> Lift<TyCtxt<'tcx>> for GenericArg<'a> {
     type Lifted = GenericArg<'tcx>;
 
-    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-        match self.unpack() {
+    fn lift_to_interner(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+        match self.kind() {
             GenericArgKind::Lifetime(lt) => tcx.lift(lt).map(|lt| lt.into()),
             GenericArgKind::Type(ty) => tcx.lift(ty).map(|ty| ty.into()),
             GenericArgKind::Const(ct) => tcx.lift(ct).map(|ct| ct.into()),
@@ -222,17 +340,25 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for GenericArg<'tcx> {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        match self.unpack() {
+        match self.kind() {
             GenericArgKind::Lifetime(lt) => lt.try_fold_with(folder).map(Into::into),
             GenericArgKind::Type(ty) => ty.try_fold_with(folder).map(Into::into),
             GenericArgKind::Const(ct) => ct.try_fold_with(folder).map(Into::into),
+        }
+    }
+
+    fn fold_with<F: TypeFolder<TyCtxt<'tcx>>>(self, folder: &mut F) -> Self {
+        match self.kind() {
+            GenericArgKind::Lifetime(lt) => lt.fold_with(folder).into(),
+            GenericArgKind::Type(ty) => ty.fold_with(folder).into(),
+            GenericArgKind::Const(ct) => ct.fold_with(folder).into(),
         }
     }
 }
 
 impl<'tcx> TypeVisitable<TyCtxt<'tcx>> for GenericArg<'tcx> {
     fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> V::Result {
-        match self.unpack() {
+        match self.kind() {
             GenericArgKind::Lifetime(lt) => lt.visit_with(visitor),
             GenericArgKind::Type(ty) => ty.visit_with(visitor),
             GenericArgKind::Const(ct) => ct.visit_with(visitor),
@@ -240,13 +366,13 @@ impl<'tcx> TypeVisitable<TyCtxt<'tcx>> for GenericArg<'tcx> {
     }
 }
 
-impl<'tcx, E: TyEncoder<I = TyCtxt<'tcx>>> Encodable<E> for GenericArg<'tcx> {
+impl<'tcx, E: TyEncoder<'tcx>> Encodable<E> for GenericArg<'tcx> {
     fn encode(&self, e: &mut E) {
-        self.unpack().encode(e)
+        self.kind().encode(e)
     }
 }
 
-impl<'tcx, D: TyDecoder<I = TyCtxt<'tcx>>> Decodable<D> for GenericArg<'tcx> {
+impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for GenericArg<'tcx> {
     fn decode(d: &mut D) -> GenericArg<'tcx> {
         GenericArgKind::decode(d).pack()
     }
@@ -264,7 +390,7 @@ impl<'tcx> GenericArgs<'tcx> {
     ///
     /// If any of the generic arguments are not types.
     pub fn into_type_list(&self, tcx: TyCtxt<'tcx>) -> &'tcx List<Ty<'tcx>> {
-        tcx.mk_type_list_from_iter(self.iter().map(|arg| match arg.unpack() {
+        tcx.mk_type_list_from_iter(self.iter().map(|arg| match arg.kind() {
             GenericArgKind::Type(ty) => ty,
             _ => bug!("`into_type_list` called on generic arg with non-types"),
         }))
@@ -274,7 +400,7 @@ impl<'tcx> GenericArgs<'tcx> {
     /// Closure args have a particular structure controlled by the
     /// compiler that encodes information like the signature and closure kind;
     /// see `ty::ClosureArgs` struct for more comments.
-    pub fn as_closure(&'tcx self) -> ClosureArgs<'tcx> {
+    pub fn as_closure(&'tcx self) -> ClosureArgs<TyCtxt<'tcx>> {
         ClosureArgs { args: self }
     }
 
@@ -282,7 +408,7 @@ impl<'tcx> GenericArgs<'tcx> {
     /// Coroutine-closure args have a particular structure controlled by the
     /// compiler that encodes information like the signature and closure kind;
     /// see `ty::CoroutineClosureArgs` struct for more comments.
-    pub fn as_coroutine_closure(&'tcx self) -> CoroutineClosureArgs<'tcx> {
+    pub fn as_coroutine_closure(&'tcx self) -> CoroutineClosureArgs<TyCtxt<'tcx>> {
         CoroutineClosureArgs { args: self }
     }
 
@@ -290,7 +416,7 @@ impl<'tcx> GenericArgs<'tcx> {
     /// Coroutine args have a particular structure controlled by the
     /// compiler that encodes information like the signature and coroutine kind;
     /// see `ty::CoroutineArgs` struct for more comments.
-    pub fn as_coroutine(&'tcx self) -> CoroutineArgs<'tcx> {
+    pub fn as_coroutine(&'tcx self) -> CoroutineArgs<TyCtxt<'tcx>> {
         CoroutineArgs { args: self }
     }
 
@@ -302,14 +428,14 @@ impl<'tcx> GenericArgs<'tcx> {
         InlineConstArgs { args: self }
     }
 
-    /// Creates an `GenericArgs` that maps each generic parameter to itself.
+    /// Creates a [`GenericArgs`] that maps each generic parameter to itself.
     pub fn identity_for_item(tcx: TyCtxt<'tcx>, def_id: impl Into<DefId>) -> GenericArgsRef<'tcx> {
         Self::for_item(tcx, def_id.into(), |param, _| tcx.mk_param_from_def(param))
     }
 
-    /// Creates an `GenericArgs` for generic parameter definitions,
+    /// Creates a [`GenericArgs`] for generic parameter definitions,
     /// by calling closures to obtain each kind.
-    /// The closures get to observe the `GenericArgs` as they're
+    /// The closures get to observe the [`GenericArgs`] as they're
     /// being built, which can be used to correctly
     /// replace defaults of generic parameters.
     pub fn for_item<F>(tcx: TyCtxt<'tcx>, def_id: DefId, mut mk_kind: F) -> GenericArgsRef<'tcx>
@@ -359,8 +485,8 @@ impl<'tcx> GenericArgs<'tcx> {
     ) where
         F: FnMut(&ty::GenericParamDef, &[GenericArg<'tcx>]) -> GenericArg<'tcx>,
     {
-        args.reserve(defs.params.len());
-        for param in &defs.params {
+        args.reserve(defs.own_params.len());
+        for param in &defs.own_params {
             let kind = mk_kind(param, args);
             assert_eq!(param.index as usize, args.len(), "{args:#?}, {defs:#?}");
             args.push(kind);
@@ -374,40 +500,34 @@ impl<'tcx> GenericArgs<'tcx> {
         def_id: DefId,
         original_args: &[GenericArg<'tcx>],
     ) -> GenericArgsRef<'tcx> {
-        ty::GenericArgs::for_item(tcx, def_id, |def, args| {
+        ty::GenericArgs::for_item(tcx, def_id, |def, _| {
             if let Some(arg) = original_args.get(def.index as usize) {
                 *arg
             } else {
-                def.to_error(tcx, args)
+                def.to_error(tcx)
             }
         })
     }
 
     #[inline]
-    pub fn types(&'tcx self) -> impl DoubleEndedIterator<Item = Ty<'tcx>> + 'tcx {
+    pub fn types(&self) -> impl DoubleEndedIterator<Item = Ty<'tcx>> {
         self.iter().filter_map(|k| k.as_type())
     }
 
     #[inline]
-    pub fn regions(&'tcx self) -> impl DoubleEndedIterator<Item = ty::Region<'tcx>> + 'tcx {
+    pub fn regions(&self) -> impl DoubleEndedIterator<Item = ty::Region<'tcx>> {
         self.iter().filter_map(|k| k.as_region())
     }
 
     #[inline]
-    pub fn consts(&'tcx self) -> impl DoubleEndedIterator<Item = ty::Const<'tcx>> + 'tcx {
+    pub fn consts(&self) -> impl DoubleEndedIterator<Item = ty::Const<'tcx>> {
         self.iter().filter_map(|k| k.as_const())
     }
 
-    /// Returns generic arguments that are not lifetimes or host effect params.
+    /// Returns generic arguments that are not lifetimes.
     #[inline]
-    pub fn non_erasable_generics(
-        &'tcx self,
-        tcx: TyCtxt<'tcx>,
-        def_id: DefId,
-    ) -> impl DoubleEndedIterator<Item = GenericArgKind<'tcx>> + 'tcx {
-        let generics = tcx.generics_of(def_id);
-        self.iter().enumerate().filter_map(|(i, k)| match k.unpack() {
-            _ if Some(i) == generics.host_effect_index => None,
+    pub fn non_erasable_generics(&self) -> impl DoubleEndedIterator<Item = GenericArgKind<'tcx>> {
+        self.iter().filter_map(|arg| match arg.kind() {
             ty::GenericArgKind::Lifetime(_) => None,
             generic => Some(generic),
         })
@@ -468,7 +588,7 @@ impl<'tcx> GenericArgs<'tcx> {
     }
 
     pub fn truncate_to(&self, tcx: TyCtxt<'tcx>, generics: &ty::Generics) -> GenericArgsRef<'tcx> {
-        tcx.mk_args_from_iter(self.iter().take(generics.count()))
+        tcx.mk_args(&self[..generics.count()])
     }
 
     pub fn print_as_list(&self) -> String {
@@ -491,7 +611,7 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for GenericArgsRef<'tcx> {
         match self.len() {
             1 => {
                 let param0 = self[0].try_fold_with(folder)?;
-                if param0 == self[0] { Ok(self) } else { Ok(folder.interner().mk_args(&[param0])) }
+                if param0 == self[0] { Ok(self) } else { Ok(folder.cx().mk_args(&[param0])) }
             }
             2 => {
                 let param0 = self[0].try_fold_with(folder)?;
@@ -499,10 +619,31 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for GenericArgsRef<'tcx> {
                 if param0 == self[0] && param1 == self[1] {
                     Ok(self)
                 } else {
-                    Ok(folder.interner().mk_args(&[param0, param1]))
+                    Ok(folder.cx().mk_args(&[param0, param1]))
                 }
             }
             0 => Ok(self),
+            _ => ty::util::try_fold_list(self, folder, |tcx, v| tcx.mk_args(v)),
+        }
+    }
+
+    fn fold_with<F: TypeFolder<TyCtxt<'tcx>>>(self, folder: &mut F) -> Self {
+        // See justification for this behavior in `try_fold_with`.
+        match self.len() {
+            1 => {
+                let param0 = self[0].fold_with(folder);
+                if param0 == self[0] { self } else { folder.cx().mk_args(&[param0]) }
+            }
+            2 => {
+                let param0 = self[0].fold_with(folder);
+                let param1 = self[1].fold_with(folder);
+                if param0 == self[0] && param1 == self[1] {
+                    self
+                } else {
+                    folder.cx().mk_args(&[param0, param1])
+                }
+            }
+            0 => self,
             _ => ty::util::fold_list(self, folder, |tcx, v| tcx.mk_args(v)),
         }
     }
@@ -535,7 +676,23 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for &'tcx ty::List<Ty<'tcx>> {
                 if param0 == self[0] && param1 == self[1] {
                     Ok(self)
                 } else {
-                    Ok(folder.interner().mk_type_list(&[param0, param1]))
+                    Ok(folder.cx().mk_type_list(&[param0, param1]))
+                }
+            }
+            _ => ty::util::try_fold_list(self, folder, |tcx, v| tcx.mk_type_list(v)),
+        }
+    }
+
+    fn fold_with<F: TypeFolder<TyCtxt<'tcx>>>(self, folder: &mut F) -> Self {
+        // See comment justifying behavior in `try_fold_with`.
+        match self.len() {
+            2 => {
+                let param0 = self[0].fold_with(folder);
+                let param1 = self[1].fold_with(folder);
+                if param0 == self[0] && param1 == self[1] {
+                    self
+                } else {
+                    folder.cx().mk_type_list(&[param0, param1])
                 }
             }
             _ => ty::util::fold_list(self, folder, |tcx, v| tcx.mk_type_list(v)),
@@ -548,490 +705,6 @@ impl<'tcx, T: TypeVisitable<TyCtxt<'tcx>>> TypeVisitable<TyCtxt<'tcx>> for &'tcx
     fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> V::Result {
         walk_visitable_list!(visitor, self.iter());
         V::Result::output()
-    }
-}
-
-/// Similar to [`super::Binder`] except that it tracks early bound generics, i.e. `struct Foo<T>(T)`
-/// needs `T` instantiated immediately. This type primarily exists to avoid forgetting to call
-/// `instantiate`.
-///
-/// If you don't have anything to `instantiate`, you may be looking for
-/// [`instantiate_identity`](EarlyBinder::instantiate_identity) or [`skip_binder`](EarlyBinder::skip_binder).
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[derive(Encodable, Decodable, HashStable)]
-pub struct EarlyBinder<T> {
-    value: T,
-}
-
-/// For early binders, you should first call `instantiate` before using any visitors.
-impl<'tcx, T> !TypeFoldable<TyCtxt<'tcx>> for ty::EarlyBinder<T> {}
-impl<'tcx, T> !TypeVisitable<TyCtxt<'tcx>> for ty::EarlyBinder<T> {}
-
-impl<T> EarlyBinder<T> {
-    pub fn bind(value: T) -> EarlyBinder<T> {
-        EarlyBinder { value }
-    }
-
-    pub fn as_ref(&self) -> EarlyBinder<&T> {
-        EarlyBinder { value: &self.value }
-    }
-
-    pub fn map_bound_ref<F, U>(&self, f: F) -> EarlyBinder<U>
-    where
-        F: FnOnce(&T) -> U,
-    {
-        self.as_ref().map_bound(f)
-    }
-
-    pub fn map_bound<F, U>(self, f: F) -> EarlyBinder<U>
-    where
-        F: FnOnce(T) -> U,
-    {
-        let value = f(self.value);
-        EarlyBinder { value }
-    }
-
-    pub fn try_map_bound<F, U, E>(self, f: F) -> Result<EarlyBinder<U>, E>
-    where
-        F: FnOnce(T) -> Result<U, E>,
-    {
-        let value = f(self.value)?;
-        Ok(EarlyBinder { value })
-    }
-
-    pub fn rebind<U>(&self, value: U) -> EarlyBinder<U> {
-        EarlyBinder { value }
-    }
-
-    /// Skips the binder and returns the "bound" value.
-    /// This can be used to extract data that does not depend on generic parameters
-    /// (e.g., getting the `DefId` of the inner value or getting the number of
-    /// arguments of an `FnSig`). Otherwise, consider using
-    /// [`instantiate_identity`](EarlyBinder::instantiate_identity).
-    ///
-    /// To skip the binder on `x: &EarlyBinder<T>` to obtain `&T`, leverage
-    /// [`EarlyBinder::as_ref`](EarlyBinder::as_ref): `x.as_ref().skip_binder()`.
-    ///
-    /// See also [`Binder::skip_binder`](super::Binder::skip_binder), which is
-    /// the analogous operation on [`super::Binder`].
-    pub fn skip_binder(self) -> T {
-        self.value
-    }
-}
-
-impl<T> EarlyBinder<Option<T>> {
-    pub fn transpose(self) -> Option<EarlyBinder<T>> {
-        self.value.map(|value| EarlyBinder { value })
-    }
-}
-
-impl<'tcx, 's, I: IntoIterator> EarlyBinder<I>
-where
-    I::Item: TypeFoldable<TyCtxt<'tcx>>,
-{
-    pub fn iter_instantiated(
-        self,
-        tcx: TyCtxt<'tcx>,
-        args: &'s [GenericArg<'tcx>],
-    ) -> IterInstantiated<'s, 'tcx, I> {
-        IterInstantiated { it: self.value.into_iter(), tcx, args }
-    }
-
-    /// Similar to [`instantiate_identity`](EarlyBinder::instantiate_identity),
-    /// but on an iterator of `TypeFoldable` values.
-    pub fn instantiate_identity_iter(self) -> I::IntoIter {
-        self.value.into_iter()
-    }
-}
-
-pub struct IterInstantiated<'s, 'tcx, I: IntoIterator> {
-    it: I::IntoIter,
-    tcx: TyCtxt<'tcx>,
-    args: &'s [GenericArg<'tcx>],
-}
-
-impl<'tcx, I: IntoIterator> Iterator for IterInstantiated<'_, 'tcx, I>
-where
-    I::Item: TypeFoldable<TyCtxt<'tcx>>,
-{
-    type Item = I::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(EarlyBinder { value: self.it.next()? }.instantiate(self.tcx, self.args))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.it.size_hint()
-    }
-}
-
-impl<'tcx, I: IntoIterator> DoubleEndedIterator for IterInstantiated<'_, 'tcx, I>
-where
-    I::IntoIter: DoubleEndedIterator,
-    I::Item: TypeFoldable<TyCtxt<'tcx>>,
-{
-    fn next_back(&mut self) -> Option<Self::Item> {
-        Some(EarlyBinder { value: self.it.next_back()? }.instantiate(self.tcx, self.args))
-    }
-}
-
-impl<'tcx, I: IntoIterator> ExactSizeIterator for IterInstantiated<'_, 'tcx, I>
-where
-    I::IntoIter: ExactSizeIterator,
-    I::Item: TypeFoldable<TyCtxt<'tcx>>,
-{
-}
-
-impl<'tcx, 's, I: IntoIterator> EarlyBinder<I>
-where
-    I::Item: Deref,
-    <I::Item as Deref>::Target: Copy + TypeFoldable<TyCtxt<'tcx>>,
-{
-    pub fn iter_instantiated_copied(
-        self,
-        tcx: TyCtxt<'tcx>,
-        args: &'s [GenericArg<'tcx>],
-    ) -> IterInstantiatedCopied<'s, 'tcx, I> {
-        IterInstantiatedCopied { it: self.value.into_iter(), tcx, args }
-    }
-
-    /// Similar to [`instantiate_identity`](EarlyBinder::instantiate_identity),
-    /// but on an iterator of values that deref to a `TypeFoldable`.
-    pub fn instantiate_identity_iter_copied(
-        self,
-    ) -> impl Iterator<Item = <I::Item as Deref>::Target> {
-        self.value.into_iter().map(|v| *v)
-    }
-}
-
-pub struct IterInstantiatedCopied<'a, 'tcx, I: IntoIterator> {
-    it: I::IntoIter,
-    tcx: TyCtxt<'tcx>,
-    args: &'a [GenericArg<'tcx>],
-}
-
-impl<'tcx, I: IntoIterator> Iterator for IterInstantiatedCopied<'_, 'tcx, I>
-where
-    I::Item: Deref,
-    <I::Item as Deref>::Target: Copy + TypeFoldable<TyCtxt<'tcx>>,
-{
-    type Item = <I::Item as Deref>::Target;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.it.next().map(|value| EarlyBinder { value: *value }.instantiate(self.tcx, self.args))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.it.size_hint()
-    }
-}
-
-impl<'tcx, I: IntoIterator> DoubleEndedIterator for IterInstantiatedCopied<'_, 'tcx, I>
-where
-    I::IntoIter: DoubleEndedIterator,
-    I::Item: Deref,
-    <I::Item as Deref>::Target: Copy + TypeFoldable<TyCtxt<'tcx>>,
-{
-    fn next_back(&mut self) -> Option<Self::Item> {
-        self.it
-            .next_back()
-            .map(|value| EarlyBinder { value: *value }.instantiate(self.tcx, self.args))
-    }
-}
-
-impl<'tcx, I: IntoIterator> ExactSizeIterator for IterInstantiatedCopied<'_, 'tcx, I>
-where
-    I::IntoIter: ExactSizeIterator,
-    I::Item: Deref,
-    <I::Item as Deref>::Target: Copy + TypeFoldable<TyCtxt<'tcx>>,
-{
-}
-
-pub struct EarlyBinderIter<T> {
-    t: T,
-}
-
-impl<T: IntoIterator> EarlyBinder<T> {
-    pub fn transpose_iter(self) -> EarlyBinderIter<T::IntoIter> {
-        EarlyBinderIter { t: self.value.into_iter() }
-    }
-}
-
-impl<T: Iterator> Iterator for EarlyBinderIter<T> {
-    type Item = EarlyBinder<T::Item>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.t.next().map(|value| EarlyBinder { value })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.t.size_hint()
-    }
-}
-
-impl<'tcx, T: TypeFoldable<TyCtxt<'tcx>>> ty::EarlyBinder<T> {
-    pub fn instantiate(self, tcx: TyCtxt<'tcx>, args: &[GenericArg<'tcx>]) -> T {
-        let mut folder = ArgFolder { tcx, args, binders_passed: 0 };
-        self.value.fold_with(&mut folder)
-    }
-
-    /// Makes the identity replacement `T0 => T0, ..., TN => TN`.
-    /// Conceptually, this converts universally bound variables into placeholders
-    /// when inside of a given item.
-    ///
-    /// For example, consider `for<T> fn foo<T>(){ .. }`:
-    /// - Outside of `foo`, `T` is bound (represented by the presence of `EarlyBinder`).
-    /// - Inside of the body of `foo`, we treat `T` as a placeholder by calling
-    /// `instantiate_identity` to discharge the `EarlyBinder`.
-    pub fn instantiate_identity(self) -> T {
-        self.value
-    }
-
-    /// Returns the inner value, but only if it contains no bound vars.
-    pub fn no_bound_vars(self) -> Option<T> {
-        if !self.value.has_param() { Some(self.value) } else { None }
-    }
-}
-
-///////////////////////////////////////////////////////////////////////////
-// The actual instantiation engine itself is a type folder.
-
-struct ArgFolder<'a, 'tcx> {
-    tcx: TyCtxt<'tcx>,
-    args: &'a [GenericArg<'tcx>],
-
-    /// Number of region binders we have passed through while doing the instantiation
-    binders_passed: u32,
-}
-
-impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for ArgFolder<'a, 'tcx> {
-    #[inline]
-    fn interner(&self) -> TyCtxt<'tcx> {
-        self.tcx
-    }
-
-    fn fold_binder<T: TypeFoldable<TyCtxt<'tcx>>>(
-        &mut self,
-        t: ty::Binder<'tcx, T>,
-    ) -> ty::Binder<'tcx, T> {
-        self.binders_passed += 1;
-        let t = t.super_fold_with(self);
-        self.binders_passed -= 1;
-        t
-    }
-
-    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        #[cold]
-        #[inline(never)]
-        fn region_param_out_of_range(data: ty::EarlyParamRegion, args: &[GenericArg<'_>]) -> ! {
-            bug!(
-                "Region parameter out of range when instantiating in region {} (index={}, args = {:?})",
-                data.name,
-                data.index,
-                args,
-            )
-        }
-
-        #[cold]
-        #[inline(never)]
-        fn region_param_invalid(data: ty::EarlyParamRegion, other: GenericArgKind<'_>) -> ! {
-            bug!(
-                "Unexpected parameter {:?} when instantiating in region {} (index={})",
-                other,
-                data.name,
-                data.index
-            )
-        }
-
-        // Note: This routine only handles regions that are bound on
-        // type declarations and other outer declarations, not those
-        // bound in *fn types*. Region instantiation of the bound
-        // regions that appear in a function signature is done using
-        // the specialized routine `ty::replace_late_regions()`.
-        match *r {
-            ty::ReEarlyParam(data) => {
-                let rk = self.args.get(data.index as usize).map(|k| k.unpack());
-                match rk {
-                    Some(GenericArgKind::Lifetime(lt)) => self.shift_region_through_binders(lt),
-                    Some(other) => region_param_invalid(data, other),
-                    None => region_param_out_of_range(data, self.args),
-                }
-            }
-            ty::ReBound(..)
-            | ty::ReLateParam(_)
-            | ty::ReStatic
-            | ty::RePlaceholder(_)
-            | ty::ReErased
-            | ty::ReError(_) => r,
-            ty::ReVar(_) => bug!("unexpected region: {r:?}"),
-        }
-    }
-
-    fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-        if !t.has_param() {
-            return t;
-        }
-
-        match *t.kind() {
-            ty::Param(p) => self.ty_for_param(p, t),
-            _ => t.super_fold_with(self),
-        }
-    }
-
-    fn fold_const(&mut self, c: ty::Const<'tcx>) -> ty::Const<'tcx> {
-        if let ty::ConstKind::Param(p) = c.kind() {
-            self.const_for_param(p, c)
-        } else {
-            c.super_fold_with(self)
-        }
-    }
-}
-
-impl<'a, 'tcx> ArgFolder<'a, 'tcx> {
-    fn ty_for_param(&self, p: ty::ParamTy, source_ty: Ty<'tcx>) -> Ty<'tcx> {
-        // Look up the type in the args. It really should be in there.
-        let opt_ty = self.args.get(p.index as usize).map(|k| k.unpack());
-        let ty = match opt_ty {
-            Some(GenericArgKind::Type(ty)) => ty,
-            Some(kind) => self.type_param_expected(p, source_ty, kind),
-            None => self.type_param_out_of_range(p, source_ty),
-        };
-
-        self.shift_vars_through_binders(ty)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn type_param_expected(&self, p: ty::ParamTy, ty: Ty<'tcx>, kind: GenericArgKind<'tcx>) -> ! {
-        bug!(
-            "expected type for `{:?}` ({:?}/{}) but found {:?} when instantiating, args={:?}",
-            p,
-            ty,
-            p.index,
-            kind,
-            self.args,
-        )
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn type_param_out_of_range(&self, p: ty::ParamTy, ty: Ty<'tcx>) -> ! {
-        bug!(
-            "type parameter `{:?}` ({:?}/{}) out of range when instantiating, args={:?}",
-            p,
-            ty,
-            p.index,
-            self.args,
-        )
-    }
-
-    fn const_for_param(&self, p: ParamConst, source_ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
-        // Look up the const in the args. It really should be in there.
-        let opt_ct = self.args.get(p.index as usize).map(|k| k.unpack());
-        let ct = match opt_ct {
-            Some(GenericArgKind::Const(ct)) => ct,
-            Some(kind) => self.const_param_expected(p, source_ct, kind),
-            None => self.const_param_out_of_range(p, source_ct),
-        };
-
-        self.shift_vars_through_binders(ct)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn const_param_expected(
-        &self,
-        p: ty::ParamConst,
-        ct: ty::Const<'tcx>,
-        kind: GenericArgKind<'tcx>,
-    ) -> ! {
-        bug!(
-            "expected const for `{:?}` ({:?}/{}) but found {:?} when instantiating args={:?}",
-            p,
-            ct,
-            p.index,
-            kind,
-            self.args,
-        )
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn const_param_out_of_range(&self, p: ty::ParamConst, ct: ty::Const<'tcx>) -> ! {
-        bug!(
-            "const parameter `{:?}` ({:?}/{}) out of range when instantiating args={:?}",
-            p,
-            ct,
-            p.index,
-            self.args,
-        )
-    }
-
-    /// It is sometimes necessary to adjust the De Bruijn indices during instantiation. This occurs
-    /// when we are instantating a type with escaping bound vars into a context where we have
-    /// passed through binders. That's quite a mouthful. Let's see an example:
-    ///
-    /// ```
-    /// type Func<A> = fn(A);
-    /// type MetaFunc = for<'a> fn(Func<&'a i32>);
-    /// ```
-    ///
-    /// The type `MetaFunc`, when fully expanded, will be
-    /// ```ignore (illustrative)
-    /// for<'a> fn(fn(&'a i32))
-    /// //      ^~ ^~ ^~~
-    /// //      |  |  |
-    /// //      |  |  DebruijnIndex of 2
-    /// //      Binders
-    /// ```
-    /// Here the `'a` lifetime is bound in the outer function, but appears as an argument of the
-    /// inner one. Therefore, that appearance will have a DebruijnIndex of 2, because we must skip
-    /// over the inner binder (remember that we count De Bruijn indices from 1). However, in the
-    /// definition of `MetaFunc`, the binder is not visible, so the type `&'a i32` will have a
-    /// De Bruijn index of 1. It's only during the instantiation that we can see we must increase the
-    /// depth by 1 to account for the binder that we passed through.
-    ///
-    /// As a second example, consider this twist:
-    ///
-    /// ```
-    /// type FuncTuple<A> = (A,fn(A));
-    /// type MetaFuncTuple = for<'a> fn(FuncTuple<&'a i32>);
-    /// ```
-    ///
-    /// Here the final type will be:
-    /// ```ignore (illustrative)
-    /// for<'a> fn((&'a i32, fn(&'a i32)))
-    /// //          ^~~         ^~~
-    /// //          |           |
-    /// //   DebruijnIndex of 1 |
-    /// //               DebruijnIndex of 2
-    /// ```
-    /// As indicated in the diagram, here the same type `&'a i32` is instantiated once, but in the
-    /// first case we do not increase the De Bruijn index and in the second case we do. The reason
-    /// is that only in the second case have we passed through a fn binder.
-    fn shift_vars_through_binders<T: TypeFoldable<TyCtxt<'tcx>>>(&self, val: T) -> T {
-        debug!(
-            "shift_vars(val={:?}, binders_passed={:?}, has_escaping_bound_vars={:?})",
-            val,
-            self.binders_passed,
-            val.has_escaping_bound_vars()
-        );
-
-        if self.binders_passed == 0 || !val.has_escaping_bound_vars() {
-            return val;
-        }
-
-        let result = ty::fold::shift_vars(TypeFolder::interner(self), val, self.binders_passed);
-        debug!("shift_vars: shifted result = {:?}", result);
-
-        result
-    }
-
-    fn shift_region_through_binders(&self, region: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        if self.binders_passed == 0 || !region.has_escaping_bound_vars() {
-            return region;
-        }
-        ty::fold::shift_region(self.tcx, region, self.binders_passed)
     }
 }
 

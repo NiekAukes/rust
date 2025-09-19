@@ -18,7 +18,7 @@ pub struct TwoU64s {
 
 #[repr(C)]
 pub struct WrappedU64s {
-    pub a: TwoU64s
+    pub a: TwoU64s,
 }
 
 #[repr(C)]

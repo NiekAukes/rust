@@ -1,14 +1,11 @@
-use polonius_engine::Atom;
 use rustc_data_structures::intern::Interned;
 use rustc_errors::MultiSpan;
 use rustc_hir::def_id::DefId;
-use rustc_index::Idx;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable};
-use rustc_span::symbol::sym;
-use rustc_span::symbol::{kw, Symbol};
-use rustc_span::{ErrorGuaranteed, DUMMY_SP};
+use rustc_span::{DUMMY_SP, ErrorGuaranteed, Symbol, kw, sym};
 use rustc_type_ir::RegionKind as IrRegionKind;
-use std::ops::Deref;
+pub use rustc_type_ir::RegionVid;
+use tracing::debug;
 
 use crate::ty::{self, BoundVar, TyCtxt, TypeFlags};
 
@@ -19,21 +16,21 @@ pub type RegionKind<'tcx> = IrRegionKind<TyCtxt<'tcx>>;
 #[rustc_pass_by_value]
 pub struct Region<'tcx>(pub Interned<'tcx, RegionKind<'tcx>>);
 
-impl<'tcx> rustc_type_ir::IntoKind for Region<'tcx> {
+impl<'tcx> rustc_type_ir::inherent::IntoKind for Region<'tcx> {
     type Kind = RegionKind<'tcx>;
 
     fn kind(self) -> RegionKind<'tcx> {
-        *self
+        *self.0.0
     }
 }
 
-impl<'tcx> rustc_type_ir::visit::Flags for Region<'tcx> {
+impl<'tcx> rustc_type_ir::Flags for Region<'tcx> {
     fn flags(&self) -> TypeFlags {
         self.type_flags()
     }
 
     fn outer_exclusive_binder(&self) -> ty::DebruijnIndex {
-        match **self {
+        match self.kind() {
             ty::ReBound(debruijn, _) => debruijn.shifted_in(1),
             _ => ty::INNERMOST,
         }
@@ -56,7 +53,7 @@ impl<'tcx> Region<'tcx> {
         bound_region: ty::BoundRegion,
     ) -> Region<'tcx> {
         // Use a pre-interned one when possible.
-        if let ty::BoundRegion { var, kind: ty::BrAnon } = bound_region
+        if let ty::BoundRegion { var, kind: ty::BoundRegionKind::Anon } = bound_region
             && let Some(inner) = tcx.lifetimes.re_late_bounds.get(debruijn.as_usize())
             && let Some(re) = inner.get(var.as_usize()).copied()
         {
@@ -70,9 +67,10 @@ impl<'tcx> Region<'tcx> {
     pub fn new_late_param(
         tcx: TyCtxt<'tcx>,
         scope: DefId,
-        bound_region: ty::BoundRegionKind,
+        kind: LateParamRegionKind,
     ) -> Region<'tcx> {
-        tcx.intern_region(ty::ReLateParam(ty::LateParamRegion { scope, bound_region }))
+        let data = LateParamRegion { scope, kind };
+        tcx.intern_region(ty::ReLateParam(data))
     }
 
     #[inline]
@@ -125,8 +123,8 @@ impl<'tcx> Region<'tcx> {
         match kind {
             ty::ReEarlyParam(region) => Region::new_early_param(tcx, region),
             ty::ReBound(debruijn, region) => Region::new_bound(tcx, debruijn, region),
-            ty::ReLateParam(ty::LateParamRegion { scope, bound_region }) => {
-                Region::new_late_param(tcx, scope, bound_region)
+            ty::ReLateParam(ty::LateParamRegion { scope, kind }) => {
+                Region::new_late_param(tcx, scope, kind)
             }
             ty::ReStatic => tcx.lifetimes.re_static,
             ty::ReVar(vid) => Region::new_var(tcx, vid),
@@ -137,9 +135,21 @@ impl<'tcx> Region<'tcx> {
     }
 }
 
-impl<'tcx> rustc_type_ir::new::Region<TyCtxt<'tcx>> for Region<'tcx> {
+impl<'tcx> rustc_type_ir::inherent::Region<TyCtxt<'tcx>> for Region<'tcx> {
+    fn new_bound(
+        interner: TyCtxt<'tcx>,
+        debruijn: ty::DebruijnIndex,
+        var: ty::BoundRegion,
+    ) -> Self {
+        Region::new_bound(interner, debruijn, var)
+    }
+
     fn new_anon_bound(tcx: TyCtxt<'tcx>, debruijn: ty::DebruijnIndex, var: ty::BoundVar) -> Self {
-        Region::new_bound(tcx, debruijn, ty::BoundRegion { var, kind: ty::BoundRegionKind::BrAnon })
+        Region::new_bound(tcx, debruijn, ty::BoundRegion { var, kind: ty::BoundRegionKind::Anon })
+    }
+
+    fn new_placeholder(tcx: TyCtxt<'tcx>, placeholder: ty::PlaceholderRegion) -> Self {
+        Region::new_placeholder(tcx, placeholder)
     }
 
     fn new_static(tcx: TyCtxt<'tcx>) -> Self {
@@ -155,10 +165,10 @@ impl<'tcx> Region<'tcx> {
 
     pub fn get_name(self) -> Option<Symbol> {
         if self.has_name() {
-            match *self {
+            match self.kind() {
                 ty::ReEarlyParam(ebr) => Some(ebr.name),
                 ty::ReBound(_, br) => br.kind.get_name(),
-                ty::ReLateParam(fr) => fr.bound_region.get_name(),
+                ty::ReLateParam(fr) => fr.kind.get_name(),
                 ty::ReStatic => Some(kw::StaticLifetime),
                 ty::RePlaceholder(placeholder) => placeholder.bound.kind.get_name(),
                 _ => None,
@@ -177,10 +187,10 @@ impl<'tcx> Region<'tcx> {
 
     /// Is this region named by the user?
     pub fn has_name(self) -> bool {
-        match *self {
+        match self.kind() {
             ty::ReEarlyParam(ebr) => ebr.has_name(),
             ty::ReBound(_, br) => br.kind.is_named(),
-            ty::ReLateParam(fr) => fr.bound_region.is_named(),
+            ty::ReLateParam(fr) => fr.kind.is_named(),
             ty::ReStatic => true,
             ty::ReVar(..) => false,
             ty::RePlaceholder(placeholder) => placeholder.bound.kind.is_named(),
@@ -191,32 +201,32 @@ impl<'tcx> Region<'tcx> {
 
     #[inline]
     pub fn is_error(self) -> bool {
-        matches!(*self, ty::ReError(_))
+        matches!(self.kind(), ty::ReError(_))
     }
 
     #[inline]
     pub fn is_static(self) -> bool {
-        matches!(*self, ty::ReStatic)
+        matches!(self.kind(), ty::ReStatic)
     }
 
     #[inline]
     pub fn is_erased(self) -> bool {
-        matches!(*self, ty::ReErased)
+        matches!(self.kind(), ty::ReErased)
     }
 
     #[inline]
     pub fn is_bound(self) -> bool {
-        matches!(*self, ty::ReBound(..))
+        matches!(self.kind(), ty::ReBound(..))
     }
 
     #[inline]
     pub fn is_placeholder(self) -> bool {
-        matches!(*self, ty::RePlaceholder(..))
+        matches!(self.kind(), ty::RePlaceholder(..))
     }
 
     #[inline]
     pub fn bound_at_or_above_binder(self, index: ty::DebruijnIndex) -> bool {
-        match *self {
+        match self.kind() {
             ty::ReBound(debruijn, _) => debruijn >= index,
             _ => false,
         }
@@ -225,7 +235,7 @@ impl<'tcx> Region<'tcx> {
     pub fn type_flags(self) -> TypeFlags {
         let mut flags = TypeFlags::empty();
 
-        match *self {
+        match self.kind() {
             ty::ReVar(..) => {
                 flags = flags | TypeFlags::HAS_FREE_REGIONS;
                 flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
@@ -265,43 +275,16 @@ impl<'tcx> Region<'tcx> {
         flags
     }
 
-    /// Given an early-bound or free region, returns the `DefId` where it was bound.
-    /// For example, consider the regions in this snippet of code:
-    ///
-    /// ```ignore (illustrative)
-    /// impl<'a> Foo {
-    /// //   ^^ -- early bound, declared on an impl
-    ///
-    ///     fn bar<'b, 'c>(x: &self, y: &'b u32, z: &'c u64) where 'static: 'c
-    /// //         ^^  ^^     ^ anonymous, late-bound
-    /// //         |   early-bound, appears in where-clauses
-    /// //         late-bound, appears only in fn args
-    ///     {..}
-    /// }
-    /// ```
-    ///
-    /// Here, `free_region_binding_scope('a)` would return the `DefId`
-    /// of the impl, and for all the other highlighted regions, it
-    /// would return the `DefId` of the function. In other cases (not shown), this
-    /// function might return the `DefId` of a closure.
-    pub fn free_region_binding_scope(self, tcx: TyCtxt<'_>) -> DefId {
-        match *self {
-            ty::ReEarlyParam(br) => tcx.parent(br.def_id),
-            ty::ReLateParam(fr) => fr.scope,
-            _ => bug!("free_region_binding_scope invoked on inappropriate region: {:?}", self),
-        }
-    }
-
     /// True for free regions other than `'static`.
     pub fn is_param(self) -> bool {
-        matches!(*self, ty::ReEarlyParam(_) | ty::ReLateParam(_))
+        matches!(self.kind(), ty::ReEarlyParam(_) | ty::ReLateParam(_))
     }
 
     /// True for free region in the current context.
     ///
     /// This is the case for `'static` and param regions.
     pub fn is_free(self) -> bool {
-        match *self {
+        match self.kind() {
             ty::ReStatic | ty::ReEarlyParam(..) | ty::ReLateParam(..) => true,
             ty::ReVar(..)
             | ty::RePlaceholder(..)
@@ -321,45 +304,39 @@ impl<'tcx> Region<'tcx> {
             _ => bug!("expected region {:?} to be of kind ReVar", self),
         }
     }
-}
 
-impl<'tcx> Deref for Region<'tcx> {
-    type Target = RegionKind<'tcx>;
-
-    #[inline]
-    fn deref(&self) -> &RegionKind<'tcx> {
-        self.0.0
+    /// Given some item `binding_item`, check if this region is a generic parameter introduced by it
+    /// or one of the parent generics. Returns the `DefId` of the parameter definition if so.
+    pub fn opt_param_def_id(self, tcx: TyCtxt<'tcx>, binding_item: DefId) -> Option<DefId> {
+        match self.kind() {
+            ty::ReEarlyParam(ebr) => {
+                Some(tcx.generics_of(binding_item).region_param(ebr, tcx).def_id)
+            }
+            ty::ReLateParam(ty::LateParamRegion {
+                kind: ty::LateParamRegionKind::Named(def_id, _),
+                ..
+            }) => Some(def_id),
+            _ => None,
+        }
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
 #[derive(HashStable)]
 pub struct EarlyParamRegion {
-    pub def_id: DefId,
     pub index: u32,
     pub name: Symbol,
 }
 
-impl std::fmt::Debug for EarlyParamRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // FIXME(BoxyUwU): self.def_id goes first because of `erased-regions-in-hidden-ty.rs` being impossible to write
-        // error annotations for otherwise. :). Ideally this would be `self.name, self.index, self.def_id`.
-        write!(f, "{:?}_{}/#{}", self.def_id, self.name, self.index)
+impl rustc_type_ir::inherent::ParamLike for EarlyParamRegion {
+    fn index(self) -> u32 {
+        self.index
     }
 }
 
-rustc_index::newtype_index! {
-    /// A **region** (lifetime) **v**ariable **ID**.
-    #[derive(HashStable)]
-    #[encodable]
-    #[orderable]
-    #[debug_format = "'?{}"]
-    pub struct RegionVid {}
-}
-
-impl Atom for RegionVid {
-    fn index(self) -> usize {
-        Idx::index(self)
+impl std::fmt::Debug for EarlyParamRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/#{}", self.name, self.index)
     }
 }
 
@@ -367,53 +344,56 @@ impl Atom for RegionVid {
 #[derive(HashStable)]
 /// The parameter representation of late-bound function parameters, "some region
 /// at least as big as the scope `fr.scope`".
+///
+/// Similar to a placeholder region as we create `LateParam` regions when entering a binder
+/// except they are always in the root universe and instead of using a boundvar to distinguish
+/// between others we use the `DefId` of the parameter. For this reason the `bound_region` field
+/// should basically always be `BoundRegionKind::Named` as otherwise there is no way of telling
+/// different parameters apart.
 pub struct LateParamRegion {
     pub scope: DefId,
-    pub bound_region: BoundRegionKind,
+    pub kind: LateParamRegionKind,
 }
 
+/// When liberating bound regions, we map their [`BoundRegionKind`]
+/// to this as we need to track the index of anonymous regions. We
+/// otherwise end up liberating multiple bound regions to the same
+/// late-bound region.
 #[derive(Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, Copy)]
 #[derive(HashStable)]
-pub enum BoundRegionKind {
+pub enum LateParamRegionKind {
     /// An anonymous region parameter for a given fn (&T)
-    BrAnon,
+    ///
+    /// Unlike [`BoundRegionKind::Anon`], this tracks the index of the
+    /// liberated bound region.
+    ///
+    /// We should ideally never liberate anonymous regions, but do so for the
+    /// sake of diagnostics in `FnCtxt::sig_of_closure_with_expectation`.
+    Anon(u32),
 
     /// Named region parameters for functions (a in &'a T)
     ///
     /// The `DefId` is needed to distinguish free regions in
     /// the event of shadowing.
-    BrNamed(DefId, Symbol),
+    Named(DefId, Symbol),
 
     /// Anonymous region for the implicit env pointer parameter
     /// to a closure
-    BrEnv,
+    ClosureEnv,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
-#[derive(HashStable)]
-pub struct BoundRegion {
-    pub var: BoundVar,
-    pub kind: BoundRegionKind,
-}
-
-impl core::fmt::Debug for BoundRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            BoundRegionKind::BrAnon => write!(f, "{:?}", self.var),
-            BoundRegionKind::BrEnv => write!(f, "{:?}.Env", self.var),
-            BoundRegionKind::BrNamed(def, symbol) => {
-                write!(f, "{:?}.Named({:?}, {:?})", self.var, def, symbol)
-            }
+impl LateParamRegionKind {
+    pub fn from_bound(var: BoundVar, br: BoundRegionKind) -> LateParamRegionKind {
+        match br {
+            BoundRegionKind::Anon => LateParamRegionKind::Anon(var.as_u32()),
+            BoundRegionKind::Named(def_id, name) => LateParamRegionKind::Named(def_id, name),
+            BoundRegionKind::ClosureEnv => LateParamRegionKind::ClosureEnv,
         }
     }
-}
 
-impl BoundRegionKind {
     pub fn is_named(&self) -> bool {
         match *self {
-            BoundRegionKind::BrNamed(_, name) => {
-                name != kw::UnderscoreLifetime && name != kw::Empty
-            }
+            LateParamRegionKind::Named(_, name) => name != kw::UnderscoreLifetime,
             _ => false,
         }
     }
@@ -421,7 +401,7 @@ impl BoundRegionKind {
     pub fn get_name(&self) -> Option<Symbol> {
         if self.is_named() {
             match *self {
-                BoundRegionKind::BrNamed(_, name) => return Some(name),
+                LateParamRegionKind::Named(_, name) => return Some(name),
                 _ => unreachable!(),
             }
         }
@@ -431,7 +411,80 @@ impl BoundRegionKind {
 
     pub fn get_id(&self) -> Option<DefId> {
         match *self {
-            BoundRegionKind::BrNamed(id, _) => return Some(id),
+            LateParamRegionKind::Named(id, _) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, Copy)]
+#[derive(HashStable)]
+pub enum BoundRegionKind {
+    /// An anonymous region parameter for a given fn (&T)
+    Anon,
+
+    /// Named region parameters for functions (a in &'a T)
+    ///
+    /// The `DefId` is needed to distinguish free regions in
+    /// the event of shadowing.
+    Named(DefId, Symbol),
+
+    /// Anonymous region for the implicit env pointer parameter
+    /// to a closure
+    ClosureEnv,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
+#[derive(HashStable)]
+pub struct BoundRegion {
+    pub var: BoundVar,
+    pub kind: BoundRegionKind,
+}
+
+impl<'tcx> rustc_type_ir::inherent::BoundVarLike<TyCtxt<'tcx>> for BoundRegion {
+    fn var(self) -> BoundVar {
+        self.var
+    }
+
+    fn assert_eq(self, var: ty::BoundVariableKind) {
+        assert_eq!(self.kind, var.expect_region())
+    }
+}
+
+impl core::fmt::Debug for BoundRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            BoundRegionKind::Anon => write!(f, "{:?}", self.var),
+            BoundRegionKind::ClosureEnv => write!(f, "{:?}.Env", self.var),
+            BoundRegionKind::Named(def, symbol) => {
+                write!(f, "{:?}.Named({:?}, {:?})", self.var, def, symbol)
+            }
+        }
+    }
+}
+
+impl BoundRegionKind {
+    pub fn is_named(&self) -> bool {
+        match *self {
+            BoundRegionKind::Named(_, name) => name != kw::UnderscoreLifetime,
+            _ => false,
+        }
+    }
+
+    pub fn get_name(&self) -> Option<Symbol> {
+        if self.is_named() {
+            match *self {
+                BoundRegionKind::Named(_, name) => return Some(name),
+                _ => unreachable!(),
+            }
+        }
+
+        None
+    }
+
+    pub fn get_id(&self) -> Option<DefId> {
+        match *self {
+            BoundRegionKind::Named(id, _) => Some(id),
             _ => None,
         }
     }

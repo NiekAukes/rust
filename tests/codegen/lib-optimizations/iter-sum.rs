@@ -1,7 +1,6 @@
-//@ compile-flags: -O
+//@ compile-flags: -Copt-level=3
 //@ only-x86_64 (vectorization varies between architectures)
 #![crate_type = "lib"]
-
 
 // Ensure that slice + take + sum gets vectorized.
 // Currently this relies on the slice::Iter::try_fold implementation

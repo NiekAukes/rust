@@ -1,5 +1,8 @@
-use super::*;
+#![allow(rustc::symbol_intern_string_literal)]
+
 use rustc_span::create_default_session_globals_then;
+
+use super::*;
 
 #[test]
 fn test_block_doc_comment_1() {

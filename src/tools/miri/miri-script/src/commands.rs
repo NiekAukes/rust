@@ -1,65 +1,70 @@
-use std::env;
-use std::ffi::OsString;
-use std::io::Write;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, BufWriter, Write as _};
 use std::ops::Not;
-use std::ops::Range;
 use std::path::PathBuf;
-use std::process;
-use std::thread;
-use std::time;
+use std::time::Duration;
+use std::{env, net, process};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use path_macro::path;
+use serde_derive::{Deserialize, Serialize};
+use tempfile::TempDir;
 use walkdir::WalkDir;
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
-use crate::util::*;
 use crate::Command;
+use crate::util::*;
 
 /// Used for rustc syncs.
 const JOSH_FILTER: &str =
     ":rev(75dd959a3a40eb5b4574f8d2e23aa6efbeb33573:prefix=src/tools/miri):/src/tools/miri";
-const JOSH_PORT: &str = "42042";
+const JOSH_PORT: u16 = 42042;
 
 impl MiriEnv {
+    /// Prepares the environment: builds miri and cargo-miri and a sysroot.
     /// Returns the location of the sysroot.
-    fn build_miri_sysroot(&mut self, quiet: bool) -> Result<PathBuf> {
+    ///
+    /// If the target is None the sysroot will be built for the host machine.
+    fn build_miri_sysroot(
+        &mut self,
+        quiet: bool,
+        target: Option<impl AsRef<OsStr>>,
+    ) -> Result<PathBuf> {
         if let Some(miri_sysroot) = self.sh.var_os("MIRI_SYSROOT") {
             // Sysroot already set, use that.
             return Ok(miri_sysroot.into());
         }
-        let manifest_path = path!(self.miri_dir / "cargo-miri" / "Cargo.toml");
-        let Self { toolchain, cargo_extra_flags, .. } = &self;
 
         // Make sure everything is built. Also Miri itself.
-        self.build(path!(self.miri_dir / "Cargo.toml"), &[], quiet)?;
-        self.build(&manifest_path, &[], quiet)?;
+        self.build(".", &[], quiet)?;
+        self.build("cargo-miri", &[], quiet)?;
 
-        let target = &match self.sh.var("MIRI_TEST_TARGET") {
-            Ok(target) => vec!["--target".into(), target],
-            Err(_) => vec![],
+        let target_flag = if let Some(target) = &target {
+            vec![OsStr::new("--target"), target.as_ref()]
+        } else {
+            vec![]
         };
+        let target_flag = &target_flag;
+
         if !quiet {
-            match self.sh.var("MIRI_TEST_TARGET") {
-                Ok(target) => eprintln!("$ (building Miri sysroot for {target})"),
-                Err(_) => eprintln!("$ (building Miri sysroot)"),
+            eprint!("$ cargo miri setup");
+            if let Some(target) = &target {
+                eprint!(" --target {target}", target = target.as_ref().to_string_lossy());
             }
+            eprintln!();
         }
-        let output = cmd!(self.sh,
-            "cargo +{toolchain} --quiet run {cargo_extra_flags...} --manifest-path {manifest_path} --
-             miri setup --print-sysroot {target...}"
-        ).read();
-        let Ok(output) = output else {
-            // Run it again (without `--print-sysroot` or `--quiet`) so the user can see the error.
-            cmd!(
-                self.sh,
-                "cargo +{toolchain} run {cargo_extra_flags...} --manifest-path {manifest_path} --
-                miri setup {target...}"
-            )
-            .run()
-            .with_context(|| "`cargo miri setup` failed")?;
-            panic!("`cargo miri setup` didn't fail again the 2nd time?");
-        };
+
+        let mut cmd = self
+            .cargo_cmd("cargo-miri", "run")
+            .arg("--quiet")
+            .arg("--")
+            .args(&["miri", "setup", "--print-sysroot"])
+            .args(target_flag);
+        cmd.set_quiet(quiet);
+        let output = cmd.read()?;
         self.sh.set_var("MIRI_SYSROOT", &output);
         Ok(output.into())
     }
@@ -103,13 +108,11 @@ impl Command {
         let mut cmd = process::Command::new("josh-proxy");
         cmd.arg("--local").arg(local_dir);
         cmd.arg("--remote").arg("https://github.com");
-        cmd.arg("--port").arg(JOSH_PORT);
+        cmd.arg("--port").arg(JOSH_PORT.to_string());
         cmd.arg("--no-background");
         cmd.stdout(process::Stdio::null());
         cmd.stderr(process::Stdio::null());
         let josh = cmd.spawn().context("failed to start josh-proxy, make sure it is installed")?;
-        // Give it some time so hopefully the port is open. (100ms was not enough.)
-        thread::sleep(time::Duration::from_millis(200));
 
         // Create a wrapper that stops it on drop.
         struct Josh(process::Child);
@@ -123,7 +126,7 @@ impl Command {
                         .output()
                         .expect("failed to SIGINT josh-proxy");
                     // Sadly there is no "wait with timeout"... so we just give it some time to finish.
-                    thread::sleep(time::Duration::from_millis(100));
+                    std::thread::sleep(Duration::from_millis(100));
                     // Now hopefully it is gone.
                     if self.0.try_wait().expect("failed to wait for josh-proxy").is_some() {
                         return;
@@ -137,7 +140,20 @@ impl Command {
             }
         }
 
-        Ok(Josh(josh))
+        // Wait until the port is open. We try every 10ms until 1s passed.
+        for _ in 0..100 {
+            // This will generally fail immediately when the port is still closed.
+            let josh_ready = net::TcpStream::connect_timeout(
+                &net::SocketAddr::from(([127, 0, 0, 1], JOSH_PORT)),
+                Duration::from_millis(1),
+            );
+            if josh_ready.is_ok() {
+                return Ok(Josh(josh));
+            }
+            // Not ready yet.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        bail!("Even after waiting for 1s, josh-proxy is still not available.")
     }
 
     pub fn exec(self) -> Result<()> {
@@ -149,32 +165,36 @@ impl Command {
             | Command::Test { .. }
             | Command::Run { .. }
             | Command::Fmt { .. }
-            | Command::Clippy { .. }
-            | Command::Cargo { .. } => Self::auto_actions()?,
+            | Command::Doc { .. }
+            | Command::Clippy { .. } => Self::auto_actions()?,
             | Command::Toolchain { .. }
             | Command::Bench { .. }
             | Command::RustcPull { .. }
-            | Command::RustcPush { .. } => {}
+            | Command::RustcPush { .. }
+            | Command::Squash => {}
         }
         // Then run the actual command.
         match self {
             Command::Install { flags } => Self::install(flags),
             Command::Build { flags } => Self::build(flags),
             Command::Check { flags } => Self::check(flags),
-            Command::Test { bless, flags } => Self::test(bless, flags),
-            Command::Run { dep, verbose, many_seeds, flags } =>
-                Self::run(dep, verbose, many_seeds, flags),
+            Command::Test { bless, flags, target, coverage } =>
+                Self::test(bless, flags, target, coverage),
+            Command::Run { dep, verbose, target, edition, flags } =>
+                Self::run(dep, verbose, target, edition, flags),
+            Command::Doc { flags } => Self::doc(flags),
             Command::Fmt { flags } => Self::fmt(flags),
             Command::Clippy { flags } => Self::clippy(flags),
-            Command::Cargo { flags } => Self::cargo(flags),
-            Command::Bench { benches } => Self::bench(benches),
+            Command::Bench { target, no_install, save_baseline, load_baseline, benches } =>
+                Self::bench(target, no_install, save_baseline, load_baseline, benches),
             Command::Toolchain { flags } => Self::toolchain(flags),
             Command::RustcPull { commit } => Self::rustc_pull(commit.clone()),
             Command::RustcPush { github_user, branch } => Self::rustc_push(github_user, branch),
+            Command::Squash => Self::squash(),
         }
     }
 
-    fn toolchain(flags: Vec<OsString>) -> Result<()> {
+    fn toolchain(flags: Vec<String>) -> Result<()> {
         // Make sure rustup-toolchain-install-master is installed.
         which::which("rustup-toolchain-install-master")
             .context("Please install rustup-toolchain-install-master by running 'cargo install rustup-toolchain-install-master'")?;
@@ -234,6 +254,8 @@ impl Command {
         }
         // Make sure josh is running.
         let josh = Self::start_josh()?;
+        let josh_url =
+            format!("http://localhost:{JOSH_PORT}/rust-lang/rust.git@{commit}{JOSH_FILTER}.git");
 
         // Update rust-version file. As a separate commit, since making it part of
         // the merge has confused the heck out of josh in the past.
@@ -248,14 +270,13 @@ impl Command {
             .context("FAILED to commit rust-version file, something went wrong")?;
 
         // Fetch given rustc commit.
-        cmd!(sh, "git fetch http://localhost:{JOSH_PORT}/rust-lang/rust.git@{commit}{JOSH_FILTER}.git")
+        cmd!(sh, "git fetch {josh_url}")
             .run()
-            .map_err(|e| {
-                // Try to un-do the previous `git commit`, to leave the repo in the state we found it it.
+            .inspect_err(|_| {
+                // Try to un-do the previous `git commit`, to leave the repo in the state we found it.
                 cmd!(sh, "git reset --hard HEAD^")
                     .run()
                     .expect("FAILED to clean up again after failed `git fetch`, sorry for that");
-                e
             })
             .context("FAILED to fetch new commits, something went wrong (committing the rust-version file has been undone)")?;
 
@@ -293,6 +314,8 @@ impl Command {
         }
         // Make sure josh is running.
         let josh = Self::start_josh()?;
+        let josh_url =
+            format!("http://localhost:{JOSH_PORT}/{github_user}/rust.git{JOSH_FILTER}.git");
 
         // Find a repo we can do our preparation in.
         if let Ok(rustc_git) = env::var("RUSTC_GIT") {
@@ -337,24 +360,18 @@ impl Command {
         // Do the actual push.
         sh.change_dir(miri_dir()?);
         println!("Pushing miri changes...");
-        cmd!(
-            sh,
-            "git push http://localhost:{JOSH_PORT}/{github_user}/rust.git{JOSH_FILTER}.git HEAD:{branch}"
-        )
-        .run()?;
+        cmd!(sh, "git push {josh_url} HEAD:{branch}").run()?;
         println!();
 
         // Do a round-trip check to make sure the push worked as expected.
-        cmd!(
-            sh,
-            "git fetch http://localhost:{JOSH_PORT}/{github_user}/rust.git{JOSH_FILTER}.git {branch}"
-        )
-        .ignore_stderr()
-        .read()?;
+        cmd!(sh, "git fetch {josh_url} {branch}").ignore_stderr().read()?;
         let head = cmd!(sh, "git rev-parse HEAD").read()?;
         let fetch_head = cmd!(sh, "git rev-parse FETCH_HEAD").read()?;
         if head != fetch_head {
-            bail!("Josh created a non-roundtrip push! Do NOT merge this into rustc!");
+            bail!(
+                "Josh created a non-roundtrip push! Do NOT merge this into rustc!\n\
+                Expected {head}, got {fetch_head}."
+            );
         }
         println!(
             "Confirmed that the push round-trips back to Miri properly. Please create a rustc PR:"
@@ -369,7 +386,104 @@ impl Command {
         Ok(())
     }
 
-    fn bench(benches: Vec<OsString>) -> Result<()> {
+    fn squash() -> Result<()> {
+        let sh = Shell::new()?;
+        sh.change_dir(miri_dir()?);
+        // Figure out base wrt latest upstream master.
+        // (We can't trust any of the local ones, they can all be outdated.)
+        let origin_master = {
+            cmd!(sh, "git fetch https://github.com/rust-lang/miri/")
+                .quiet()
+                .ignore_stdout()
+                .ignore_stderr()
+                .run()?;
+            cmd!(sh, "git rev-parse FETCH_HEAD").read()?
+        };
+        let base = cmd!(sh, "git merge-base HEAD {origin_master}").read()?;
+        // Rebase onto that, setting ourselves as the sequence editor so that we can edit the sequence programmatically.
+        // We want to forward the host stdin so apparently we cannot use `cmd!`.
+        let mut cmd = process::Command::new("git");
+        cmd.arg("rebase").arg(&base).arg("--interactive");
+        let current_exe = {
+            if cfg!(windows) {
+                // Apparently git-for-Windows gets confused by backslashes if we just use
+                // `current_exe()` here. So replace them by forward slashes if this is not a "magic"
+                // path starting with "\\". This is clearly a git bug but we work around it here.
+                // Also see <https://github.com/rust-lang/miri/issues/4340>.
+                let bin = env::current_exe()?;
+                match bin.into_os_string().into_string() {
+                    Err(not_utf8) => not_utf8.into(), // :shrug:
+                    Ok(str) => {
+                        if str.starts_with(r"\\") {
+                            str.into() // don't touch these magic paths, they must use backslashes
+                        } else {
+                            str.replace('\\', "/").into()
+                        }
+                    }
+                }
+            } else {
+                env::current_exe()?
+            }
+        };
+        cmd.env("GIT_SEQUENCE_EDITOR", current_exe);
+        cmd.env("MIRI_SCRIPT_IS_GIT_SEQUENCE_EDITOR", "1");
+        cmd.current_dir(sh.current_dir());
+        let result = cmd.status()?;
+        if !result.success() {
+            bail!("`git rebase` failed");
+        }
+        Ok(())
+    }
+
+    pub fn squash_sequence_editor() -> Result<()> {
+        let sequence_file = env::args().nth(1).expect("git should pass us a filename");
+        if sequence_file == "fmt" {
+            // This is probably us being called as a git hook as part of the rebase. Let's just
+            // ignore this. Sadly `git rebase` does not have a flag to skip running hooks.
+            return Ok(());
+        }
+        // Read the provided sequence and adjust it.
+        let rebase_sequence = {
+            let mut rebase_sequence = String::new();
+            let file = fs::File::open(&sequence_file).with_context(|| {
+                format!("failed to read rebase sequence from {sequence_file:?}")
+            })?;
+            let file = io::BufReader::new(file);
+            for line in file.lines() {
+                let line = line?;
+                // The first line is left unchanged.
+                if rebase_sequence.is_empty() {
+                    writeln!(rebase_sequence, "{line}").unwrap();
+                    continue;
+                }
+                // If this is a "pick" like, make it "squash".
+                if let Some(rest) = line.strip_prefix("pick ") {
+                    writeln!(rebase_sequence, "squash {rest}").unwrap();
+                    continue;
+                }
+                // We've reached the end of the relevant part of the sequence, and we can stop.
+                break;
+            }
+            rebase_sequence
+        };
+        // Write out the adjusted sequence.
+        fs::write(&sequence_file, rebase_sequence).with_context(|| {
+            format!("failed to write adjusted rebase sequence to {sequence_file:?}")
+        })?;
+        Ok(())
+    }
+
+    fn bench(
+        target: Option<String>,
+        no_install: bool,
+        save_baseline: Option<String>,
+        load_baseline: Option<String>,
+        benches: Vec<String>,
+    ) -> Result<()> {
+        if save_baseline.is_some() && load_baseline.is_some() {
+            bail!("Only one of `--save-baseline` and `--load-baseline` can be set");
+        }
+
         // The hyperfine to use
         let hyperfine = env::var("HYPERFINE");
         let hyperfine = hyperfine.as_deref().unwrap_or("hyperfine -w 1 -m 5 --shell=none");
@@ -377,169 +491,253 @@ impl Command {
         let Some((program_name, args)) = hyperfine.split_first() else {
             bail!("expected HYPERFINE environment variable to be non-empty");
         };
-        // Extra flags to pass to cargo.
-        let cargo_extra_flags = std::env::var("CARGO_EXTRA_FLAGS").unwrap_or_default();
-        // Make sure we have an up-to-date Miri installed and selected the right toolchain.
-        Self::install(vec![])?;
 
+        if !no_install {
+            // Make sure we have an up-to-date Miri installed and selected the right toolchain.
+            Self::install(vec![])?;
+        }
+        let results_json_dir = if save_baseline.is_some() || load_baseline.is_some() {
+            Some(TempDir::new()?)
+        } else {
+            None
+        };
+
+        let miri_dir = miri_dir()?;
         let sh = Shell::new()?;
-        sh.change_dir(miri_dir()?);
+        sh.change_dir(&miri_dir);
         let benches_dir = "bench-cargo-miri";
-        let benches = if benches.is_empty() {
+        let benches: Vec<String> = if benches.is_empty() {
             sh.read_dir(benches_dir)?
                 .into_iter()
                 .filter(|path| path.is_dir())
-                .map(Into::into)
+                // Only keep the basename: that matches the usage with a manual bench list,
+                // and it ensure the path concatenations below work as intended.
+                .map(|path| path.file_name().unwrap().to_owned().into_string().unwrap())
                 .collect()
         } else {
-            benches.to_owned()
+            benches.into_iter().collect()
         };
+        let target_flag = if let Some(target) = target {
+            let mut flag = OsString::from("--target=");
+            flag.push(target);
+            flag
+        } else {
+            OsString::new()
+        };
+        let target_flag = &target_flag;
+        let toolchain = active_toolchain()?;
         // Run the requested benchmarks
-        for bench in benches {
+        for bench in &benches {
             let current_bench = path!(benches_dir / bench / "Cargo.toml");
+            let mut export_json = None;
+            if let Some(baseline_temp_dir) = &results_json_dir {
+                export_json = Some(format!(
+                    "--export-json={}",
+                    path!(baseline_temp_dir / format!("{bench}.bench.json")).display()
+                ));
+            }
             // We don't attempt to escape `current_bench`, but we wrap it in quotes.
             // That seems to make Windows CI happy.
             cmd!(
                 sh,
-                "{program_name} {args...} 'cargo miri run '{cargo_extra_flags}' --manifest-path \"'{current_bench}'\"'"
+                "{program_name} {args...} {export_json...} 'cargo +'{toolchain}' miri run '{target_flag}' --manifest-path \"'{current_bench}'\"'"
             )
             .run()?;
         }
+
+        // Gather/load results for baseline saving.
+
+        #[derive(Serialize, Deserialize)]
+        struct BenchResult {
+            mean: f64,
+            stddev: f64,
+        }
+
+        let gather_results = || -> Result<BTreeMap<&str, BenchResult>> {
+            let baseline_temp_dir = results_json_dir.unwrap();
+            let mut results = BTreeMap::new();
+            for bench in &benches {
+                let result = File::open(path!(baseline_temp_dir / format!("{bench}.bench.json")))
+                    .context("failed to read hyperfine JSON")?;
+                let mut result: serde_json::Value = serde_json::from_reader(BufReader::new(result))
+                    .context("failed to parse hyperfine JSON")?;
+                let result: BenchResult = serde_json::from_value(result["results"][0].take())
+                    .context("failed to interpret hyperfine JSON")?;
+                results.insert(bench as &str, result);
+            }
+            Ok(results)
+        };
+
+        if let Some(baseline_file) = save_baseline {
+            let results = gather_results()?;
+            let baseline = File::create(baseline_file)?;
+            serde_json::to_writer_pretty(BufWriter::new(baseline), &results)?;
+        } else if let Some(baseline_file) = load_baseline {
+            let new_results = gather_results()?;
+            let baseline_results: BTreeMap<String, BenchResult> = {
+                let f = File::open(baseline_file)?;
+                serde_json::from_reader(BufReader::new(f))?
+            };
+            println!(
+                "Comparison with baseline (relative speed, lower is better for the new results):"
+            );
+            for (bench, new_result) in new_results {
+                let Some(baseline_result) = baseline_results.get(bench) else { continue };
+
+                // Compare results (inspired by hyperfine)
+                let ratio = new_result.mean / baseline_result.mean;
+                // https://en.wikipedia.org/wiki/Propagation_of_uncertainty#Example_formulae
+                // Covariance asssumed to be 0, i.e. variables are assumed to be independent
+                let ratio_stddev = ratio
+                    * f64::sqrt(
+                        (new_result.stddev / new_result.mean).powi(2)
+                            + (baseline_result.stddev / baseline_result.mean).powi(2),
+                    );
+
+                println!("  {bench}: {ratio:.2} ± {ratio_stddev:.2}");
+            }
+        }
+
         Ok(())
     }
 
-    fn install(flags: Vec<OsString>) -> Result<()> {
+    fn install(flags: Vec<String>) -> Result<()> {
         let e = MiriEnv::new()?;
         e.install_to_sysroot(e.miri_dir.clone(), &flags)?;
         e.install_to_sysroot(path!(e.miri_dir / "cargo-miri"), &flags)?;
         Ok(())
     }
 
-    fn build(flags: Vec<OsString>) -> Result<()> {
+    fn build(flags: Vec<String>) -> Result<()> {
         let e = MiriEnv::new()?;
-        e.build(path!(e.miri_dir / "Cargo.toml"), &flags, /* quiet */ false)?;
-        e.build(path!(e.miri_dir / "cargo-miri" / "Cargo.toml"), &flags, /* quiet */ false)?;
+        e.build(".", &flags, /* quiet */ false)?;
+        e.build("cargo-miri", &flags, /* quiet */ false)?;
         Ok(())
     }
 
-    fn check(flags: Vec<OsString>) -> Result<()> {
+    fn check(flags: Vec<String>) -> Result<()> {
         let e = MiriEnv::new()?;
-        e.check(path!(e.miri_dir / "Cargo.toml"), &flags)?;
-        e.check(path!(e.miri_dir / "cargo-miri" / "Cargo.toml"), &flags)?;
+        e.check(".", &flags)?;
+        e.check("cargo-miri", &flags)?;
         Ok(())
     }
 
-    fn clippy(flags: Vec<OsString>) -> Result<()> {
+    fn doc(flags: Vec<String>) -> Result<()> {
         let e = MiriEnv::new()?;
-        e.clippy(path!(e.miri_dir / "Cargo.toml"), &flags)?;
-        e.clippy(path!(e.miri_dir / "cargo-miri" / "Cargo.toml"), &flags)?;
-        e.clippy(path!(e.miri_dir / "miri-script" / "Cargo.toml"), &flags)?;
+        e.doc(".", &flags)?;
+        e.doc("cargo-miri", &flags)?;
         Ok(())
     }
 
-    fn cargo(flags: Vec<OsString>) -> Result<()> {
+    fn clippy(flags: Vec<String>) -> Result<()> {
         let e = MiriEnv::new()?;
-        let toolchain = &e.toolchain;
-        // We carefully kept the working dir intact, so this will run cargo *on the workspace in the
-        // current working dir*, not on the main Miri workspace. That is exactly what RA needs.
-        cmd!(e.sh, "cargo +{toolchain} {flags...}").run()?;
+        e.clippy(".", &flags)?;
+        e.clippy("cargo-miri", &flags)?;
+        e.clippy("miri-script", &flags)?;
         Ok(())
     }
 
-    fn test(bless: bool, flags: Vec<OsString>) -> Result<()> {
+    fn test(
+        bless: bool,
+        mut flags: Vec<String>,
+        target: Option<String>,
+        coverage: bool,
+    ) -> Result<()> {
         let mut e = MiriEnv::new()?;
-        // Prepare a sysroot.
-        e.build_miri_sysroot(/* quiet */ false)?;
 
-        // Then test, and let caller control flags.
-        // Only in root project as `cargo-miri` has no tests.
+        let coverage = coverage.then_some(crate::coverage::CoverageReport::new()?);
+
+        if let Some(report) = &coverage {
+            report.add_env_vars(&mut e)?;
+        }
+
+        // Prepare a sysroot. (Also builds cargo-miri, which we need.)
+        e.build_miri_sysroot(/* quiet */ false, target.as_deref())?;
+
+        // Forward information to test harness.
         if bless {
             e.sh.set_var("RUSTC_BLESS", "Gesundheit");
         }
-        e.test(path!(e.miri_dir / "Cargo.toml"), &flags)?;
+        if e.sh.var("MIRI_TEST_TARGET").is_ok() {
+            // Avoid trouble due to an incorrectly set env var.
+            bail!("MIRI_TEST_TARGET must not be set when invoking `./miri test`");
+        }
+        if let Some(target) = target {
+            // Tell the harness which target to test.
+            e.sh.set_var("MIRI_TEST_TARGET", target);
+        }
+
+        // Make sure the flags are going to the test harness, not cargo.
+        flags.insert(0, "--".into());
+
+        // Then test, and let caller control flags.
+        // Only in root project as `cargo-miri` has no tests.
+        e.test(".", &flags)?;
+
+        if let Some(coverage) = &coverage {
+            coverage.show_coverage_report(&e)?;
+        }
+
         Ok(())
     }
 
     fn run(
         dep: bool,
         verbose: bool,
-        many_seeds: Option<Range<u32>>,
-        mut flags: Vec<OsString>,
+        target: Option<String>,
+        edition: Option<String>,
+        flags: Vec<String>,
     ) -> Result<()> {
         let mut e = MiriEnv::new()?;
-        // Scan for "--target" to overwrite the "MIRI_TEST_TARGET" env var so
-        // that we set the MIRI_SYSROOT up the right way. We must make sure that
-        // MIRI_TEST_TARGET and `--target` are in sync.
-        use itertools::Itertools;
-        let target = flags
-            .iter()
-            .take_while(|arg| *arg != "--")
-            .tuple_windows()
-            .find(|(first, _)| *first == "--target");
-        if let Some((_, target)) = target {
-            // Found it!
-            e.sh.set_var("MIRI_TEST_TARGET", target);
-        } else if let Ok(target) = std::env::var("MIRI_TEST_TARGET") {
-            // Convert `MIRI_TEST_TARGET` into `--target`.
-            flags.push("--target".into());
-            flags.push(target.into());
-        }
-        // Scan for "--edition", set one ourselves if that flag is not present.
-        let have_edition =
-            flags.iter().take_while(|arg| *arg != "--").any(|arg| *arg == "--edition");
-        if !have_edition {
-            flags.push("--edition=2021".into()); // keep in sync with `tests/ui.rs`.`
-        }
 
-        // Prepare a sysroot, and add it to the flags.
-        let miri_sysroot = e.build_miri_sysroot(/* quiet */ !verbose)?;
-        flags.push("--sysroot".into());
-        flags.push(miri_sysroot.into());
+        // Preparation: get a sysroot, and get the miri binary.
+        let miri_sysroot = e.build_miri_sysroot(/* quiet */ !verbose, target.as_deref())?;
+        let miri_bin =
+            e.build_get_binary(".").context("failed to get filename of miri executable")?;
 
-        // Compute everything needed to run the actual command. Also add MIRIFLAGS.
-        let miri_manifest = path!(e.miri_dir / "Cargo.toml");
+        // More flags that we will pass before `flags`
+        // (because `flags` may contain `--`).
+        let mut early_flags = Vec::<OsString>::new();
+
+        // In `dep` mode, the target is already passed via `MIRI_TEST_TARGET`
+        if !dep && let Some(target) = &target {
+            early_flags.push("--target".into());
+            early_flags.push(target.into());
+        }
+        early_flags.push("--edition".into());
+        early_flags.push(edition.as_deref().unwrap_or("2021").into());
+        early_flags.push("--sysroot".into());
+        early_flags.push(miri_sysroot.into());
+
+        // Compute flags.
         let miri_flags = e.sh.var("MIRIFLAGS").unwrap_or_default();
         let miri_flags = flagsplit(&miri_flags);
-        let toolchain = &e.toolchain;
-        let extra_flags = &e.cargo_extra_flags;
         let quiet_flag = if verbose { None } else { Some("--quiet") };
-        // This closure runs the command with the given `seed_flag` added between the MIRIFLAGS and
-        // the `flags` given on the command-line.
-        let run_miri = |sh: &Shell, seed_flag: Option<String>| -> Result<()> {
-            // The basic command that executes the Miri driver.
-            let mut cmd = if dep {
-                cmd!(
-                    sh,
-                    "cargo +{toolchain} {quiet_flag...} test {extra_flags...} --manifest-path {miri_manifest} --test ui -- --miri-run-dep-mode"
-                )
-            } else {
-                cmd!(
-                    sh,
-                    "cargo +{toolchain} {quiet_flag...} run {extra_flags...} --manifest-path {miri_manifest} --"
-                )
-            };
-            cmd.set_quiet(!verbose);
-            // Add Miri flags
-            let cmd = cmd.args(&miri_flags).args(seed_flag).args(&flags);
-            // And run the thing.
-            Ok(cmd.run()?)
-        };
-        // Run the closure once or many times.
-        if let Some(seed_range) = many_seeds {
-            e.run_many_times(seed_range, |sh, seed| {
-                eprintln!("Trying seed: {seed}");
-                run_miri(sh, Some(format!("-Zmiri-seed={seed}"))).map_err(|err| {
-                    eprintln!("FAILING SEED: {seed}");
-                    err
-                })
-            })?;
+
+        // Run Miri.
+        // The basic command that executes the Miri driver.
+        let mut cmd = if dep {
+            // We invoke the test suite as that has all the logic for running with dependencies.
+            e.cargo_cmd(".", "test")
+                .args(&["--test", "ui"])
+                .args(quiet_flag)
+                .arg("--")
+                .args(&["--miri-run-dep-mode"])
         } else {
-            run_miri(&e.sh, None)?;
+            cmd!(e.sh, "{miri_bin}")
+        };
+        cmd.set_quiet(!verbose);
+        // Add Miri flags
+        let mut cmd = cmd.args(&miri_flags).args(&early_flags).args(&flags);
+        // For `--dep` we also need to set the target in the env var.
+        if dep && let Some(target) = &target {
+            cmd = cmd.env("MIRI_TEST_TARGET", target);
         }
-        Ok(())
+        // Finally, run the thing.
+        Ok(cmd.run()?)
     }
 
-    fn fmt(flags: Vec<OsString>) -> Result<()> {
+    fn fmt(flags: Vec<String>) -> Result<()> {
         use itertools::Itertools;
 
         let e = MiriEnv::new()?;
@@ -561,6 +759,6 @@ impl Command {
             .filter_ok(|item| item.file_type().is_file())
             .map_ok(|item| item.into_path());
 
-        e.format_files(files, &e.toolchain[..], &config_path, &flags[..])
+        e.format_files(files, &config_path, &flags)
     }
 }

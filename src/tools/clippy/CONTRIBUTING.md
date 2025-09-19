@@ -21,7 +21,6 @@ All contributors are expected to follow the [Rust Code of Conduct].
     - [Rust Analyzer](#rust-analyzer)
   - [How Clippy works](#how-clippy-works)
   - [Issue and PR triage](#issue-and-pr-triage)
-  - [Bors and Homu](#bors-and-homu)
   - [Contributions](#contributions)
   - [License](#license)
 
@@ -52,7 +51,7 @@ Clippy team directly by mentioning them in the issue or over on [Zulip]. All
 currently active team members can be found
 [here](https://github.com/rust-lang/rust-clippy/blob/master/triagebot.toml#L18)
 
-Some issues are easier than others. The [`good-first-issue`] label can be used to find the easy
+Some issues are easier than others. The [`good first issue`] label can be used to find the easy
 issues. You can use `@rustbot claim` to assign the issue to yourself.
 
 There are also some abandoned PRs, marked with [`S-inactive-closed`].
@@ -71,16 +70,16 @@ To figure out how this syntax structure is encoded in the AST, it is recommended
 Usually the lint will end up to be a nested series of matches and ifs, [like so][deep-nesting].
 But we can make it nest-less by using [let chains], [like this][nest-less].
 
-[`E-medium`] issues are generally pretty easy too, though it's recommended you work on an [`good-first-issue`]
+[`E-medium`] issues are generally pretty easy too, though it's recommended you work on an [`good first issue`]
 first. Sometimes they are only somewhat involved code wise, but not difficult per-se.
 Note that [`E-medium`] issues may require some knowledge of Clippy internals or some
 debugging to find the actual problem behind the issue.
 
 [`T-middle`] issues can be more involved and require verifying types. The [`ty`] module contains a
 lot of methods that are useful, though one of the most useful would be `expr_ty` (gives the type of
-an AST expression). `match_def_path()` in Clippy's `utils` module can also be useful.
+an AST expression).
 
-[`good-first-issue`]: https://github.com/rust-lang/rust-clippy/labels/good-first-issue
+[`good first issue`]: https://github.com/rust-lang/rust-clippy/labels/good%20first%20issue
 [`S-inactive-closed`]: https://github.com/rust-lang/rust-clippy/pulls?q=is%3Aclosed+label%3AS-inactive-closed
 [`T-AST`]: https://github.com/rust-lang/rust-clippy/labels/T-AST
 [`T-middle`]: https://github.com/rust-lang/rust-clippy/labels/T-middle
@@ -200,7 +199,7 @@ currently. Between writing new lints, fixing issues, reviewing pull requests and
 responding to issues there may not always be enough time to stay on top of it
 all.
 
-Our highest priority is fixing [crashes][l-crash] and [bugs][l-bug], for example
+Our highest priority is fixing [ICEs][I-ICE] and [bugs][C-bug], for example
 an ICE in a popular crate that many other crates depend on. We don't
 want Clippy to crash on your code and we want it to be as reliable as the
 suggestions from Rust compiler errors.
@@ -213,26 +212,13 @@ We have prioritization labels and a sync-blocker label, which are described belo
 Or rather: before the sync this should be addressed,
 e.g. by removing a lint again, so it doesn't hit beta/stable.
 
-## Bors and Homu
-
-We use a bot powered by [Homu][homu] to help automate testing and landing of pull
-requests in Clippy. The bot's username is @bors.
-
-You can find the Clippy bors queue [here][homu_queue].
-
-If you have @bors permissions, you can find an overview of the available
-commands [here][homu_instructions].
-
 [triage]: https://forge.rust-lang.org/release/triage-procedure.html
-[l-crash]: https://github.com/rust-lang/rust-clippy/labels/L-crash
-[l-bug]: https://github.com/rust-lang/rust-clippy/labels/L-bug
+[I-ICE]: https://github.com/rust-lang/rust-clippy/labels/I-ICE
+[C-bug]: https://github.com/rust-lang/rust-clippy/labels/C-bug
 [p-low]: https://github.com/rust-lang/rust-clippy/labels/P-low
 [p-medium]: https://github.com/rust-lang/rust-clippy/labels/P-medium
 [p-high]: https://github.com/rust-lang/rust-clippy/labels/P-high
 [l-sync-blocker]: https://github.com/rust-lang/rust-clippy/labels/L-sync-blocker
-[homu]: https://github.com/rust-lang/homu
-[homu_instructions]: https://bors.rust-lang.org/
-[homu_queue]: https://bors.rust-lang.org/queue/clippy
 
 ## Contributions
 
@@ -244,7 +230,7 @@ All PRs should include a `changelog` entry with a short comment explaining the c
 "what do you believe is important from an outsider's perspective?" Often, PRs are only related to a single property of a
 lint, and then it's good to mention that one. Otherwise, it's better to include too much detail than too little.
 
-Clippy's [changelog] is created from these comments. Every release, someone gets all commits from bors with a
+Clippy's [changelog] is created from these comments. Every release, someone gets all merge commits with a
 `changelog: XYZ` entry and combines them into the changelog. This is a manual process.
 
 Examples:

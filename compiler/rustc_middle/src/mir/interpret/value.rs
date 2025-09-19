@@ -1,20 +1,16 @@
 use std::fmt;
 
 use either::{Either, Left, Right};
-
-use rustc_apfloat::{
-    ieee::{Double, Half, Quad, Single},
-    Float,
-};
+use rustc_abi::{HasDataLayout, Size};
+use rustc_apfloat::Float;
+use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_macros::{HashStable, TyDecodable, TyEncodable};
-use rustc_target::abi::{HasDataLayout, Size};
-
-use crate::ty::ScalarInt;
 
 use super::{
     AllocId, CtfeProvenance, InterpResult, Pointer, PointerArithmetic, Provenance,
-    ScalarSizeMismatch,
+    ScalarSizeMismatch, interp_ok,
 };
+use crate::ty::ScalarInt;
 
 /// A `Scalar` represents an immediate, primitive value existing outside of a
 /// `memory::Allocation`. It is in many ways like a small chunk of an `Allocation`, up to 16 bytes in
@@ -69,6 +65,13 @@ impl<Prov: Provenance> fmt::LowerHex for Scalar<Prov> {
     }
 }
 
+impl<Prov> From<Half> for Scalar<Prov> {
+    #[inline(always)]
+    fn from(f: Half) -> Self {
+        Scalar::from_f16(f)
+    }
+}
+
 impl<Prov> From<Single> for Scalar<Prov> {
     #[inline(always)]
     fn from(f: Single) -> Self {
@@ -80,6 +83,13 @@ impl<Prov> From<Double> for Scalar<Prov> {
     #[inline(always)]
     fn from(f: Double) -> Self {
         Scalar::from_f64(f)
+    }
+}
+
+impl<Prov> From<Quad> for Scalar<Prov> {
+    #[inline(always)]
+    fn from(f: Quad) -> Self {
+        Scalar::from_f128(f)
     }
 }
 
@@ -123,15 +133,11 @@ impl<Prov> Scalar<Prov> {
     }
 
     #[inline]
-    pub fn try_from_uint(i: impl Into<u128>, size: Size) -> Option<Self> {
-        ScalarInt::try_from_uint(i, size).map(Scalar::Int)
-    }
-
-    #[inline]
     pub fn from_uint(i: impl Into<u128>, size: Size) -> Self {
         let i = i.into();
-        Self::try_from_uint(i, size)
+        ScalarInt::try_from_uint(i, size)
             .unwrap_or_else(|| bug!("Unsigned value {:#x} does not fit in {} bits", i, size.bits()))
+            .into()
     }
 
     #[inline]
@@ -165,35 +171,36 @@ impl<Prov> Scalar<Prov> {
     }
 
     #[inline]
-    pub fn try_from_int(i: impl Into<i128>, size: Size) -> Option<Self> {
-        ScalarInt::try_from_int(i, size).map(Scalar::Int)
-    }
-
-    #[inline]
     pub fn from_int(i: impl Into<i128>, size: Size) -> Self {
         let i = i.into();
-        Self::try_from_int(i, size)
+        ScalarInt::try_from_int(i, size)
             .unwrap_or_else(|| bug!("Signed value {:#x} does not fit in {} bits", i, size.bits()))
+            .into()
     }
 
     #[inline]
     pub fn from_i8(i: i8) -> Self {
-        Self::from_int(i, Size::from_bits(8))
+        Self::Int(i.into())
     }
 
     #[inline]
     pub fn from_i16(i: i16) -> Self {
-        Self::from_int(i, Size::from_bits(16))
+        Self::Int(i.into())
     }
 
     #[inline]
     pub fn from_i32(i: i32) -> Self {
-        Self::from_int(i, Size::from_bits(32))
+        Self::Int(i.into())
     }
 
     #[inline]
     pub fn from_i64(i: i64) -> Self {
-        Self::from_int(i, Size::from_bits(64))
+        Self::Int(i.into())
+    }
+
+    #[inline]
+    pub fn from_i128(i: i128) -> Self {
+        Self::Int(i.into())
     }
 
     #[inline]
@@ -222,7 +229,7 @@ impl<Prov> Scalar<Prov> {
     }
 
     /// This is almost certainly not the method you want!  You should dispatch on the type
-    /// and use `to_{u8,u16,...}`/`scalar_to_ptr` to perform ptr-to-int / int-to-ptr casts as needed.
+    /// and use `to_{u8,u16,...}`/`to_pointer` to perform ptr-to-int / int-to-ptr casts as needed.
     ///
     /// This method only exists for the benefit of low-level operations that truly need to treat the
     /// scalar in whatever form it is.
@@ -266,10 +273,10 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
             .to_bits_or_ptr_internal(cx.pointer_size())
             .map_err(|s| err_ub!(ScalarSizeMismatch(s)))?
         {
-            Right(ptr) => Ok(ptr.into()),
+            Right(ptr) => interp_ok(ptr.into()),
             Left(bits) => {
                 let addr = u64::try_from(bits).unwrap();
-                Ok(Pointer::from_addr_invalid(addr))
+                interp_ok(Pointer::from_addr_invalid(addr))
             }
         }
     }
@@ -284,7 +291,7 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     /// The error type is `AllocId`, not `CtfeProvenance`, since `AllocId` is the "minimal"
     /// component all provenance types must have.
     #[inline]
-    pub fn try_to_int(self) -> Result<ScalarInt, Scalar<AllocId>> {
+    pub fn try_to_scalar_int(self) -> Result<ScalarInt, Scalar<AllocId>> {
         match self {
             Scalar::Int(int) => Ok(int),
             Scalar::Ptr(ptr, sz) => {
@@ -300,15 +307,22 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
         }
     }
 
+    pub fn clear_provenance(&mut self) -> InterpResult<'tcx> {
+        if matches!(self, Scalar::Ptr(..)) {
+            *self = self.to_scalar_int()?.into();
+        }
+        interp_ok(())
+    }
+
     #[inline(always)]
     pub fn to_scalar_int(self) -> InterpResult<'tcx, ScalarInt> {
-        self.try_to_int().map_err(|_| err_unsup!(ReadPointerAsInt(None)).into())
+        self.try_to_scalar_int().map_err(|_| err_unsup!(ReadPointerAsInt(None))).into()
     }
 
     #[inline(always)]
     #[cfg_attr(debug_assertions, track_caller)] // only in debug builds due to perf (see #98980)
-    pub fn assert_int(self) -> ScalarInt {
-        self.try_to_int().unwrap()
+    pub fn assert_scalar_int(self) -> ScalarInt {
+        self.try_to_scalar_int().expect("got a pointer where a ScalarInt was expected")
     }
 
     /// This throws UB (instead of ICEing) on a size mismatch since size mismatches can arise in
@@ -316,27 +330,22 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     #[inline]
     pub fn to_bits(self, target_size: Size) -> InterpResult<'tcx, u128> {
         assert_ne!(target_size.bytes(), 0, "you should never look at the bits of a ZST");
-        self.to_scalar_int()?.try_to_bits(target_size).map_err(|size| {
-            err_ub!(ScalarSizeMismatch(ScalarSizeMismatch {
-                target_size: target_size.bytes(),
-                data_size: size.bytes(),
-            }))
+        self.to_scalar_int()?
+            .try_to_bits(target_size)
+            .map_err(|size| {
+                err_ub!(ScalarSizeMismatch(ScalarSizeMismatch {
+                    target_size: target_size.bytes(),
+                    data_size: size.bytes(),
+                }))
+            })
             .into()
-        })
-    }
-
-    #[inline(always)]
-    #[cfg_attr(debug_assertions, track_caller)] // only in debug builds due to perf (see #98980)
-    pub fn assert_bits(self, target_size: Size) -> u128 {
-        self.to_bits(target_size)
-            .unwrap_or_else(|_| panic!("assertion failed: {self:?} fits {target_size:?}"))
     }
 
     pub fn to_bool(self) -> InterpResult<'tcx, bool> {
         let val = self.to_u8()?;
         match val {
-            0 => Ok(false),
-            1 => Ok(true),
+            0 => interp_ok(false),
+            1 => interp_ok(true),
             _ => throw_ub!(InvalidBool(val)),
         }
     }
@@ -344,7 +353,7 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     pub fn to_char(self) -> InterpResult<'tcx, char> {
         let val = self.to_u32()?;
         match std::char::from_u32(val) {
-            Some(c) => Ok(c),
+            Some(c) => interp_ok(c),
             None => throw_ub!(InvalidChar(val)),
         }
     }
@@ -385,7 +394,7 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     /// Fails if the scalar is a pointer.
     pub fn to_target_usize(self, cx: &impl HasDataLayout) -> InterpResult<'tcx, u64> {
         let b = self.to_uint(cx.data_layout().pointer_size)?;
-        Ok(u64::try_from(b).unwrap())
+        interp_ok(u64::try_from(b).unwrap())
     }
 
     /// Converts the scalar to produce a signed integer of the given size.
@@ -393,7 +402,7 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     #[inline]
     pub fn to_int(self, size: Size) -> InterpResult<'tcx, i128> {
         let b = self.to_bits(size)?;
-        Ok(size.sign_extend(b) as i128)
+        interp_ok(size.sign_extend(b))
     }
 
     /// Converts the scalar to produce an `i8`. Fails if the scalar is a pointer.
@@ -425,13 +434,13 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     /// Fails if the scalar is a pointer.
     pub fn to_target_isize(self, cx: &impl HasDataLayout) -> InterpResult<'tcx, i64> {
         let b = self.to_int(cx.data_layout().pointer_size)?;
-        Ok(i64::try_from(b).unwrap())
+        interp_ok(i64::try_from(b).unwrap())
     }
 
     #[inline]
     pub fn to_float<F: Float>(self) -> InterpResult<'tcx, F> {
         // Going through `to_bits` to check size and truncation.
-        Ok(F::from_bits(self.to_bits(Size::from_bits(F::BITS))?))
+        interp_ok(F::from_bits(self.to_bits(Size::from_bits(F::BITS))?))
     }
 
     #[inline]

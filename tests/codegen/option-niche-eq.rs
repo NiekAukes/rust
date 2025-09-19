@@ -1,13 +1,15 @@
-//@ compile-flags: -O -Zmerge-functions=disabled
-//@ min-llvm-version: 18
+//@ revisions: REGULAR LLVM21
+//@ min-llvm-version: 20
+//@ compile-flags: -Copt-level=3 -Zmerge-functions=disabled
+//@ [LLVM21] min-llvm-version: 21
 #![crate_type = "lib"]
 
 extern crate core;
 use core::cmp::Ordering;
-use core::ptr::NonNull;
 use core::num::NonZero;
+use core::ptr::NonNull;
 
-// CHECK-lABEL: @non_zero_eq
+// CHECK-LABEL: @non_zero_eq
 #[no_mangle]
 pub fn non_zero_eq(l: Option<NonZero<u32>>, r: Option<NonZero<u32>>) -> bool {
     // CHECK: start:
@@ -16,7 +18,7 @@ pub fn non_zero_eq(l: Option<NonZero<u32>>, r: Option<NonZero<u32>>) -> bool {
     l == r
 }
 
-// CHECK-lABEL: @non_zero_signed_eq
+// CHECK-LABEL: @non_zero_signed_eq
 #[no_mangle]
 pub fn non_zero_signed_eq(l: Option<NonZero<i64>>, r: Option<NonZero<i64>>) -> bool {
     // CHECK: start:
@@ -25,7 +27,19 @@ pub fn non_zero_signed_eq(l: Option<NonZero<i64>>, r: Option<NonZero<i64>>) -> b
     l == r
 }
 
-// CHECK-lABEL: @non_null_eq
+// FIXME(#49892)
+// This currently relies on a manual implementation of `PartialOrd`/`Ord` for `Option`
+// Once LLVM is better able to optimize this pattern, we can return to using a derive.
+// CHECK-LABEL: @non_zero_ord
+#[no_mangle]
+pub fn non_zero_ord(a: Option<NonZero<u32>>, b: Option<NonZero<u32>>) -> bool {
+    // CHECK: start:
+    // CHECK-NEXT: icmp ult i32
+    // CHECK-NEXT: ret i1
+    a < b
+}
+
+// CHECK-LABEL: @non_null_eq
 #[no_mangle]
 pub fn non_null_eq(l: Option<NonNull<u8>>, r: Option<NonNull<u8>>) -> bool {
     // CHECK: start:
@@ -34,7 +48,7 @@ pub fn non_null_eq(l: Option<NonNull<u8>>, r: Option<NonNull<u8>>) -> bool {
     l == r
 }
 
-// CHECK-lABEL: @ordering_eq
+// CHECK-LABEL: @ordering_eq
 #[no_mangle]
 pub fn ordering_eq(l: Option<Ordering>, r: Option<Ordering>) -> bool {
     // CHECK: start:
@@ -54,7 +68,7 @@ pub enum EnumWithNiche {
     G,
 }
 
-// CHECK-lABEL: @niche_eq
+// CHECK-LABEL: @niche_eq
 #[no_mangle]
 pub fn niche_eq(l: Option<EnumWithNiche>, r: Option<EnumWithNiche>) -> bool {
     // CHECK: start:
@@ -63,12 +77,11 @@ pub fn niche_eq(l: Option<EnumWithNiche>, r: Option<EnumWithNiche>) -> bool {
     l == r
 }
 
-// FIXME: This should work too
-// // FIXME-CHECK-lABEL: @bool_eq
-// #[no_mangle]
-// pub fn bool_eq(l: Option<bool>, r: Option<bool>) -> bool {
-//     // FIXME-CHECK: start:
-//     // FIXME-CHECK-NEXT: icmp eq i8
-//     // FIXME-CHECK-NEXT: ret i1
-//     l == r
-// }
+// LLVM21-LABEL: @bool_eq
+#[no_mangle]
+pub fn bool_eq(l: Option<bool>, r: Option<bool>) -> bool {
+    // LLVM21: start:
+    // LLVM21-NEXT: icmp eq i8
+    // LLVM21-NEXT: ret i1
+    l == r
+}

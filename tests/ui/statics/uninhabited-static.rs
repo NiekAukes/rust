@@ -2,7 +2,7 @@
 #![deny(uninhabited_static)]
 
 enum Void {}
-extern {
+extern "C" {
     static VOID: Void; //~ ERROR static of uninhabited type
     //~| WARN: previously accepted
     static NEVER: !; //~ ERROR static of uninhabited type
@@ -11,9 +11,9 @@ extern {
 
 static VOID2: Void = unsafe { std::mem::transmute(()) }; //~ ERROR static of uninhabited type
 //~| WARN: previously accepted
-//~| ERROR could not evaluate static initializer
+//~| ERROR value of uninhabited type `Void`
 static NEVER2: Void = unsafe { std::mem::transmute(()) }; //~ ERROR static of uninhabited type
 //~| WARN: previously accepted
-//~| ERROR could not evaluate static initializer
+//~| ERROR value of uninhabited type `Void`
 
 fn main() {}

@@ -3,7 +3,7 @@ use derive_builder::Builder;
 
 #[derive(Builder)]
 pub struct Environment {
-    host_triple: String,
+    host_tuple: String,
     python_binary: String,
     /// The rustc checkout, where the compiler source is located.
     checkout_dir: Utf8PathBuf,
@@ -17,16 +17,21 @@ pub struct Environment {
     host_llvm_dir: Utf8PathBuf,
     /// List of test paths that should be skipped when testing the optimized artifacts.
     skipped_tests: Vec<String>,
+    /// Arguments passed to `rustc-perf --cargo-config <value>` when running benchmarks.
+    #[builder(default)]
+    benchmark_cargo_config: Vec<String>,
     /// Directory containing a pre-built rustc-perf checkout.
     #[builder(default)]
     prebuilt_rustc_perf: Option<Utf8PathBuf>,
     use_bolt: bool,
     shared_llvm: bool,
+    run_tests: bool,
+    fast_try_build: bool,
 }
 
 impl Environment {
-    pub fn host_triple(&self) -> &str {
-        &self.host_triple
+    pub fn host_tuple(&self) -> &str {
+        &self.host_tuple
     }
 
     pub fn python_binary(&self) -> &str {
@@ -42,7 +47,7 @@ impl Environment {
     }
 
     pub fn build_artifacts(&self) -> Utf8PathBuf {
-        self.build_root().join("build").join(&self.host_triple)
+        self.build_root().join("build").join(&self.host_tuple)
     }
 
     pub fn artifact_dir(&self) -> Utf8PathBuf {
@@ -93,6 +98,18 @@ impl Environment {
 
     pub fn skipped_tests(&self) -> &[String] {
         &self.skipped_tests
+    }
+
+    pub fn benchmark_cargo_config(&self) -> &[String] {
+        &self.benchmark_cargo_config
+    }
+
+    pub fn run_tests(&self) -> bool {
+        self.run_tests
+    }
+
+    pub fn is_fast_try_build(&self) -> bool {
+        self.fast_try_build
     }
 }
 

@@ -1,10 +1,13 @@
-use super::{InlineAsmArch, InlineAsmType, ModifierInfo};
-use rustc_span::Symbol;
 use std::fmt;
+
+use rustc_span::Symbol;
+
+use super::{InlineAsmArch, InlineAsmType, ModifierInfo};
 
 def_reg_class! {
     Hexagon HexagonInlineAsmRegClass {
         reg,
+        preg,
     }
 }
 
@@ -35,6 +38,7 @@ impl HexagonInlineAsmRegClass {
     ) -> &'static [(InlineAsmType, Option<Symbol>)] {
         match self {
             Self::reg => types! { _: I8, I16, I32, F32; },
+            Self::preg => &[],
         }
     }
 }
@@ -69,6 +73,10 @@ def_regs! {
         r26: reg = ["r26"],
         r27: reg = ["r27"],
         r28: reg = ["r28"],
+        p0: preg = ["p0"],
+        p1: preg = ["p1"],
+        p2: preg = ["p2"],
+        p3: preg = ["p3"],
         #error = ["r19"] =>
             "r19 is used internally by LLVM and cannot be used as an operand for inline asm",
         #error = ["r29", "sp"] =>

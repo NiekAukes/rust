@@ -1,12 +1,13 @@
 //@ compile-flags: -C no-prepopulate-passes
 
-#![feature(intrinsics)]
+#![feature(core_intrinsics)]
 
-extern "rust-intrinsic" {
-    fn sqrtf32(x: f32) -> f32;
-}
+use std::intrinsics::sqrtf32;
+
 // CHECK: @llvm.sqrt.f32(float) #{{[0-9]*}}
 
 fn main() {
-    unsafe { sqrtf32(0.0f32); }
+    unsafe {
+        sqrtf32(0.0f32);
+    }
 }

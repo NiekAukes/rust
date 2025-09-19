@@ -1,10 +1,10 @@
 use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::sym;
 use clippy_utils::ty::is_type_diagnostic_item;
 use rustc_ast::ast::LitKind;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::declare_lint_pass;
-use rustc_span::sym;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -31,10 +31,10 @@ declare_lint_pass!(PermissionsSetReadonlyFalse => [PERMISSIONS_SET_READONLY_FALS
 impl<'tcx> LateLintPass<'tcx> for PermissionsSetReadonlyFalse {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         if let ExprKind::MethodCall(path, receiver, [arg], _) = &expr.kind
-            && is_type_diagnostic_item(cx, cx.typeck_results().expr_ty(receiver), sym::FsPermissions)
-            && path.ident.name == sym!(set_readonly)
             && let ExprKind::Lit(lit) = &arg.kind
             && LitKind::Bool(false) == lit.node
+            && path.ident.name == sym::set_readonly
+            && is_type_diagnostic_item(cx, cx.typeck_results().expr_ty(receiver), sym::FsPermissions)
         {
             span_lint_and_then(
                 cx,

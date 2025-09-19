@@ -3,8 +3,6 @@ struct S<A, B>(Option<(A, B)>);
 impl<A, B> S<A, B> {
     fn infer(&self, a: A, b: B) {}
     //~^ NOTE method defined here
-    //~| NOTE
-    //~| NOTE
 }
 
 fn main() {
@@ -13,7 +11,7 @@ fn main() {
     //~^ ERROR this method takes 2 arguments but 1 argument was supplied
     //~| NOTE this argument has type `i32`...
     //~| NOTE ... which causes `s` to have type `S<i32, _>`
-    //~| NOTE an argument is missing
+    //~| NOTE argument #2 is missing
     //~| HELP provide the argument
     //~| HELP change the type of the numeric literal from `i32` to `u32`
     let t: S<u32, _> = s;

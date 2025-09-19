@@ -1,10 +1,11 @@
-use super::{AllocId, InterpResult};
+use std::fmt;
+use std::num::NonZero;
 
+use rustc_abi::{HasDataLayout, Size};
 use rustc_data_structures::static_assert_size;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable};
-use rustc_target::abi::{HasDataLayout, Size};
 
-use std::{fmt, num::NonZero};
+use super::AllocId;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Pointer arithmetic
@@ -39,62 +40,13 @@ pub trait PointerArithmetic: HasDataLayout {
     }
 
     #[inline]
-    fn target_usize_to_isize(&self, val: u64) -> i64 {
-        let val = val as i64;
-        // Now wrap-around into the machine_isize range.
-        if val > self.target_isize_max() {
-            // This can only happen if the ptr size is < 64, so we know max_usize_plus_1 fits into
-            // i64.
-            debug_assert!(self.pointer_size().bits() < 64);
-            let max_usize_plus_1 = 1u128 << self.pointer_size().bits();
-            val - i64::try_from(max_usize_plus_1).unwrap()
-        } else {
-            val
-        }
-    }
-
-    /// Helper function: truncate given value-"overflowed flag" pair to pointer size and
-    /// update "overflowed flag" if there was an overflow.
-    /// This should be called by all the other methods before returning!
-    #[inline]
-    fn truncate_to_ptr(&self, (val, over): (u64, bool)) -> (u64, bool) {
-        let val = u128::from(val);
-        let max_ptr_plus_1 = 1u128 << self.pointer_size().bits();
-        (u64::try_from(val % max_ptr_plus_1).unwrap(), over || val >= max_ptr_plus_1)
+    fn truncate_to_target_usize(&self, val: u64) -> u64 {
+        self.pointer_size().truncate(val.into()).try_into().unwrap()
     }
 
     #[inline]
-    fn overflowing_offset(&self, val: u64, i: u64) -> (u64, bool) {
-        // We do not need to check if i fits in a machine usize. If it doesn't,
-        // either the wrapping_add will wrap or res will not fit in a pointer.
-        let res = val.overflowing_add(i);
-        self.truncate_to_ptr(res)
-    }
-
-    #[inline]
-    fn overflowing_signed_offset(&self, val: u64, i: i64) -> (u64, bool) {
-        // We need to make sure that i fits in a machine isize.
-        let n = i.unsigned_abs();
-        if i >= 0 {
-            let (val, over) = self.overflowing_offset(val, n);
-            (val, over || i > self.target_isize_max())
-        } else {
-            let res = val.overflowing_sub(n);
-            let (val, over) = self.truncate_to_ptr(res);
-            (val, over || i < self.target_isize_min())
-        }
-    }
-
-    #[inline]
-    fn offset<'tcx>(&self, val: u64, i: u64) -> InterpResult<'tcx, u64> {
-        let (res, over) = self.overflowing_offset(val, i);
-        if over { throw_ub!(PointerArithOverflow) } else { Ok(res) }
-    }
-
-    #[inline]
-    fn signed_offset<'tcx>(&self, val: u64, i: i64) -> InterpResult<'tcx, u64> {
-        let (res, over) = self.overflowing_signed_offset(val, i);
-        if over { throw_ub!(PointerArithOverflow) } else { Ok(res) }
+    fn sign_extend_to_target_isize(&self, val: u64) -> i64 {
+        self.pointer_size().sign_extend(val.into()).try_into().unwrap()
     }
 }
 
@@ -114,6 +66,9 @@ pub trait Provenance: Copy + fmt::Debug + 'static {
     ///   pointer, and implement ptr-to-int transmutation by stripping provenance.
     const OFFSET_IS_ADDR: bool;
 
+    /// If wildcard provenance is implemented, contains the unique, general wildcard provenance variant.
+    const WILDCARD: Option<Self>;
+
     /// Determines how a pointer should be printed.
     fn fmt(ptr: &Pointer<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 
@@ -128,14 +83,23 @@ pub trait Provenance: Copy + fmt::Debug + 'static {
 }
 
 /// The type of provenance in the compile-time interpreter.
-/// This is a packed representation of an `AllocId` and an `immutable: bool`.
+/// This is a packed representation of:
+/// - an `AllocId` (non-zero)
+/// - an `immutable: bool`
+/// - a `shared_ref: bool`
+///
+/// with the extra invariant that if `immutable` is `true`, then so
+/// is `shared_ref`.
 #[derive(Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CtfeProvenance(NonZero<u64>);
 
 impl From<AllocId> for CtfeProvenance {
     fn from(value: AllocId) -> Self {
         let prov = CtfeProvenance(value.0);
-        assert!(!prov.immutable(), "`AllocId` with the highest bit set cannot be used in CTFE");
+        assert!(
+            prov.alloc_id() == value,
+            "`AllocId` with the highest bits set cannot be used in CTFE"
+        );
         prov
     }
 }
@@ -151,12 +115,14 @@ impl fmt::Debug for CtfeProvenance {
 }
 
 const IMMUTABLE_MASK: u64 = 1 << 63; // the highest bit
+const SHARED_REF_MASK: u64 = 1 << 62;
+const ALLOC_ID_MASK: u64 = u64::MAX & !IMMUTABLE_MASK & !SHARED_REF_MASK;
 
 impl CtfeProvenance {
     /// Returns the `AllocId` of this provenance.
     #[inline(always)]
     pub fn alloc_id(self) -> AllocId {
-        AllocId(NonZero::new(self.0.get() & !IMMUTABLE_MASK).unwrap())
+        AllocId(NonZero::new(self.0.get() & ALLOC_ID_MASK).unwrap())
     }
 
     /// Returns whether this provenance is immutable.
@@ -165,10 +131,38 @@ impl CtfeProvenance {
         self.0.get() & IMMUTABLE_MASK != 0
     }
 
+    /// Returns whether this provenance is derived from a shared reference.
+    #[inline]
+    pub fn shared_ref(self) -> bool {
+        self.0.get() & SHARED_REF_MASK != 0
+    }
+
+    pub fn into_parts(self) -> (AllocId, bool, bool) {
+        (self.alloc_id(), self.immutable(), self.shared_ref())
+    }
+
+    pub fn from_parts((alloc_id, immutable, shared_ref): (AllocId, bool, bool)) -> Self {
+        let prov = CtfeProvenance::from(alloc_id);
+        if immutable {
+            // This sets both flags, so we don't even have to check `shared_ref`.
+            prov.as_immutable()
+        } else if shared_ref {
+            prov.as_shared_ref()
+        } else {
+            prov
+        }
+    }
+
     /// Returns an immutable version of this provenance.
     #[inline]
     pub fn as_immutable(self) -> Self {
-        CtfeProvenance(self.0 | IMMUTABLE_MASK)
+        CtfeProvenance(self.0 | IMMUTABLE_MASK | SHARED_REF_MASK)
+    }
+
+    /// Returns a "shared reference" (but not necessarily immutable!) version of this provenance.
+    #[inline]
+    pub fn as_shared_ref(self) -> Self {
+        CtfeProvenance(self.0 | SHARED_REF_MASK)
     }
 }
 
@@ -176,6 +170,9 @@ impl Provenance for CtfeProvenance {
     // With the `AllocId` as provenance, the `offset` is interpreted *relative to the allocation*,
     // so ptr-to-int casts are not possible (since we do not know the global physical offset).
     const OFFSET_IS_ADDR: bool = false;
+
+    // `CtfeProvenance` does not implement wildcard provenance.
+    const WILDCARD: Option<Self> = None;
 
     fn fmt(ptr: &Pointer<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Print AllocId.
@@ -205,6 +202,9 @@ impl Provenance for AllocId {
     // With the `AllocId` as provenance, the `offset` is interpreted *relative to the allocation*,
     // so ptr-to-int casts are not possible (since we do not know the global physical offset).
     const OFFSET_IS_ADDR: bool = false;
+
+    // `AllocId` does not implement wildcard provenance.
+    const WILDCARD: Option<Self> = None;
 
     fn fmt(ptr: &Pointer<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Forward `alternate` flag to `alloc_id` printing.
@@ -330,7 +330,7 @@ impl<Prov> Pointer<Option<Prov>> {
     }
 }
 
-impl<'tcx, Prov> Pointer<Prov> {
+impl<Prov> Pointer<Prov> {
     #[inline(always)]
     pub fn new(provenance: Prov, offset: Size) -> Self {
         Pointer { provenance, offset }
@@ -348,43 +348,16 @@ impl<'tcx, Prov> Pointer<Prov> {
         Pointer { provenance: f(self.provenance), ..self }
     }
 
-    #[inline]
-    pub fn offset(self, i: Size, cx: &impl HasDataLayout) -> InterpResult<'tcx, Self> {
-        Ok(Pointer {
-            offset: Size::from_bytes(cx.data_layout().offset(self.offset.bytes(), i.bytes())?),
-            ..self
-        })
-    }
-
-    #[inline]
-    pub fn overflowing_offset(self, i: Size, cx: &impl HasDataLayout) -> (Self, bool) {
-        let (res, over) = cx.data_layout().overflowing_offset(self.offset.bytes(), i.bytes());
-        let ptr = Pointer { offset: Size::from_bytes(res), ..self };
-        (ptr, over)
-    }
-
     #[inline(always)]
     pub fn wrapping_offset(self, i: Size, cx: &impl HasDataLayout) -> Self {
-        self.overflowing_offset(i, cx).0
-    }
-
-    #[inline]
-    pub fn signed_offset(self, i: i64, cx: &impl HasDataLayout) -> InterpResult<'tcx, Self> {
-        Ok(Pointer {
-            offset: Size::from_bytes(cx.data_layout().signed_offset(self.offset.bytes(), i)?),
-            ..self
-        })
-    }
-
-    #[inline]
-    pub fn overflowing_signed_offset(self, i: i64, cx: &impl HasDataLayout) -> (Self, bool) {
-        let (res, over) = cx.data_layout().overflowing_signed_offset(self.offset.bytes(), i);
-        let ptr = Pointer { offset: Size::from_bytes(res), ..self };
-        (ptr, over)
+        let res =
+            cx.data_layout().truncate_to_target_usize(self.offset.bytes().wrapping_add(i.bytes()));
+        Pointer { offset: Size::from_bytes(res), ..self }
     }
 
     #[inline(always)]
     pub fn wrapping_signed_offset(self, i: i64, cx: &impl HasDataLayout) -> Self {
-        self.overflowing_signed_offset(i, cx).0
+        // It's wrapping anyway, so we can just cast to `u64`.
+        self.wrapping_offset(Size::from_bytes(i as u64), cx)
     }
 }

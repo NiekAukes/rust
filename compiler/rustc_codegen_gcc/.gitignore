@@ -6,10 +6,6 @@ perf.data
 perf.data.old
 *.events
 *.string*
-/build_sysroot/sysroot
-/build_sysroot/sysroot_src
-/build_sysroot/Cargo.lock
-/build_sysroot/test_target/Cargo.lock
 gimple*
 *asm
 res
@@ -24,3 +20,4 @@ llvm
 build_system/target
 config.toml
 build
+rustlantis

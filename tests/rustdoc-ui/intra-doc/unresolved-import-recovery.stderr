@@ -1,10 +1,13 @@
-error[E0433]: failed to resolve: maybe a missing crate `unresolved_crate`?
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `unresolved_crate`
   --> $DIR/unresolved-import-recovery.rs:3:5
    |
 LL | use unresolved_crate::module::Name;
-   |     ^^^^^^^^^^^^^^^^ maybe a missing crate `unresolved_crate`?
+   |     ^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `unresolved_crate`
    |
-   = help: consider adding `extern crate unresolved_crate` to use the `unresolved_crate` crate
+help: you might be missing a crate named `unresolved_crate`, add it to your project and import it in your code
+   |
+LL + extern crate unresolved_crate;
+   |
 
 error: aborting due to 1 previous error
 

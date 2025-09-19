@@ -1,10 +1,9 @@
 #[cfg(test)]
 mod tests;
 
-use crate::io::prelude::*;
-
 use crate::alloc::Allocator;
 use crate::cmp;
+use crate::io::prelude::*;
 use crate::io::{self, BorrowedCursor, ErrorKind, IoSlice, IoSliceMut, SeekFrom};
 
 /// A `Cursor` wraps an in-memory buffer and provides it with a
@@ -154,7 +153,8 @@ impl<T> Cursor<T> {
     /// let reference = buff.get_mut();
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn get_mut(&mut self) -> &mut T {
+    #[rustc_const_stable(feature = "const_mut_cursor", since = "1.86.0")]
+    pub const fn get_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 
@@ -201,7 +201,8 @@ impl<T> Cursor<T> {
     /// assert_eq!(buff.position(), 4);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn set_position(&mut self, pos: u64) {
+    #[rustc_const_stable(feature = "const_mut_cursor", since = "1.86.0")]
+    pub const fn set_position(&mut self, pos: u64) {
         self.pos = pos;
     }
 }
@@ -210,55 +211,60 @@ impl<T> Cursor<T>
 where
     T: AsRef<[u8]>,
 {
-    /// Returns the remaining slice.
+    /// Splits the underlying slice at the cursor position and returns them.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(cursor_remaining)]
+    /// #![feature(cursor_split)]
     /// use std::io::Cursor;
     ///
     /// let mut buff = Cursor::new(vec![1, 2, 3, 4, 5]);
     ///
-    /// assert_eq!(buff.remaining_slice(), &[1, 2, 3, 4, 5]);
+    /// assert_eq!(buff.split(), ([].as_slice(), [1, 2, 3, 4, 5].as_slice()));
     ///
     /// buff.set_position(2);
-    /// assert_eq!(buff.remaining_slice(), &[3, 4, 5]);
-    ///
-    /// buff.set_position(4);
-    /// assert_eq!(buff.remaining_slice(), &[5]);
+    /// assert_eq!(buff.split(), ([1, 2].as_slice(), [3, 4, 5].as_slice()));
     ///
     /// buff.set_position(6);
-    /// assert_eq!(buff.remaining_slice(), &[]);
+    /// assert_eq!(buff.split(), ([1, 2, 3, 4, 5].as_slice(), [].as_slice()));
     /// ```
-    #[unstable(feature = "cursor_remaining", issue = "86369")]
-    pub fn remaining_slice(&self) -> &[u8] {
-        let len = self.pos.min(self.inner.as_ref().len() as u64);
-        &self.inner.as_ref()[(len as usize)..]
+    #[unstable(feature = "cursor_split", issue = "86369")]
+    pub fn split(&self) -> (&[u8], &[u8]) {
+        let slice = self.inner.as_ref();
+        let pos = self.pos.min(slice.len() as u64);
+        slice.split_at(pos as usize)
     }
+}
 
-    /// Returns `true` if the remaining slice is empty.
+impl<T> Cursor<T>
+where
+    T: AsMut<[u8]>,
+{
+    /// Splits the underlying slice at the cursor position and returns them
+    /// mutably.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(cursor_remaining)]
+    /// #![feature(cursor_split)]
     /// use std::io::Cursor;
     ///
     /// let mut buff = Cursor::new(vec![1, 2, 3, 4, 5]);
     ///
+    /// assert_eq!(buff.split_mut(), ([].as_mut_slice(), [1, 2, 3, 4, 5].as_mut_slice()));
+    ///
     /// buff.set_position(2);
-    /// assert!(!buff.is_empty());
+    /// assert_eq!(buff.split_mut(), ([1, 2].as_mut_slice(), [3, 4, 5].as_mut_slice()));
     ///
-    /// buff.set_position(5);
-    /// assert!(buff.is_empty());
-    ///
-    /// buff.set_position(10);
-    /// assert!(buff.is_empty());
+    /// buff.set_position(6);
+    /// assert_eq!(buff.split_mut(), ([1, 2, 3, 4, 5].as_mut_slice(), [].as_mut_slice()));
     /// ```
-    #[unstable(feature = "cursor_remaining", issue = "86369")]
-    pub fn is_empty(&self) -> bool {
-        self.pos >= self.inner.as_ref().len() as u64
+    #[unstable(feature = "cursor_split", issue = "86369")]
+    pub fn split_mut(&mut self) -> (&mut [u8], &mut [u8]) {
+        let slice = self.inner.as_mut();
+        let pos = self.pos.min(slice.len() as u64);
+        slice.split_at_mut(pos as usize)
     }
 }
 
@@ -298,7 +304,7 @@ where
                 self.pos = n;
                 Ok(self.pos)
             }
-            None => Err(io::const_io_error!(
+            None => Err(io::const_error!(
                 ErrorKind::InvalidInput,
                 "invalid seek to a negative or overflowing position",
             )),
@@ -320,7 +326,7 @@ where
     T: AsRef<[u8]>,
 {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = Read::read(&mut self.remaining_slice(), buf)?;
+        let n = Read::read(&mut Cursor::split(self).1, buf)?;
         self.pos += n as u64;
         Ok(n)
     }
@@ -328,7 +334,7 @@ where
     fn read_buf(&mut self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
         let prev_written = cursor.written();
 
-        Read::read_buf(&mut self.fill_buf()?, cursor.reborrow())?;
+        Read::read_buf(&mut Cursor::split(self).1, cursor.reborrow())?;
 
         self.pos += (cursor.written() - prev_written) as u64;
 
@@ -352,21 +358,28 @@ where
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        let n = buf.len();
-        Read::read_exact(&mut self.remaining_slice(), buf)?;
-        self.pos += n as u64;
-        Ok(())
+        let result = Read::read_exact(&mut Cursor::split(self).1, buf);
+
+        match result {
+            Ok(_) => self.pos += buf.len() as u64,
+            // The only possible error condition is EOF, so place the cursor at "EOF"
+            Err(_) => self.pos = self.inner.as_ref().len() as u64,
+        }
+
+        result
     }
 
-    fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
-        let n = cursor.capacity();
-        Read::read_buf_exact(&mut self.remaining_slice(), cursor)?;
-        self.pos += n as u64;
-        Ok(())
+    fn read_buf_exact(&mut self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        let prev_written = cursor.written();
+
+        let result = Read::read_buf_exact(&mut Cursor::split(self).1, cursor.reborrow());
+        self.pos += (cursor.written() - prev_written) as u64;
+
+        result
     }
 
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let content = self.remaining_slice();
+        let content = Cursor::split(self).1;
         let len = content.len();
         buf.try_reserve(len)?;
         buf.extend_from_slice(content);
@@ -377,7 +390,7 @@ where
 
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
         let content =
-            crate::str::from_utf8(self.remaining_slice()).map_err(|_| io::Error::INVALID_UTF8)?;
+            crate::str::from_utf8(Cursor::split(self).1).map_err(|_| io::Error::INVALID_UTF8)?;
         let len = content.len();
         buf.try_reserve(len)?;
         buf.push_str(content);
@@ -393,7 +406,7 @@ where
     T: AsRef<[u8]>,
 {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        Ok(self.remaining_slice())
+        Ok(Cursor::split(self).1)
     }
     fn consume(&mut self, amt: usize) {
         self.pos += amt as u64;
@@ -426,6 +439,27 @@ fn slice_write_vectored(
     Ok(nwritten)
 }
 
+#[inline]
+fn slice_write_all(pos_mut: &mut u64, slice: &mut [u8], buf: &[u8]) -> io::Result<()> {
+    let n = slice_write(pos_mut, slice, buf)?;
+    if n < buf.len() { Err(io::Error::WRITE_ALL_EOF) } else { Ok(()) }
+}
+
+#[inline]
+fn slice_write_all_vectored(
+    pos_mut: &mut u64,
+    slice: &mut [u8],
+    bufs: &[IoSlice<'_>],
+) -> io::Result<()> {
+    for buf in bufs {
+        let n = slice_write(pos_mut, slice, buf)?;
+        if n < buf.len() {
+            return Err(io::Error::WRITE_ALL_EOF);
+        }
+    }
+    Ok(())
+}
+
 /// Reserves the required space, and pads the vec with 0s if necessary.
 fn reserve_and_pad<A: Allocator>(
     pos_mut: &mut u64,
@@ -433,7 +467,7 @@ fn reserve_and_pad<A: Allocator>(
     buf_len: usize,
 ) -> io::Result<usize> {
     let pos: usize = (*pos_mut).try_into().map_err(|_| {
-        io::const_io_error!(
+        io::const_error!(
             ErrorKind::InvalidInput,
             "cursor position exceeds maximum possible vector length",
         )
@@ -468,18 +502,21 @@ fn reserve_and_pad<A: Allocator>(
     Ok(pos)
 }
 
-/// Writes the slice to the vec without allocating
-/// # Safety: vec must have buf.len() spare capacity
-unsafe fn vec_write_unchecked<A>(pos: usize, vec: &mut Vec<u8, A>, buf: &[u8]) -> usize
+/// Writes the slice to the vec without allocating.
+///
+/// # Safety
+///
+/// `vec` must have `buf.len()` spare capacity.
+unsafe fn vec_write_all_unchecked<A>(pos: usize, vec: &mut Vec<u8, A>, buf: &[u8]) -> usize
 where
     A: Allocator,
 {
     debug_assert!(vec.capacity() >= pos + buf.len());
-    vec.as_mut_ptr().add(pos).copy_from(buf.as_ptr(), buf.len());
+    unsafe { vec.as_mut_ptr().add(pos).copy_from(buf.as_ptr(), buf.len()) };
     pos + buf.len()
 }
 
-/// Resizing write implementation for [`Cursor`]
+/// Resizing `write_all` implementation for [`Cursor`].
 ///
 /// Cursor is allowed to have a pre-allocated and initialised
 /// vector body, but with a position of 0. This means the [`Write`]
@@ -488,7 +525,7 @@ where
 /// This also allows for the vec body to be empty, but with a position of N.
 /// This means that [`Write`] will pad the vec with 0 initially,
 /// before writing anything from that point
-fn vec_write<A>(pos_mut: &mut u64, vec: &mut Vec<u8, A>, buf: &[u8]) -> io::Result<usize>
+fn vec_write_all<A>(pos_mut: &mut u64, vec: &mut Vec<u8, A>, buf: &[u8]) -> io::Result<usize>
 where
     A: Allocator,
 {
@@ -499,7 +536,7 @@ where
     // Safety: we have ensured that the capacity is available
     // and that all bytes get written up to pos
     unsafe {
-        pos = vec_write_unchecked(pos, vec, buf);
+        pos = vec_write_all_unchecked(pos, vec, buf);
         if pos > vec.len() {
             vec.set_len(pos);
         }
@@ -510,7 +547,7 @@ where
     Ok(buf_len)
 }
 
-/// Resizing write_vectored implementation for [`Cursor`]
+/// Resizing `write_all_vectored` implementation for [`Cursor`].
 ///
 /// Cursor is allowed to have a pre-allocated and initialised
 /// vector body, but with a position of 0. This means the [`Write`]
@@ -519,7 +556,7 @@ where
 /// This also allows for the vec body to be empty, but with a position of N.
 /// This means that [`Write`] will pad the vec with 0 initially,
 /// before writing anything from that point
-fn vec_write_vectored<A>(
+fn vec_write_all_vectored<A>(
     pos_mut: &mut u64,
     vec: &mut Vec<u8, A>,
     bufs: &[IoSlice<'_>],
@@ -537,7 +574,7 @@ where
     // and that all bytes get written up to the last pos
     unsafe {
         for buf in bufs {
-            pos = vec_write_unchecked(pos, vec, buf);
+            pos = vec_write_all_unchecked(pos, vec, buf);
         }
         if pos > vec.len() {
             vec.set_len(pos);
@@ -567,6 +604,16 @@ impl Write for Cursor<&mut [u8]> {
     }
 
     #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        slice_write_all(&mut self.pos, self.inner, buf)
+    }
+
+    #[inline]
+    fn write_all_vectored(&mut self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        slice_write_all_vectored(&mut self.pos, self.inner, bufs)
+    }
+
+    #[inline]
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -578,16 +625,26 @@ where
     A: Allocator,
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        vec_write(&mut self.pos, self.inner, buf)
+        vec_write_all(&mut self.pos, self.inner, buf)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        vec_write_vectored(&mut self.pos, self.inner, bufs)
+        vec_write_all_vectored(&mut self.pos, self.inner, bufs)
     }
 
     #[inline]
     fn is_write_vectored(&self) -> bool {
         true
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        vec_write_all(&mut self.pos, self.inner, buf)?;
+        Ok(())
+    }
+
+    fn write_all_vectored(&mut self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        vec_write_all_vectored(&mut self.pos, self.inner, bufs)?;
+        Ok(())
     }
 
     #[inline]
@@ -602,16 +659,26 @@ where
     A: Allocator,
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        vec_write(&mut self.pos, &mut self.inner, buf)
+        vec_write_all(&mut self.pos, &mut self.inner, buf)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        vec_write_vectored(&mut self.pos, &mut self.inner, bufs)
+        vec_write_all_vectored(&mut self.pos, &mut self.inner, bufs)
     }
 
     #[inline]
     fn is_write_vectored(&self) -> bool {
         true
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        vec_write_all(&mut self.pos, &mut self.inner, buf)?;
+        Ok(())
+    }
+
+    fn write_all_vectored(&mut self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        vec_write_all_vectored(&mut self.pos, &mut self.inner, bufs)?;
+        Ok(())
     }
 
     #[inline]
@@ -641,6 +708,16 @@ where
     }
 
     #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        slice_write_all(&mut self.pos, &mut self.inner, buf)
+    }
+
+    #[inline]
+    fn write_all_vectored(&mut self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        slice_write_all_vectored(&mut self.pos, &mut self.inner, bufs)
+    }
+
+    #[inline]
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -661,6 +738,16 @@ impl<const N: usize> Write for Cursor<[u8; N]> {
     #[inline]
     fn is_write_vectored(&self) -> bool {
         true
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        slice_write_all(&mut self.pos, &mut self.inner, buf)
+    }
+
+    #[inline]
+    fn write_all_vectored(&mut self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        slice_write_all_vectored(&mut self.pos, &mut self.inner, bufs)
     }
 
     #[inline]

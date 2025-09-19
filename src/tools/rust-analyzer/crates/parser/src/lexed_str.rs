@@ -10,9 +10,12 @@
 
 use std::ops;
 
-use rustc_lexer::unescape::{EscapeError, Mode};
+use rustc_literal_escaper::{
+    EscapeError, Mode, unescape_byte, unescape_char, unescape_mixed, unescape_unicode,
+};
 
 use crate::{
+    Edition,
     SyntaxKind::{self, *},
     T,
 };
@@ -30,15 +33,17 @@ struct LexError {
 }
 
 impl<'a> LexedStr<'a> {
-    pub fn new(text: &'a str) -> LexedStr<'a> {
-        let _p = tracing::span!(tracing::Level::INFO, "LexedStr::new").entered();
-        let mut conv = Converter::new(text);
+    pub fn new(edition: Edition, text: &'a str) -> LexedStr<'a> {
+        let _p = tracing::info_span!("LexedStr::new").entered();
+        let mut conv = Converter::new(edition, text);
         if let Some(shebang_len) = rustc_lexer::strip_shebang(text) {
             conv.res.push(SHEBANG, conv.offset);
             conv.offset = shebang_len;
         };
 
-        for token in rustc_lexer::tokenize(&text[conv.offset..]) {
+        // Re-create the tokenizer from scratch every token because `GuardedStrPrefix` is one token in the lexer
+        // but we want to split it to two in edition <2024.
+        while let Some(token) = rustc_lexer::tokenize(&text[conv.offset..]).next() {
             let token_text = &text[conv.offset..][..token.len as usize];
 
             conv.extend_token(&token.kind, token_text);
@@ -47,7 +52,7 @@ impl<'a> LexedStr<'a> {
         conv.finalize_with_eof()
     }
 
-    pub fn single_token(text: &'a str) -> Option<(SyntaxKind, Option<String>)> {
+    pub fn single_token(edition: Edition, text: &'a str) -> Option<(SyntaxKind, Option<String>)> {
         if text.is_empty() {
             return None;
         }
@@ -57,7 +62,7 @@ impl<'a> LexedStr<'a> {
             return None;
         }
 
-        let mut conv = Converter::new(text);
+        let mut conv = Converter::new(edition, text);
         conv.extend_token(&token.kind, text);
         match &*conv.res.kind {
             [kind] => Some((*kind, conv.res.error.pop().map(|it| it.msg))),
@@ -129,13 +134,15 @@ impl<'a> LexedStr<'a> {
 struct Converter<'a> {
     res: LexedStr<'a>,
     offset: usize,
+    edition: Edition,
 }
 
 impl<'a> Converter<'a> {
-    fn new(text: &'a str) -> Self {
+    fn new(edition: Edition, text: &'a str) -> Self {
         Self {
             res: LexedStr { text, kind: Vec::new(), start: Vec::new(), error: Vec::new() },
             offset: 0,
+            edition,
         }
     }
 
@@ -155,7 +162,7 @@ impl<'a> Converter<'a> {
         }
     }
 
-    fn extend_token(&mut self, kind: &rustc_lexer::TokenKind, token_text: &str) {
+    fn extend_token(&mut self, kind: &rustc_lexer::TokenKind, mut token_text: &str) {
         // A note on an intended tradeoff:
         // We drop some useful information here (see patterns with double dots `..`)
         // Storing that info in `SyntaxKind` is not possible due to its layout requirements of
@@ -172,18 +179,42 @@ impl<'a> Converter<'a> {
                     COMMENT
                 }
 
+                rustc_lexer::TokenKind::Frontmatter {
+                    has_invalid_preceding_whitespace,
+                    invalid_infostring,
+                } => {
+                    if *has_invalid_preceding_whitespace {
+                        err = "invalid preceding whitespace for frontmatter opening"
+                    } else if *invalid_infostring {
+                        err = "invalid infostring for frontmatter"
+                    }
+                    FRONTMATTER
+                }
+
                 rustc_lexer::TokenKind::Whitespace => WHITESPACE,
 
                 rustc_lexer::TokenKind::Ident if token_text == "_" => UNDERSCORE,
                 rustc_lexer::TokenKind::Ident => {
-                    SyntaxKind::from_keyword(token_text).unwrap_or(IDENT)
+                    SyntaxKind::from_keyword(token_text, self.edition).unwrap_or(IDENT)
                 }
-                rustc_lexer::TokenKind::InvalidPrefix | rustc_lexer::TokenKind::InvalidIdent => {
+                rustc_lexer::TokenKind::InvalidIdent => {
                     err = "Ident contains invalid characters";
                     IDENT
                 }
 
                 rustc_lexer::TokenKind::RawIdent => IDENT,
+
+                rustc_lexer::TokenKind::GuardedStrPrefix if self.edition.at_least_2024() => {
+                    // FIXME: rustc does something better for recovery.
+                    err = "Invalid string literal (reserved syntax)";
+                    ERROR
+                }
+                rustc_lexer::TokenKind::GuardedStrPrefix => {
+                    // The token is `#"` or `##`, split it into two.
+                    token_text = &token_text[1..];
+                    POUND
+                }
+
                 rustc_lexer::TokenKind::Literal { kind, .. } => {
                     self.extend_literal(token_text.len(), kind);
                     return;
@@ -195,6 +226,11 @@ impl<'a> Converter<'a> {
                     }
                     LIFETIME_IDENT
                 }
+                rustc_lexer::TokenKind::UnknownPrefixLifetime => {
+                    err = "Unknown lifetime prefix";
+                    LIFETIME_IDENT
+                }
+                rustc_lexer::TokenKind::RawLifetime => LIFETIME_IDENT,
 
                 rustc_lexer::TokenKind::Semi => T![;],
                 rustc_lexer::TokenKind::Comma => T![,],
@@ -260,7 +296,7 @@ impl<'a> Converter<'a> {
                     let text = &self.res.text[self.offset + 1..][..len - 1];
                     let i = text.rfind('\'').unwrap();
                     let text = &text[..i];
-                    if let Err(e) = rustc_lexer::unescape::unescape_char(text) {
+                    if let Err(e) = unescape_char(text) {
                         err = error_to_diagnostic_message(e, Mode::Char);
                     }
                 }
@@ -273,7 +309,7 @@ impl<'a> Converter<'a> {
                     let text = &self.res.text[self.offset + 2..][..len - 2];
                     let i = text.rfind('\'').unwrap();
                     let text = &text[..i];
-                    if let Err(e) = rustc_lexer::unescape::unescape_byte(text) {
+                    if let Err(e) = unescape_byte(text) {
                         err = error_to_diagnostic_message(e, Mode::Byte);
                     }
                 }
@@ -380,14 +416,14 @@ fn unescape_string_error_message(text: &str, mode: Mode) -> &'static str {
     let mut error_message = "";
     match mode {
         Mode::CStr => {
-            rustc_lexer::unescape::unescape_mixed(text, mode, &mut |_, res| {
+            unescape_mixed(text, mode, &mut |_, res| {
                 if let Err(e) = res {
                     error_message = error_to_diagnostic_message(e, mode);
                 }
             });
         }
         Mode::ByteStr | Mode::Str => {
-            rustc_lexer::unescape::unescape_unicode(text, mode, &mut |_, res| {
+            unescape_unicode(text, mode, &mut |_, res| {
                 if let Err(e) = res {
                     error_message = error_to_diagnostic_message(e, mode);
                 }

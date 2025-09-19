@@ -1,7 +1,7 @@
 //! Decodes a floating-point value into individual parts and error ranges.
 
-use crate::num::dec2flt::float::RawFloat;
 use crate::num::FpCategory;
+use crate::num::dec2flt::float::RawFloat;
 
 /// Decoded unsigned finite value, such that:
 ///
@@ -43,6 +43,13 @@ pub enum FullDecoded {
 pub trait DecodableFloat: RawFloat + Copy {
     /// The minimum positive normalized value.
     fn min_pos_norm_value() -> Self;
+}
+
+#[cfg(target_has_reliable_f16)]
+impl DecodableFloat for f16 {
+    fn min_pos_norm_value() -> Self {
+        f16::MIN_POSITIVE
+    }
 }
 
 impl DecodableFloat for f32 {

@@ -1,10 +1,16 @@
-use crate::interpret::{self, HasStaticRootDefId, ImmTy, Immediate, InterpCx, PointerArithmetic};
 use rustc_middle::mir::interpret::{AllocId, ConstAllocation, InterpResult};
 use rustc_middle::mir::*;
 use rustc_middle::query::TyCtxtAt;
-use rustc_middle::ty;
+use rustc_middle::ty::Ty;
 use rustc_middle::ty::layout::TyAndLayout;
+use rustc_middle::{bug, span_bug, ty};
 use rustc_span::def_id::DefId;
+use rustc_target::callconv::FnAbi;
+
+use crate::interpret::{
+    self, HasStaticRootDefId, ImmTy, Immediate, InterpCx, PointerArithmetic, interp_ok,
+    throw_machine_stop,
+};
 
 /// Macro for machine-specific `InterpError` without allocation.
 /// (These will never be shown to the user, but they help diagnose ICEs.)
@@ -41,8 +47,8 @@ impl HasStaticRootDefId for DummyMachine {
     }
 }
 
-impl<'mir, 'tcx: 'mir> interpret::Machine<'mir, 'tcx> for DummyMachine {
-    interpret::compile_time_machine!(<'mir, 'tcx>);
+impl<'tcx> interpret::Machine<'tcx> for DummyMachine {
+    interpret::compile_time_machine!(<'tcx>);
     type MemoryKind = !;
     const PANIC_ON_ALLOC_FAIL: bool = true;
 
@@ -50,11 +56,11 @@ impl<'mir, 'tcx: 'mir> interpret::Machine<'mir, 'tcx> for DummyMachine {
     const ALL_CONSTS_ARE_PRECHECKED: bool = false;
 
     #[inline(always)]
-    fn enforce_alignment(_ecx: &InterpCx<'mir, 'tcx, Self>) -> bool {
+    fn enforce_alignment(_ecx: &InterpCx<'tcx, Self>) -> bool {
         false // no reason to enforce alignment
     }
 
-    fn enforce_validity(_ecx: &InterpCx<'mir, 'tcx, Self>, _layout: TyAndLayout<'tcx>) -> bool {
+    fn enforce_validity(_ecx: &InterpCx<'tcx, Self>, _layout: TyAndLayout<'tcx>) -> bool {
         false
     }
 
@@ -76,33 +82,33 @@ impl<'mir, 'tcx: 'mir> interpret::Machine<'mir, 'tcx> for DummyMachine {
             throw_machine_stop_str!("can't access mutable globals in ConstProp");
         }
 
-        Ok(())
+        interp_ok(())
     }
 
     fn find_mir_or_eval_fn(
-        _ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        _ecx: &mut InterpCx<'tcx, Self>,
         _instance: ty::Instance<'tcx>,
-        _abi: rustc_target::spec::abi::Abi,
+        _abi: &FnAbi<'tcx, Ty<'tcx>>,
         _args: &[interpret::FnArg<'tcx, Self::Provenance>],
-        _destination: &interpret::MPlaceTy<'tcx, Self::Provenance>,
+        _destination: &interpret::PlaceTy<'tcx, Self::Provenance>,
         _target: Option<BasicBlock>,
         _unwind: UnwindAction,
-    ) -> interpret::InterpResult<'tcx, Option<(&'mir Body<'tcx>, ty::Instance<'tcx>)>> {
+    ) -> interpret::InterpResult<'tcx, Option<(&'tcx Body<'tcx>, ty::Instance<'tcx>)>> {
         unimplemented!()
     }
 
     fn panic_nounwind(
-        _ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        _ecx: &mut InterpCx<'tcx, Self>,
         _msg: &str,
     ) -> interpret::InterpResult<'tcx> {
         unimplemented!()
     }
 
     fn call_intrinsic(
-        _ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        _ecx: &mut InterpCx<'tcx, Self>,
         _instance: ty::Instance<'tcx>,
         _args: &[interpret::OpTy<'tcx, Self::Provenance>],
-        _destination: &interpret::MPlaceTy<'tcx, Self::Provenance>,
+        _destination: &interpret::PlaceTy<'tcx, Self::Provenance>,
         _target: Option<BasicBlock>,
         _unwind: UnwindAction,
     ) -> interpret::InterpResult<'tcx, Option<ty::Instance<'tcx>>> {
@@ -110,7 +116,7 @@ impl<'mir, 'tcx: 'mir> interpret::Machine<'mir, 'tcx> for DummyMachine {
     }
 
     fn assert_panic(
-        _ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        _ecx: &mut InterpCx<'tcx, Self>,
         _msg: &rustc_middle::mir::AssertMessage<'tcx>,
         _unwind: UnwindAction,
     ) -> interpret::InterpResult<'tcx> {
@@ -118,16 +124,16 @@ impl<'mir, 'tcx: 'mir> interpret::Machine<'mir, 'tcx> for DummyMachine {
     }
 
     fn binary_ptr_op(
-        ecx: &InterpCx<'mir, 'tcx, Self>,
+        ecx: &InterpCx<'tcx, Self>,
         bin_op: BinOp,
         left: &interpret::ImmTy<'tcx, Self::Provenance>,
         right: &interpret::ImmTy<'tcx, Self::Provenance>,
-    ) -> interpret::InterpResult<'tcx, (ImmTy<'tcx, Self::Provenance>, bool)> {
+    ) -> interpret::InterpResult<'tcx, ImmTy<'tcx, Self::Provenance>> {
         use rustc_middle::mir::BinOp::*;
-        Ok(match bin_op {
+        interp_ok(match bin_op {
             Eq | Ne | Lt | Le | Gt | Ge => {
                 // Types can differ, e.g. fn ptrs with different `for`.
-                assert_eq!(left.layout.abi, right.layout.abi);
+                assert_eq!(left.layout.backend_repr, right.layout.backend_repr);
                 let size = ecx.pointer_size();
                 // Just compare the bits. ScalarPairs are compared lexicographically.
                 // We thus always compare pairs and simply fill scalars up with 0.
@@ -151,7 +157,7 @@ impl<'mir, 'tcx: 'mir> interpret::Machine<'mir, 'tcx> for DummyMachine {
                     Ge => left >= right,
                     _ => bug!(),
                 };
-                (ImmTy::from_bool(res, *ecx.tcx), false)
+                ImmTy::from_bool(res, *ecx.tcx)
             }
 
             // Some more operations are possible with atomics.
@@ -164,33 +170,36 @@ impl<'mir, 'tcx: 'mir> interpret::Machine<'mir, 'tcx> for DummyMachine {
         })
     }
 
-    fn expose_ptr(
-        _ecx: &mut InterpCx<'mir, 'tcx, Self>,
-        _ptr: interpret::Pointer<Self::Provenance>,
+    fn expose_provenance(
+        _ecx: &InterpCx<'tcx, Self>,
+        _provenance: Self::Provenance,
     ) -> interpret::InterpResult<'tcx> {
         unimplemented!()
     }
 
-    fn init_frame_extra(
-        _ecx: &mut InterpCx<'mir, 'tcx, Self>,
-        _frame: interpret::Frame<'mir, 'tcx, Self::Provenance>,
-    ) -> interpret::InterpResult<
-        'tcx,
-        interpret::Frame<'mir, 'tcx, Self::Provenance, Self::FrameExtra>,
-    > {
+    fn init_frame(
+        _ecx: &mut InterpCx<'tcx, Self>,
+        _frame: interpret::Frame<'tcx, Self::Provenance>,
+    ) -> interpret::InterpResult<'tcx, interpret::Frame<'tcx, Self::Provenance, Self::FrameExtra>>
+    {
         unimplemented!()
     }
 
     fn stack<'a>(
-        _ecx: &'a InterpCx<'mir, 'tcx, Self>,
-    ) -> &'a [interpret::Frame<'mir, 'tcx, Self::Provenance, Self::FrameExtra>] {
+        _ecx: &'a InterpCx<'tcx, Self>,
+    ) -> &'a [interpret::Frame<'tcx, Self::Provenance, Self::FrameExtra>] {
         // Return an empty stack instead of panicking, as `cur_span` uses it to evaluate constants.
         &[]
     }
 
     fn stack_mut<'a>(
-        _ecx: &'a mut InterpCx<'mir, 'tcx, Self>,
-    ) -> &'a mut Vec<interpret::Frame<'mir, 'tcx, Self::Provenance, Self::FrameExtra>> {
+        _ecx: &'a mut InterpCx<'tcx, Self>,
+    ) -> &'a mut Vec<interpret::Frame<'tcx, Self::Provenance, Self::FrameExtra>> {
         unimplemented!()
+    }
+
+    fn get_default_alloc_params(
+        &self,
+    ) -> <Self::Bytes as rustc_middle::mir::interpret::AllocBytes>::AllocParams {
     }
 }

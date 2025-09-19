@@ -3,12 +3,21 @@ mod notes;
 use crate::flags;
 use anyhow::bail;
 use std::env;
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 impl flags::PublishReleaseNotes {
     pub(crate) fn run(self, sh: &Shell) -> anyhow::Result<()> {
         let asciidoc = sh.read_file(&self.changelog)?;
         let mut markdown = notes::convert_asciidoc_to_markdown(std::io::Cursor::new(&asciidoc))?;
+        if !markdown.starts_with("# Changelog") {
+            bail!("changelog Markdown should start with `# Changelog`");
+        }
+        const NEWLINES: &str = "\n\n";
+        let Some(idx) = markdown.find(NEWLINES) else {
+            bail!("missing newlines after changelog title");
+        };
+        markdown.replace_range(0..idx + NEWLINES.len(), "");
+
         let file_name = check_file_name(self.changelog)?;
         let tag_name = &file_name[0..10];
         let original_changelog_url = create_original_changelog_url(&file_name);
@@ -64,7 +73,9 @@ fn create_original_changelog_url(file_name: &str) -> String {
 fn update_release(sh: &Shell, tag_name: &str, release_notes: &str) -> anyhow::Result<()> {
     let token = match env::var("GITHUB_TOKEN") {
         Ok(token) => token,
-        Err(_) => bail!("Please obtain a personal access token from https://github.com/settings/tokens and set the `GITHUB_TOKEN` environment variable."),
+        Err(_) => bail!(
+            "Please obtain a personal access token from https://github.com/settings/tokens and set the `GITHUB_TOKEN` environment variable."
+        ),
     };
     let accept = "Accept: application/vnd.github+json";
     let authorization = format!("Authorization: Bearer {token}");

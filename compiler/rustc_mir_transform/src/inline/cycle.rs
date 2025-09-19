@@ -2,10 +2,10 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::mir::TerminatorKind;
-use rustc_middle::ty::TypeVisitableExt;
-use rustc_middle::ty::{self, GenericArgsRef, InstanceDef, TyCtxt};
+use rustc_middle::ty::{self, GenericArgsRef, InstanceKind, TyCtxt, TypeVisitableExt};
 use rustc_session::Limit;
 use rustc_span::sym;
+use tracing::{instrument, trace};
 
 // FIXME: check whether it is cheaper to precompute the entire call graph instead of invoking
 // this query ridiculously often.
@@ -15,14 +15,13 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
     (root, target): (ty::Instance<'tcx>, LocalDefId),
 ) -> bool {
     trace!(%root, target = %tcx.def_path_str(target));
-    let param_env = tcx.param_env_reveal_all_normalized(target);
     assert_ne!(
         root.def_id().expect_local(),
         target,
         "you should not call `mir_callgraph_reachable` on immediate self recursion"
     );
     assert!(
-        matches!(root.def, InstanceDef::Item(_)),
+        matches!(root.def, InstanceKind::Item(_)),
         "you should not call `mir_callgraph_reachable` on shims"
     );
     assert!(
@@ -31,11 +30,11 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
     );
     #[instrument(
         level = "debug",
-        skip(tcx, param_env, target, stack, seen, recursion_limiter, caller, recursion_limit)
+        skip(tcx, typing_env, target, stack, seen, recursion_limiter, caller, recursion_limit)
     )]
     fn process<'tcx>(
         tcx: TyCtxt<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         caller: ty::Instance<'tcx>,
         target: LocalDefId,
         stack: &mut Vec<ty::Instance<'tcx>>,
@@ -47,13 +46,13 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
         for &(callee, args) in tcx.mir_inliner_callees(caller.def) {
             let Ok(args) = caller.try_instantiate_mir_and_normalize_erasing_regions(
                 tcx,
-                param_env,
+                typing_env,
                 ty::EarlyBinder::bind(args),
             ) else {
-                trace!(?caller, ?param_env, ?args, "cannot normalize, skipping");
+                trace!(?caller, ?typing_env, ?args, "cannot normalize, skipping");
                 continue;
             };
-            let Ok(Some(callee)) = ty::Instance::resolve(tcx, param_env, callee, args) else {
+            let Ok(Some(callee)) = ty::Instance::try_resolve(tcx, typing_env, callee, args) else {
                 trace!(?callee, "cannot resolve, skipping");
                 continue;
             };
@@ -70,7 +69,7 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
             }
 
             match callee.def {
-                InstanceDef::Item(_) => {
+                InstanceKind::Item(_) => {
                     // If there is no MIR available (either because it was not in metadata or
                     // because it has no MIR because it's an extern function), then the inliner
                     // won't cause cycles on this.
@@ -80,24 +79,26 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
                     }
                 }
                 // These have no own callable MIR.
-                InstanceDef::Intrinsic(_) | InstanceDef::Virtual(..) => continue,
+                InstanceKind::Intrinsic(_) | InstanceKind::Virtual(..) => continue,
                 // These have MIR and if that MIR is inlined, instantiated and then inlining is run
                 // again, a function item can end up getting inlined. Thus we'll be able to cause
                 // a cycle that way
-                InstanceDef::VTableShim(_)
-                | InstanceDef::ReifyShim(..)
-                | InstanceDef::FnPtrShim(..)
-                | InstanceDef::ClosureOnceShim { .. }
-                | InstanceDef::ConstructCoroutineInClosureShim { .. }
-                | InstanceDef::CoroutineKindShim { .. }
-                | InstanceDef::ThreadLocalShim { .. }
-                | InstanceDef::CloneShim(..) => {}
+                InstanceKind::VTableShim(_)
+                | InstanceKind::ReifyShim(..)
+                | InstanceKind::FnPtrShim(..)
+                | InstanceKind::ClosureOnceShim { .. }
+                | InstanceKind::ConstructCoroutineInClosureShim { .. }
+                | InstanceKind::ThreadLocalShim { .. }
+                | InstanceKind::CloneShim(..) => {}
 
                 // This shim does not call any other functions, thus there can be no recursion.
-                InstanceDef::FnPtrAddrShim(..) => {
+                InstanceKind::FnPtrAddrShim(..) => {
                     continue;
                 }
-                InstanceDef::DropGlue(..) | InstanceDef::AsyncDropGlueCtorShim(..) => {
+                InstanceKind::DropGlue(..)
+                | InstanceKind::FutureDropPollShim(..)
+                | InstanceKind::AsyncDropGlue(..)
+                | InstanceKind::AsyncDropGlueCtorShim(..) => {
                     // FIXME: A not fully instantiated drop shim can cause ICEs if one attempts to
                     // have its MIR built. Likely oli-obk just screwed up the `ParamEnv`s, so this
                     // needs some more analysis.
@@ -116,7 +117,7 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
                     let found_recursion = ensure_sufficient_stack(|| {
                         process(
                             tcx,
-                            param_env,
+                            typing_env,
                             callee,
                             target,
                             stack,
@@ -137,26 +138,34 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
         }
         false
     }
+    // FIXME(-Znext-solver=no): Remove this hack when trait solver overflow can return an error.
+    // In code like that pointed out in #128887, the type complexity we ask the solver to deal with
+    // grows as we recurse into the call graph. If we use the same recursion limit here and in the
+    // solver, the solver hits the limit first and emits a fatal error. But if we use a reduced
+    // limit, we will hit the limit first and give up on looking for inlining. And in any case,
+    // the default recursion limits are quite generous for us. If we need to recurse 64 times
+    // into the call graph, we're probably not going to find any useful MIR inlining.
+    let recursion_limit = tcx.recursion_limit() / 2;
     process(
         tcx,
-        param_env,
+        ty::TypingEnv::post_analysis(tcx, target),
         root,
         target,
         &mut Vec::new(),
         &mut FxHashSet::default(),
         &mut FxHashMap::default(),
-        tcx.recursion_limit(),
+        recursion_limit,
     )
 }
 
 pub(crate) fn mir_inliner_callees<'tcx>(
     tcx: TyCtxt<'tcx>,
-    instance: ty::InstanceDef<'tcx>,
+    instance: ty::InstanceKind<'tcx>,
 ) -> &'tcx [(DefId, GenericArgsRef<'tcx>)] {
     let steal;
     let guard;
     let body = match (instance, instance.def_id().as_local()) {
-        (InstanceDef::Item(_), Some(def_id)) => {
+        (InstanceKind::Item(_), Some(def_id)) => {
             steal = tcx.mir_promoted(def_id).0;
             guard = steal.borrow();
             &*guard

@@ -1,7 +1,9 @@
-use super::{DirectedGraph, StartNode, Successors};
-use rustc_index::bit_set::BitSet;
-use rustc_index::{IndexSlice, IndexVec};
 use std::ops::ControlFlow;
+
+use rustc_index::bit_set::DenseBitSet;
+use rustc_index::{IndexSlice, IndexVec};
+
+use super::{DirectedGraph, StartNode, Successors};
 
 #[cfg(test)]
 mod tests;
@@ -48,7 +50,7 @@ fn post_order_walk<G: DirectedGraph + Successors>(
         let node = frame.node;
         visited[node] = true;
 
-        while let Some(successor) = frame.iter.next() {
+        for successor in frame.iter.by_ref() {
             if !visited[successor] {
                 stack.push(PostOrderFrame { node: successor, iter: graph.successors(successor) });
                 continue 'recurse;
@@ -76,7 +78,7 @@ where
 {
     graph: G,
     stack: Vec<G::Node>,
-    visited: BitSet<G::Node>,
+    visited: DenseBitSet<G::Node>,
 }
 
 impl<G> DepthFirstSearch<G>
@@ -84,7 +86,7 @@ where
     G: DirectedGraph + Successors,
 {
     pub fn new(graph: G) -> Self {
-        Self { stack: vec![], visited: BitSet::new_empty(graph.num_nodes()), graph }
+        Self { stack: vec![], visited: DenseBitSet::new_empty(graph.num_nodes()), graph }
     }
 
     /// Version of `push_start_node` that is convenient for chained
@@ -112,7 +114,7 @@ where
     /// This is equivalent to just invoke `next` repeatedly until
     /// you get a `None` result.
     pub fn complete_search(&mut self) {
-        while let Some(_) = self.next() {}
+        for _ in self.by_ref() {}
     }
 
     /// Returns true if node has been visited thus far.
@@ -122,6 +124,16 @@ where
     /// the iterator is completely drained.
     pub fn visited(&self, node: G::Node) -> bool {
         self.visited.contains(node)
+    }
+
+    /// Returns a reference to the set of nodes that have been visited, with
+    /// the same caveats as [`Self::visited`].
+    ///
+    /// When incorporating the visited nodes into another bitset, using bulk
+    /// operations like `union` or `intersect` can be more efficient than
+    /// processing each node individually.
+    pub fn visited_set(&self) -> &DenseBitSet<G::Node> {
+        &self.visited
     }
 }
 
@@ -205,8 +217,8 @@ where
 {
     graph: &'graph G,
     stack: Vec<Event<G::Node>>,
-    visited: BitSet<G::Node>,
-    settled: BitSet<G::Node>,
+    visited: DenseBitSet<G::Node>,
+    settled: DenseBitSet<G::Node>,
 }
 
 impl<'graph, G> TriColorDepthFirstSearch<'graph, G>
@@ -217,8 +229,8 @@ where
         TriColorDepthFirstSearch {
             graph,
             stack: vec![],
-            visited: BitSet::new_empty(graph.num_nodes()),
-            settled: BitSet::new_empty(graph.num_nodes()),
+            visited: DenseBitSet::new_empty(graph.num_nodes()),
+            settled: DenseBitSet::new_empty(graph.num_nodes()),
         }
     }
 

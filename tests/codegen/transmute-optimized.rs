@@ -1,11 +1,13 @@
-//@ compile-flags: -O -Z merge-functions=disabled
+//@ compile-flags: -Copt-level=3 -Z merge-functions=disabled
 #![crate_type = "lib"]
 
 // This tests that LLVM can optimize based on the niches in the source or
 // destination types for transmutes.
 
 #[repr(u32)]
-pub enum AlwaysZero32 { X = 0 }
+pub enum AlwaysZero32 {
+    X = 0,
+}
 
 // CHECK-LABEL: i32 @issue_109958(i32
 #[no_mangle]
@@ -81,7 +83,11 @@ pub fn div_transmute_nonzero(a: u32, b: std::num::NonZero<i32>) -> u32 {
 }
 
 #[repr(i8)]
-pub enum OneTwoThree { One = 1, Two = 2, Three = 3 }
+pub enum OneTwoThree {
+    One = 1,
+    Two = 2,
+    Three = 3,
+}
 
 // CHECK-LABEL: i8 @ordering_transmute_onetwothree(i8
 #[no_mangle]
@@ -102,5 +108,13 @@ pub unsafe fn onetwothree_transmute_ordering(x: OneTwoThree) -> std::cmp::Orderi
 pub fn char_is_negative(c: char) -> bool {
     // CHECK: ret i1 false
     let x: i32 = unsafe { std::mem::transmute(c) };
+    x < 0
+}
+
+// CHECK-LABEL: i1 @transmute_to_char_is_negative(i32
+#[no_mangle]
+pub fn transmute_to_char_is_negative(x: i32) -> bool {
+    // CHECK: ret i1 false
+    let _c: char = unsafe { std::mem::transmute(x) };
     x < 0
 }

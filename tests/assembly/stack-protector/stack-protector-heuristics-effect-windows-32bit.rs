@@ -10,11 +10,8 @@
 //@ compile-flags: -C opt-level=2 -Z merge-functions=disabled
 
 #![crate_type = "lib"]
-
-#![allow(incomplete_features)]
-
-#![feature(unsized_locals, unsized_fn_params)]
-
+#![allow(internal_features)]
+#![feature(unsized_fn_params)]
 
 // CHECK-LABEL: emptyfn:
 #[no_mangle]
@@ -139,7 +136,6 @@ pub fn local_var_addr_used_indirectly(f: fn(bool)) {
     // missing-NOT: __security_check_cookie
 }
 
-
 // CHECK-LABEL: local_string_addr_taken
 #[no_mangle]
 pub fn local_string_addr_taken(f: fn(&String)) {
@@ -205,7 +201,7 @@ pub struct Gigastruct {
     not: u64,
     have: u64,
     array: u64,
-    members: u64
+    members: u64,
 }
 
 // CHECK-LABEL: local_large_var_moved
@@ -259,14 +255,12 @@ pub fn local_large_var_cloned(f: fn(Gigastruct)) {
     // EOF
     // ```
 
-
     // all: __security_check_cookie
     // strong: __security_check_cookie
     // basic: __security_check_cookie
     // none-NOT: __security_check_cookie
     // missing-NOT: __security_check_cookie
 }
-
 
 extern "C" {
     // A call to an external `alloca` function is *not* recognized as an
@@ -320,7 +314,6 @@ pub fn alloca_large_compile_time_constant_arg(f: fn(*mut ())) {
     // missing-NOT: __security_check_cookie
 }
 
-
 // CHECK-LABEL: alloca_dynamic_arg
 #[no_mangle]
 pub fn alloca_dynamic_arg(f: fn(*mut ()), n: usize) {
@@ -340,7 +333,6 @@ pub fn alloca_dynamic_arg(f: fn(*mut ()), n: usize) {
 // this is support for the "unsized locals" unstable feature:
 // https://doc.rust-lang.org/unstable-book/language-features/unsized-locals.html.
 
-
 // CHECK-LABEL: unsized_fn_param
 #[no_mangle]
 pub fn unsized_fn_param(s: [u8], l: bool, f: fn([u8])) {
@@ -354,7 +346,6 @@ pub fn unsized_fn_param(s: [u8], l: bool, f: fn([u8])) {
     // alloca, and is therefore not protected by the `strong` or `basic`
     // heuristics.
 
-
     // We should have a __security_check_cookie call in `all` and `strong` modes but
     // LLVM does not support generating stack protectors in functions with funclet
     // based EH personalities.
@@ -363,30 +354,6 @@ pub fn unsized_fn_param(s: [u8], l: bool, f: fn([u8])) {
     // strong-NOT: __security_check_cookie
 
     // basic-NOT: __security_check_cookie
-    // none-NOT: __security_check_cookie
-    // missing-NOT: __security_check_cookie
-}
-
-// CHECK-LABEL: unsized_local
-#[no_mangle]
-pub fn unsized_local(s: &[u8], l: bool, f: fn(&mut [u8])) {
-    let n = if l { 1 } else { 2 };
-    let mut a: [u8] = *Box::<[u8]>::from(&s[0..n]); // slice-copy with Box::from
-    f(&mut a);
-
-    // This function allocates a slice as a local variable in its stack
-    // frame. Since the size is not a compile-time constant, an array
-    // alloca is required, and the function is protected by both the
-    // `strong` and `basic` heuristic.
-
-    // We should have a __security_check_cookie call in `all`, `strong` and `basic` modes but
-    // LLVM does not support generating stack protectors in functions with funclet
-    // based EH personalities.
-    // https://github.com/llvm/llvm-project/blob/37fd3c96b917096d8a550038f6e61cdf0fc4174f/llvm/lib/CodeGen/StackProtector.cpp#L103C1-L109C4
-    // all-NOT: __security_check_cookie
-    // strong-NOT: __security_check_cookie
-    // basic-NOT: __security_check_cookie
-
     // none-NOT: __security_check_cookie
     // missing-NOT: __security_check_cookie
 }

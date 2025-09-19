@@ -1,17 +1,20 @@
+use std::borrow::Cow;
+
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::snippet;
 use clippy_utils::visitors::find_all_ret_expressions;
 use clippy_utils::{contains_return, is_res_lang_ctor, path_res, return_ty};
 use rustc_errors::Applicability;
-use rustc_hir::intravisit::FnKind;
 use rustc_hir::LangItem::{OptionSome, ResultOk};
+use rustc_hir::intravisit::FnKind;
 use rustc_hir::{Body, ExprKind, FnDecl, Impl, ItemKind, Node};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
 use rustc_session::impl_lint_pass;
+use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::symbol::sym;
-use rustc_span::Span;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -63,9 +66,9 @@ pub struct UnnecessaryWraps {
 impl_lint_pass!(UnnecessaryWraps => [UNNECESSARY_WRAPS]);
 
 impl UnnecessaryWraps {
-    pub fn new(avoid_breaking_exported_api: bool) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            avoid_breaking_exported_api,
+            avoid_breaking_exported_api: conf.avoid_breaking_exported_api,
         }
     }
 }
@@ -77,7 +80,7 @@ impl<'tcx> LateLintPass<'tcx> for UnnecessaryWraps {
         fn_kind: FnKind<'tcx>,
         fn_decl: &FnDecl<'tcx>,
         body: &Body<'tcx>,
-        span: Span,
+        _span: Span,
         def_id: LocalDefId,
     ) {
         // Abort if public function/method or closure.
@@ -92,13 +95,13 @@ impl<'tcx> LateLintPass<'tcx> for UnnecessaryWraps {
 
         // Abort if the method is implementing a trait or of it a trait method.
         let hir_id = cx.tcx.local_def_id_to_hir_id(def_id);
-        if let Node::Item(item) = cx.tcx.parent_hir_node(hir_id) {
-            if matches!(
+        if let Node::Item(item) = cx.tcx.parent_hir_node(hir_id)
+            && matches!(
                 item.kind,
                 ItemKind::Impl(Impl { of_trait: Some(_), .. }) | ItemKind::Trait(..)
-            ) {
-                return;
-            }
+            )
+        {
+            return;
         }
 
         // Get the wrapper and inner types, if can't, abort.
@@ -144,19 +147,24 @@ impl<'tcx> LateLintPass<'tcx> for UnnecessaryWraps {
                 (
                     "this function's return value is unnecessary".to_string(),
                     "remove the return type...".to_string(),
-                    snippet(cx, fn_decl.output.span(), "..").to_string(),
-                    "...and then remove returned values",
+                    // FIXME: we should instead get the span including the `->` and suggest an
+                    // empty string for this case.
+                    Cow::Borrowed("()"),
+                    Cow::Borrowed("...and then remove returned values"),
                 )
             } else {
+                let wrapper = if lang_item == OptionSome { "Some" } else { "Ok" };
                 (
                     format!("this function's return value is unnecessarily wrapped by `{return_type_label}`"),
                     format!("remove `{return_type_label}` from the return type..."),
-                    inner_type.to_string(),
-                    "...and then change returning expressions",
+                    Cow::Owned(inner_type.to_string()),
+                    Cow::Owned(format!(
+                        "...and then remove the surrounding `{wrapper}()` from returning expressions"
+                    )),
                 )
             };
 
-            span_lint_and_then(cx, UNNECESSARY_WRAPS, span, lint_msg, |diag| {
+            span_lint_and_then(cx, UNNECESSARY_WRAPS, cx.tcx.def_span(def_id), lint_msg, |diag| {
                 diag.span_suggestion(
                     fn_decl.output.span(),
                     return_type_sugg_msg,

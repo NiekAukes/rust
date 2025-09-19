@@ -9,11 +9,13 @@ based on the ABI defined by Fortanix for the [Enclave Development Platform
 
 ## Target maintainers
 
-The [EDP team](mailto:edp.maintainers@fortanix.com) at Fortanix.
+[@jethrogb](https://github.com/jethrogb)
+[@raoulstrackx](https://github.com/raoulstrackx)
+[@aditijannu](https://github.com/aditijannu)
 
-- Jethro Beekman [@jethrogb](https://github.com/jethrogb)
-- Raoul Strackx [@raoulstrackx](https://github.com/raoulstrackx)
-- Mohsen Zohrevandi [@mzohreva](https://github.com/mzohreva)
+Further contacts:
+
+The [EDP team](mailto:edp.maintainers@fortanix.com) at Fortanix.
 
 ## Requirements
 
@@ -46,7 +48,7 @@ on how to setup a development and runtime environment.
 
 As a tier 2 target, the target is built by the Rust project.
 
-You can configure rustbuild like so:
+You can configure bootstrap like so:
 
 ```toml
 [build]

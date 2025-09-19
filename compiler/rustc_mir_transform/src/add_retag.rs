@@ -4,10 +4,11 @@
 //! of MIR building, and only after this pass we think of the program has having the
 //! normal MIR semantics.
 
+use rustc_hir::LangItem;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 
-pub struct AddRetag;
+pub(super) struct AddRetag;
 
 /// Determine whether this type may contain a reference (or box), and thus needs retagging.
 /// We will only recurse `depth` times into Tuples/ADTs to bound the cost of this.
@@ -27,7 +28,7 @@ fn may_contain_reference<'tcx>(ty: Ty<'tcx>, depth: u32, tcx: TyCtxt<'tcx>) -> b
         // References and Boxes (`noalias` sources)
         ty::Ref(..) => true,
         ty::Adt(..) if ty.is_box() => true,
-        ty::Adt(adt, _) if Some(adt.did()) == tcx.lang_items().ptr_unique() => true,
+        ty::Adt(adt, _) if tcx.is_lang_item(adt.did(), LangItem::PtrUnique) => true,
         // Compound types: recurse
         ty::Array(ty, _) | ty::Slice(ty) => {
             // This does not branch so we keep the depth the same.
@@ -47,7 +48,7 @@ fn may_contain_reference<'tcx>(ty: Ty<'tcx>, depth: u32, tcx: TyCtxt<'tcx>) -> b
     }
 }
 
-impl<'tcx> MirPass<'tcx> for AddRetag {
+impl<'tcx> crate::MirPass<'tcx> for AddRetag {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
         sess.opts.unstable_opts.mir_emit_retag
     }
@@ -59,7 +60,9 @@ impl<'tcx> MirPass<'tcx> for AddRetag {
         let basic_blocks = body.basic_blocks.as_mut();
         let local_decls = &body.local_decls;
         let needs_retag = |place: &Place<'tcx>| {
-            !place.is_indirect_first_projection() // we're not really interested in stores to "outside" locations, they are hard to keep track of anyway
+            // We're not really interested in stores to "outside" locations, they are hard to keep
+            // track of anyway.
+            !place.is_indirect_first_projection()
                 && may_contain_reference(place.ty(&*local_decls, tcx).ty, /*depth*/ 3, tcx)
                 && !local_decls[place.local].is_deref_temp()
         };
@@ -128,14 +131,16 @@ impl<'tcx> MirPass<'tcx> for AddRetag {
                     StatementKind::Assign(box (ref place, ref rvalue)) => {
                         let add_retag = match rvalue {
                             // Ptr-creating operations already do their own internal retagging, no
-                            // need to also add a retag statement.
-                            // *Except* if we are deref'ing a Box, because those get desugared to directly working
-                            // with the inner raw pointer! That's relevant for `AddressOf` as Miri otherwise makes it
+                            // need to also add a retag statement. *Except* if we are deref'ing a
+                            // Box, because those get desugared to directly working with the inner
+                            // raw pointer! That's relevant for `RawPtr` as Miri otherwise makes it
                             // a NOP when the original pointer is already raw.
-                            Rvalue::AddressOf(_mutbl, place) => {
+                            Rvalue::RawPtr(_mutbl, place) => {
                                 // Using `is_box_global` here is a bit sketchy: if this code is
                                 // generic over the allocator, we'll not add a retag! This is a hack
                                 // to make Stacked Borrows compatible with custom allocator code.
+                                // It means the raw pointer inherits the tag of the box, which mostly works
+                                // but can sometimes lead to unexpected aliasing errors.
                                 // Long-term, we'll want to move to an aliasing model where "cast to
                                 // raw pointer" is a complete NOP, and then this will no longer be
                                 // an issue.
@@ -176,5 +181,9 @@ impl<'tcx> MirPass<'tcx> for AddRetag {
                 );
             }
         }
+    }
+
+    fn is_required(&self) -> bool {
+        true
     }
 }

@@ -17,49 +17,15 @@ LL | fn qux() {
    |          - unclosed delimiter
 ...
 LL | fn foo() {
-   |          - unclosed delimiter
+   |          - another 3 unclosed delimiters begin from here
 ...
-LL | fn bar() {
-   |          - unclosed delimiter
-...
-LL | fn baz() {
-   |          - unclosed delimiter
-LL |     if false {
 LL |         {
    |         - this delimiter might not be properly closed...
 LL |             && let () = ()
 LL |     }
    |     - ...as it matches this but it has different indentation
 LL | }
-   |                                                      ^
+   |                                                     ^
 
-error: found a `{` in the middle of a let-chain
-  --> $DIR/brace-in-let-chain.rs:14:24
-   |
-LL |         && let () = () {
-   |                        ^
-LL |         && let () = ()
-   |         ------ you might have meant to continue the let-chain here
-   |
-help: consider removing this brace to parse the `let` as part of the same chain
-   |
-LL -         && let () = () {
-LL +         && let () = ()
-   |
-
-error: found a `{` in the middle of a let-chain
-  --> $DIR/brace-in-let-chain.rs:6:24
-   |
-LL |         && let () = () {
-   |                        ^
-LL |         && let () = ()
-   |         ------ you might have meant to continue the let-chain here
-   |
-help: consider removing this brace to parse the `let` as part of the same chain
-   |
-LL -         && let () = () {
-LL +         && let () = ()
-   |
-
-error: aborting due to 3 previous errors
+error: aborting due to 1 previous error
 

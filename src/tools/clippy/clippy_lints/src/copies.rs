@@ -1,21 +1,23 @@
-use clippy_utils::diagnostics::{span_lint_and_note, span_lint_and_then};
-use clippy_utils::source::{first_line_of_span, indent_of, reindent_multiline, snippet, snippet_opt};
-use clippy_utils::ty::{needs_ordered_drop, InteriorMut};
-use clippy_utils::visitors::for_each_expr;
+use clippy_config::Conf;
+use clippy_utils::diagnostics::{span_lint, span_lint_and_note, span_lint_and_then};
+use clippy_utils::source::{IntoSpan, SpanRangeExt, first_line_of_span, indent_of, reindent_multiline, snippet};
+use clippy_utils::ty::{InteriorMut, needs_ordered_drop};
+use clippy_utils::visitors::for_each_expr_without_closures;
 use clippy_utils::{
-    capture_local_usage, eq_expr_value, find_binding_init, get_enclosing_block, hash_expr, hash_stmt, if_sequence,
-    is_else_clause, is_lint_allowed, path_to_local, search_same, ContainsName, HirEqInterExpr, SpanlessEq,
+    ContainsName, HirEqInterExpr, SpanlessEq, capture_local_usage, eq_expr_value, find_binding_init,
+    get_enclosing_block, hash_expr, hash_stmt, if_sequence, is_else_clause, is_lint_allowed, path_to_local,
+    search_same,
 };
 use core::iter;
 use core::ops::ControlFlow;
 use rustc_errors::Applicability;
-use rustc_hir::{intravisit, BinOpKind, Block, Expr, ExprKind, HirId, HirIdSet, Stmt, StmtKind};
+use rustc_hir::{BinOpKind, Block, Expr, ExprKind, HirId, HirIdSet, Stmt, StmtKind, intravisit};
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::ty::TyCtxt;
 use rustc_session::impl_lint_pass;
 use rustc_span::hygiene::walk_chain;
 use rustc_span::source_map::SourceMap;
-use rustc_span::{BytePos, Span, Symbol};
-use std::borrow::Cow;
+use rustc_span::{Span, Symbol};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -127,11 +129,6 @@ declare_clippy_lint! {
     /// ### Why is this bad?
     /// Duplicate code is less maintainable.
     ///
-    /// ### Known problems
-    /// * The lint doesn't check if the moved expressions modify values that are being used in
-    ///   the if condition. The suggestion can in that case modify the behavior of the program.
-    ///   See [rust-clippy#7452](https://github.com/rust-lang/rust-clippy/issues/7452)
-    ///
     /// ### Example
     /// ```ignore
     /// let foo = if … {
@@ -159,15 +156,13 @@ declare_clippy_lint! {
 }
 
 pub struct CopyAndPaste<'tcx> {
-    ignore_interior_mutability: Vec<String>,
     interior_mut: InteriorMut<'tcx>,
 }
 
-impl CopyAndPaste<'_> {
-    pub fn new(ignore_interior_mutability: Vec<String>) -> Self {
+impl<'tcx> CopyAndPaste<'tcx> {
+    pub fn new(tcx: TyCtxt<'tcx>, conf: &'static Conf) -> Self {
         Self {
-            ignore_interior_mutability,
-            interior_mut: InteriorMut::default(),
+            interior_mut: InteriorMut::new(tcx, &conf.ignore_interior_mutability),
         }
     }
 }
@@ -180,10 +175,6 @@ impl_lint_pass!(CopyAndPaste<'_> => [
 ]);
 
 impl<'tcx> LateLintPass<'tcx> for CopyAndPaste<'tcx> {
-    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
-        self.interior_mut = InteriorMut::new(cx, &self.ignore_interior_mutability);
-    }
-
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if !expr.span.from_expansion() && matches!(expr.kind, ExprKind::If(..)) && !is_else_clause(cx.tcx, expr) {
             let (conds, blocks) = if_sequence(expr);
@@ -215,7 +206,7 @@ fn lint_if_same_then_else(cx: &LateContext<'_>, conds: &[&Expr<'_>], blocks: &[&
         .array_windows::<2>()
         .enumerate()
         .fold(true, |all_eq, (i, &[lhs, rhs])| {
-            if eq.eq_block(lhs, rhs) && !contains_let(conds[i]) && conds.get(i + 1).map_or(true, |e| !contains_let(e)) {
+            if eq.eq_block(lhs, rhs) && !contains_let(conds[i]) && conds.get(i + 1).is_none_or(|e| !contains_let(e)) {
                 span_lint_and_note(
                     cx,
                     IF_SAME_THEN_ELSE,
@@ -251,27 +242,27 @@ fn lint_branches_sharing_code<'tcx>(
         let first_line_span = first_line_of_span(cx, expr.span);
         let replace_span = first_line_span.with_hi(span.hi());
         let cond_span = first_line_span.until(first_block.span);
-        let cond_snippet = reindent_multiline(snippet(cx, cond_span, "_"), false, None);
+        let cond_snippet = reindent_multiline(&snippet(cx, cond_span, "_"), false, None);
         let cond_indent = indent_of(cx, cond_span);
-        let moved_snippet = reindent_multiline(snippet(cx, span, "_"), true, None);
+        let moved_snippet = reindent_multiline(&snippet(cx, span, "_"), true, None);
         let suggestion = moved_snippet.to_string() + "\n" + &cond_snippet + "{";
-        let suggestion = reindent_multiline(Cow::Borrowed(&suggestion), true, cond_indent);
+        let suggestion = reindent_multiline(&suggestion, true, cond_indent);
         (replace_span, suggestion.to_string())
     });
     let end_suggestion = res.end_span(last_block, sm).map(|span| {
-        let moved_snipped = reindent_multiline(snippet(cx, span, "_"), true, None);
+        let moved_snipped = reindent_multiline(&snippet(cx, span, "_"), true, None);
         let indent = indent_of(cx, expr.span.shrink_to_hi());
         let suggestion = "}\n".to_string() + &moved_snipped;
-        let suggestion = reindent_multiline(Cow::Borrowed(&suggestion), true, indent);
+        let suggestion = reindent_multiline(&suggestion, true, indent);
 
         let span = span.with_hi(last_block.span.hi());
-        // Improve formatting if the inner block has indention (i.e. normal Rust formatting)
-        let test_span = Span::new(span.lo() - BytePos(4), span.lo(), span.ctxt(), span.parent());
-        let span = if snippet_opt(cx, test_span).map_or(false, |snip| snip == "    ") {
-            span.with_lo(test_span.lo())
-        } else {
-            span
-        };
+        // Improve formatting if the inner block has indentation (i.e. normal Rust formatting)
+        let span = span
+            .map_range(cx, |_, src, range| {
+                (range.start > 4 && src.get(range.start - 4..range.start)? == "    ")
+                    .then_some(range.start - 4..range.end)
+            })
+            .map_or(span, |range| range.with_ctxt(span.ctxt()));
         (span, suggestion.to_string())
     });
 
@@ -348,7 +339,7 @@ fn eq_binding_names(s: &Stmt<'_>, names: &[(HirId, Symbol)]) -> bool {
         let mut i = 0usize;
         let mut res = true;
         l.pat.each_binding_or_first(&mut |_, _, _, name| {
-            if names.get(i).map_or(false, |&(_, n)| n == name.name) {
+            if names.get(i).is_some_and(|&(_, n)| n == name.name) {
                 i += 1;
             } else {
                 res = false;
@@ -362,7 +353,7 @@ fn eq_binding_names(s: &Stmt<'_>, names: &[(HirId, Symbol)]) -> bool {
 
 /// Checks if the statement modifies or moves any of the given locals.
 fn modifies_any_local<'tcx>(cx: &LateContext<'tcx>, s: &'tcx Stmt<'_>, locals: &HirIdSet) -> bool {
-    for_each_expr(s, |e| {
+    for_each_expr_without_closures(s, |e| {
         if let Some(id) = path_to_local(e)
             && locals.contains(&id)
             && !capture_local_usage(cx, e).is_imm_ref()
@@ -392,12 +383,10 @@ fn eq_stmts(
         let new_bindings = &moved_bindings[old_count..];
         blocks
             .iter()
-            .all(|b| get_stmt(b).map_or(false, |s| eq_binding_names(s, new_bindings)))
+            .all(|b| get_stmt(b).is_some_and(|s| eq_binding_names(s, new_bindings)))
     } else {
         true
-    }) && blocks
-        .iter()
-        .all(|b| get_stmt(b).map_or(false, |s| eq.eq_stmt(s, stmt)))
+    }) && blocks.iter().all(|b| get_stmt(b).is_some_and(|s| eq.eq_stmt(s, stmt)))
 }
 
 #[expect(clippy::too_many_lines)]
@@ -413,7 +402,7 @@ fn scan_block_for_eq<'tcx>(
 
     let mut cond_locals = HirIdSet::default();
     for &cond in conds {
-        let _: Option<!> = for_each_expr(cond, |e| {
+        let _: Option<!> = for_each_expr_without_closures(cond, |e| {
             if let Some(id) = path_to_local(e) {
                 cond_locals.insert(id);
             }
@@ -436,7 +425,9 @@ fn scan_block_for_eq<'tcx>(
             modifies_any_local(cx, stmt, &cond_locals)
                 || !eq_stmts(stmt, blocks, |b| b.stmts.get(i), &mut eq, &mut moved_locals)
         })
-        .map_or(block.stmts.len(), |(i, _)| i);
+        .map_or(block.stmts.len(), |(i, stmt)| {
+            adjust_by_closest_callsite(i, stmt, block.stmts[..i].iter().enumerate().rev())
+        });
 
     if local_needs_ordered_drop {
         return BlockEq {
@@ -454,9 +445,7 @@ fn scan_block_for_eq<'tcx>(
     //     x + 50
     let expr_hash_eq = if let Some(e) = block.expr {
         let hash = hash_expr(cx, e);
-        blocks
-            .iter()
-            .all(|b| b.expr.map_or(false, |e| hash_expr(cx, e) == hash))
+        blocks.iter().all(|b| b.expr.is_some_and(|e| hash_expr(cx, e) == hash))
     } else {
         blocks.iter().all(|b| b.expr.is_none())
     };
@@ -477,10 +466,12 @@ fn scan_block_for_eq<'tcx>(
                 b.stmts
                     // the bounds check will catch the underflow
                     .get(b.stmts.len().wrapping_sub(offset + 1))
-                    .map_or(true, |s| hash != hash_stmt(cx, s))
+                    .is_none_or(|s| hash != hash_stmt(cx, s))
             })
         })
-        .map_or(block.stmts.len() - start_end_eq, |(i, _)| i);
+        .map_or(block.stmts.len() - start_end_eq, |(i, stmt)| {
+            adjust_by_closest_callsite(i, stmt, (0..i).rev().zip(block.stmts[(block.stmts.len() - i)..].iter()))
+        });
 
     let moved_locals_at_start = moved_locals.len();
     let mut i = end_search_start;
@@ -517,7 +508,7 @@ fn scan_block_for_eq<'tcx>(
         });
     if let Some(e) = block.expr {
         for block in blocks {
-            if block.expr.map_or(false, |expr| !eq.eq_expr(expr, e)) {
+            if block.expr.is_some_and(|expr| !eq.eq_expr(expr, e)) {
                 moved_locals.truncate(moved_locals_at_start);
                 return BlockEq {
                     start_end_eq,
@@ -535,32 +526,73 @@ fn scan_block_for_eq<'tcx>(
     }
 }
 
+/// Adjusts the index for which the statements begin to differ to the closest macro callsite. This
+/// avoids giving suggestions that requires splitting a macro call in half, when only a part of the
+/// macro expansion is equal.
+///
+/// For example, for the following macro:
+/// ```rust,ignore
+/// macro_rules! foo {
+///    ($x:expr) => {
+///        let y = 42;
+///        $x;
+///    };
+/// }
+/// ```
+/// If the macro is called like this:
+/// ```rust,ignore
+/// if false {
+///    let z = 42;
+///    foo!(println!("Hello"));
+/// } else {
+///    let z = 42;
+///    foo!(println!("World"));
+/// }
+/// ```
+/// Although the expanded `let y = 42;` is equal, the macro call should not be included in the
+/// suggestion.
+fn adjust_by_closest_callsite<'tcx>(
+    i: usize,
+    stmt: &'tcx Stmt<'tcx>,
+    mut iter: impl Iterator<Item = (usize, &'tcx Stmt<'tcx>)>,
+) -> usize {
+    let Some((_, first)) = iter.next() else {
+        return 0;
+    };
+
+    // If it is already at the boundary of a macro call, then just return.
+    if first.span.source_callsite() != stmt.span.source_callsite() {
+        return i;
+    }
+
+    iter.find(|(_, stmt)| stmt.span.source_callsite() != first.span.source_callsite())
+        .map_or(0, |(i, _)| i + 1)
+}
+
 fn check_for_warn_of_moved_symbol(cx: &LateContext<'_>, symbols: &[(HirId, Symbol)], if_expr: &Expr<'_>) -> bool {
-    get_enclosing_block(cx, if_expr.hir_id).map_or(false, |block| {
+    get_enclosing_block(cx, if_expr.hir_id).is_some_and(|block| {
         let ignore_span = block.span.shrink_to_lo().to(if_expr.span);
 
         symbols
             .iter()
             .filter(|&&(_, name)| !name.as_str().starts_with('_'))
             .any(|&(_, name)| {
-                let mut walker = ContainsName {
-                    name,
-                    result: false,
-                    cx,
-                };
+                let mut walker = ContainsName { name, cx };
 
                 // Scan block
-                block
+                let mut res = block
                     .stmts
                     .iter()
                     .filter(|stmt| !ignore_span.overlaps(stmt.span))
-                    .for_each(|stmt| intravisit::walk_stmt(&mut walker, stmt));
+                    .try_for_each(|stmt| intravisit::walk_stmt(&mut walker, stmt));
 
-                if let Some(expr) = block.expr {
-                    intravisit::walk_expr(&mut walker, expr);
+                if let Some(expr) = block.expr
+                    && res.is_continue()
+                {
+                    res = intravisit::walk_expr(&mut walker, expr);
                 }
 
-                walker.result
+                res.is_break()
             })
     })
 }
@@ -582,7 +614,7 @@ fn method_caller_is_mutable<'tcx>(
 
 /// Implementation of `IFS_SAME_COND`.
 fn lint_same_cond<'tcx>(cx: &LateContext<'tcx>, conds: &[&Expr<'_>], interior_mut: &mut InteriorMut<'tcx>) {
-    for (i, j) in search_same(
+    for group in search_same(
         conds,
         |e| hash_expr(cx, e),
         |lhs, rhs| {
@@ -599,14 +631,8 @@ fn lint_same_cond<'tcx>(cx: &LateContext<'tcx>, conds: &[&Expr<'_>], interior_mu
             }
         },
     ) {
-        span_lint_and_note(
-            cx,
-            IFS_SAME_COND,
-            j.span,
-            "this `if` has the same condition as a previous `if`",
-            Some(i.span),
-            "same as this",
-        );
+        let spans: Vec<_> = group.into_iter().map(|expr| expr.span).collect();
+        span_lint(cx, IFS_SAME_COND, spans, "these `if` branches have the same condition");
     }
 }
 
@@ -624,14 +650,13 @@ fn lint_same_fns_in_if_cond(cx: &LateContext<'_>, conds: &[&Expr<'_>]) {
         SpanlessEq::new(cx).eq_expr(lhs, rhs)
     };
 
-    for (i, j) in search_same(conds, |e| hash_expr(cx, e), eq) {
-        span_lint_and_note(
+    for group in search_same(conds, |e| hash_expr(cx, e), eq) {
+        let spans: Vec<_> = group.into_iter().map(|expr| expr.span).collect();
+        span_lint(
             cx,
             SAME_FUNCTIONS_IN_IF_CONDITION,
-            j.span,
-            "this `if` has the same function call as a previous `if`",
-            Some(i.span),
-            "same as this",
+            spans,
+            "these `if` branches have the same function call",
         );
     }
 }

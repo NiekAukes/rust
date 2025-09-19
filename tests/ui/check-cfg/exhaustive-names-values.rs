@@ -11,20 +11,18 @@
 //~^ WARNING unexpected `cfg` condition name
 pub fn f() {}
 
-#[cfg(test = "value")]
+#[cfg(target_vendor = "value")]
 //~^ WARNING unexpected `cfg` condition value
 pub fn f() {}
 
 #[cfg(feature = "unk")]
-//[empty_names_values]~^ WARNING unexpected `cfg` condition name
-//[empty_cfg]~^^ WARNING unexpected `cfg` condition name
-//[feature]~^^^ WARNING unexpected `cfg` condition value
-//[full]~^^^^ WARNING unexpected `cfg` condition value
+//[empty_cfg]~^ WARNING unexpected `cfg` condition name
+//[feature]~^^ WARNING unexpected `cfg` condition value
+//[full]~^^^ WARNING unexpected `cfg` condition value
 pub fn feat() {}
 
 #[cfg(feature = "std")]
-//[empty_names_values]~^ WARNING unexpected `cfg` condition name
-//[empty_cfg]~^^ WARNING unexpected `cfg` condition name
+//[empty_cfg]~^ WARNING unexpected `cfg` condition name
 pub fn feat() {}
 
 #[cfg(windows)]

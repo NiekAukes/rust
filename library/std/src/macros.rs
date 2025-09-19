@@ -41,7 +41,7 @@ macro_rules! panic {
 /// Use `print!` only for the primary output of your program. Use
 /// [`eprint!`] instead to print error and progress messages.
 ///
-/// See [the formatting documentation in `std::fmt`](../std/fmt/index.html)
+/// See the formatting documentation in [`std::fmt`](crate::fmt)
 /// for details of the macro argument syntax.
 ///
 /// [flush]: crate::io::Write::flush
@@ -106,7 +106,7 @@ macro_rules! print {
 /// Use `println!` only for the primary output of your program. Use
 /// [`eprintln!`] instead to print error and progress messages.
 ///
-/// See [the formatting documentation in `std::fmt`](../std/fmt/index.html)
+/// See the formatting documentation in [`std::fmt`](crate::fmt)
 /// for details of the macro argument syntax.
 ///
 /// [`std::fmt`]: crate::fmt
@@ -156,7 +156,7 @@ macro_rules! println {
 /// [`io::stderr`]: crate::io::stderr
 /// [`io::stdout`]: crate::io::stdout
 ///
-/// See [the formatting documentation in `std::fmt`](../std/fmt/index.html)
+/// See the formatting documentation in [`std::fmt`](crate::fmt)
 /// for details of the macro argument syntax.
 ///
 /// # Panics
@@ -190,7 +190,7 @@ macro_rules! eprint {
 /// Use `eprintln!` only for error and progress messages. Use `println!`
 /// instead for the primary output of your program.
 ///
-/// See [the formatting documentation in `std::fmt`](../std/fmt/index.html)
+/// See the formatting documentation in [`std::fmt`](crate::fmt)
 /// for details of the macro argument syntax.
 ///
 /// [`io::stderr`]: crate::io::stderr
@@ -230,7 +230,7 @@ macro_rules! eprintln {
 /// ```rust
 /// let a = 2;
 /// let b = dbg!(a * 2) + 1;
-/// //      ^-- prints: [src/main.rs:2] a * 2 = 4
+/// //      ^-- prints: [src/main.rs:2:9] a * 2 = 4
 /// assert_eq!(b, 5);
 /// ```
 ///
@@ -281,7 +281,7 @@ macro_rules! eprintln {
 /// This prints to [stderr]:
 ///
 /// ```text,ignore
-/// [src/main.rs:4] n.checked_sub(4) = None
+/// [src/main.rs:2:22] n.checked_sub(4) = None
 /// ```
 ///
 /// Naive factorial implementation:
@@ -301,15 +301,15 @@ macro_rules! eprintln {
 /// This prints to [stderr]:
 ///
 /// ```text,ignore
-/// [src/main.rs:3] n <= 1 = false
-/// [src/main.rs:3] n <= 1 = false
-/// [src/main.rs:3] n <= 1 = false
-/// [src/main.rs:3] n <= 1 = true
-/// [src/main.rs:4] 1 = 1
-/// [src/main.rs:5] n * factorial(n - 1) = 2
-/// [src/main.rs:5] n * factorial(n - 1) = 6
-/// [src/main.rs:5] n * factorial(n - 1) = 24
-/// [src/main.rs:11] factorial(4) = 24
+/// [src/main.rs:2:8] n <= 1 = false
+/// [src/main.rs:2:8] n <= 1 = false
+/// [src/main.rs:2:8] n <= 1 = false
+/// [src/main.rs:2:8] n <= 1 = true
+/// [src/main.rs:3:9] 1 = 1
+/// [src/main.rs:7:9] n * factorial(n - 1) = 2
+/// [src/main.rs:7:9] n * factorial(n - 1) = 6
+/// [src/main.rs:7:9] n * factorial(n - 1) = 24
+/// [src/main.rs:9:1] factorial(4) = 24
 /// ```
 ///
 /// The `dbg!(..)` macro moves the input:
@@ -363,7 +363,14 @@ macro_rules! dbg {
         match $val {
             tmp => {
                 $crate::eprintln!("[{}:{}:{}] {} = {:#?}",
-                    $crate::file!(), $crate::line!(), $crate::column!(), $crate::stringify!($val), &tmp);
+                    $crate::file!(),
+                    $crate::line!(),
+                    $crate::column!(),
+                    $crate::stringify!($val),
+                    // The `&T: Debug` check happens here (not in the format literal desugaring)
+                    // to avoid format literal related messages and suggestions.
+                    &&tmp as &dyn $crate::fmt::Debug,
+                );
                 tmp
             }
         }
@@ -371,12 +378,4 @@ macro_rules! dbg {
     ($($val:expr),+ $(,)?) => {
         ($($crate::dbg!($val)),+,)
     };
-}
-
-#[cfg(test)]
-macro_rules! assert_approx_eq {
-    ($a:expr, $b:expr) => {{
-        let (a, b) = (&$a, &$b);
-        assert!((*a - *b).abs() < 1.0e-6, "{} is not approximately equal to {}", *a, *b);
-    }};
 }

@@ -1,14 +1,16 @@
-use crate::spec::{Cc, LinkerFlavor, Lld, PanicStrategy, RelocModel, Target, TargetOptions};
+use crate::spec::{
+    Cc, LinkerFlavor, Lld, PanicStrategy, RelocModel, Target, TargetMetadata, TargetOptions,
+};
 
-pub fn target() -> Target {
+pub(crate) fn target() -> Target {
     Target {
         data_layout: "e-m:e-p:32:32-i64:64-n32-S128".into(),
         llvm_target: "riscv32".into(),
-        metadata: crate::spec::TargetMetadata {
-            description: None,
-            tier: None,
-            host_tools: None,
-            std: None,
+        metadata: TargetMetadata {
+            description: Some("Bare RISC-V (RV32IMAFC ISA)".into()),
+            tier: Some(2),
+            host_tools: Some(false),
+            std: Some(false),
         },
         pointer_width: 32,
         arch: "riscv32".into(),

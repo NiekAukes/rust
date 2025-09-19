@@ -11,6 +11,10 @@ resolve_added_macro_use =
 resolve_ancestor_only =
     visibilities can only be restricted to ancestor modules
 
+resolve_anonymous_lifetime_non_gat_report_error =
+    in the trait associated type is declared without lifetime parameters, so using a borrowed type for them requires that lifetime to come from the implemented type
+    .label = this lifetime must come from the implemented type
+
 resolve_arguments_macro_use_not_allowed = arguments to `macro_use` are not allowed here
 
 resolve_associated_const_with_similar_name_exists =
@@ -21,10 +25,6 @@ resolve_associated_fn_with_similar_name_exists =
 
 resolve_associated_type_with_similar_name_exists =
     there is an associated type with a similar name
-
-resolve_attempt_to_define_builtin_macro_twice =
-    attempted to define built-in macro more than once
-    .note = previously defined here
 
 resolve_attempt_to_use_non_constant_value_in_constant =
     attempt to use a non-constant value in a constant
@@ -119,10 +119,7 @@ resolve_const_param_in_enum_discriminant =
     const parameters may not be used in enum discriminant values
 
 resolve_const_param_in_non_trivial_anon_const =
-    const parameters may only be used as standalone arguments, i.e. `{$name}`
-
-resolve_const_param_in_ty_of_const_param =
-    const parameters may not be used in the type of const parameters
+    const parameters may only be used as standalone arguments here, i.e. `{$name}`
 
 resolve_constructor_private_if_any_field_private =
     a constructor is private if any of the fields is private
@@ -152,9 +149,13 @@ resolve_extern_crate_self_requires_renaming =
     `extern crate self;` requires renaming
     .suggestion = rename the `self` crate to be able to import it
 
+resolve_forward_declared_generic_in_const_param_ty =
+    const parameter types cannot reference parameters before they are declared
+    .label = const parameter type cannot reference `{$param}` before it is declared
+
 resolve_forward_declared_generic_param =
-    generic parameters with a default cannot use forward declared identifiers
-    .label = defaulted generic parameters cannot be forward declared
+    generic parameter defaults cannot reference parameters before they are declared
+    .label = cannot reference `{$param}` before it is declared
 
 resolve_found_an_item_configured_out =
     found an item that was configured out
@@ -217,10 +218,6 @@ resolve_invalid_asm_sym =
     .label = is a local variable
     .help = `sym` operands must refer to either a function or a static
 
-resolve_is_not_directly_importable =
-    `{$target}` is not directly importable
-    .label = cannot be imported directly
-
 resolve_is_private =
     {$ident_descr} `{$ident}` is private
     .label = private {$ident_descr}
@@ -228,11 +225,14 @@ resolve_is_private =
 resolve_item_was_behind_feature =
     the item is gated behind the `{$feature}` feature
 
-resolve_items_in_traits_are_not_importable =
-    items in traits are not importable
+resolve_item_was_cfg_out = the item is gated here
 
 resolve_label_with_similar_name_reachable =
     a label with a similar name is reachable
+
+resolve_lending_iterator_report_error =
+    associated type `Iterator::Item` is declared without lifetime parameters, so using a borrowed type for them requires that lifetime to come from the implemented type
+    .note = you can't create an `Iterator` that borrows each `Item` from itself, but you can instead create a new type that borrows your existing type and implement `Iterator` for that new type
 
 resolve_lifetime_param_in_enum_discriminant =
     lifetime parameters may not be used in enum discriminant values
@@ -240,15 +240,18 @@ resolve_lifetime_param_in_enum_discriminant =
 resolve_lifetime_param_in_non_trivial_anon_const =
     lifetime parameters may not be used in const expressions
 
-resolve_lifetime_param_in_ty_of_const_param =
-    lifetime parameters may not be used in the type of const parameters
-
 resolve_lowercase_self =
     attempt to use a non-constant value in a constant
     .suggestion = try using `Self`
 
+resolve_macro_cannot_use_as_attr =
+    `{$ident}` exists, but a declarative macro cannot be used as an attribute macro
+
+resolve_macro_cannot_use_as_derive =
+     `{$ident}` exists, but a declarative macro cannot be used as a derive macro
+
 resolve_macro_defined_later =
-    a macro with the same name exists, but it appears later at here
+    a macro with the same name exists, but it appears later
 
 resolve_macro_expanded_extern_crate_cannot_shadow_extern_arguments =
     macro-expanded `extern crate` items cannot shadow names passed with `--extern`
@@ -367,9 +370,11 @@ resolve_self_imports_only_allowed_within_multipart_suggestion =
 resolve_self_imports_only_allowed_within_suggestion =
     consider importing the module directly
 
+resolve_self_in_const_generic_ty =
+    cannot use `Self` in const parameter type
+
 resolve_self_in_generic_param_default =
     generic parameters cannot use `Self` in their defaults
-    .label = `Self` in generic parameter default
 
 resolve_similarly_named_defined_here =
     similarly named {$candidate_descr} `{$candidate}` defined here
@@ -420,9 +425,6 @@ resolve_type_param_in_enum_discriminant =
 
 resolve_type_param_in_non_trivial_anon_const =
     type parameters may not be used in const expressions
-
-resolve_type_param_in_ty_of_const_param =
-    type parameters may not be used in the type of const parameters
 
 resolve_undeclared_label =
     use of undeclared label `{$name}`

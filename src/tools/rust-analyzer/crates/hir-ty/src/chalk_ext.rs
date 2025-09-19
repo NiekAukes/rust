@@ -1,24 +1,23 @@
 //! Various extensions traits for Chalk types.
 
 use chalk_ir::{
-    cast::Cast, FloatTy, IntTy, Mutability, Scalar, TyVariableKind, TypeOutlives, UintTy,
+    FloatTy, IntTy, Mutability, Scalar, TyVariableKind, TypeOutlives, UintTy, cast::Cast,
 };
 use hir_def::{
+    DefWithBodyId, FunctionId, GenericDefId, HasModule, ItemContainerId, Lookup, TraitId,
     builtin_type::{BuiltinFloat, BuiltinInt, BuiltinType, BuiltinUint},
-    generics::TypeOrConstParamData,
+    hir::generics::{TypeOrConstParamData, TypeParamProvenance},
     lang_item::LangItem,
     type_ref::Rawness,
-    DefWithBodyId, FunctionId, GenericDefId, HasModule, ItemContainerId, Lookup, TraitId,
 };
 
 use crate::{
-    db::HirDatabase,
-    from_assoc_type_id, from_chalk_trait_id, from_foreign_def_id, from_placeholder_idx,
-    to_chalk_trait_id,
-    utils::{generics, ClosureSubst},
     AdtId, AliasEq, AliasTy, Binders, CallableDefId, CallableSig, Canonical, CanonicalVarKinds,
     ClosureId, DynTy, FnPointer, ImplTraitId, InEnvironment, Interner, Lifetime, ProjectionTy,
     QuantifiedWhereClause, Substitution, TraitRef, Ty, TyBuilder, TyKind, TypeFlags, WhereClause,
+    db::HirDatabase, from_assoc_type_id, from_chalk_trait_id, from_foreign_def_id,
+    from_placeholder_idx, generics::generics, mapping::ToChalk, to_chalk_trait_id,
+    utils::ClosureSubst,
 };
 
 pub trait TyExt {
@@ -27,6 +26,7 @@ pub trait TyExt {
     fn is_scalar(&self) -> bool;
     fn is_floating_point(&self) -> bool;
     fn is_never(&self) -> bool;
+    fn is_str(&self) -> bool;
     fn is_unknown(&self) -> bool;
     fn contains_unknown(&self) -> bool;
     fn is_ty_var(&self) -> bool;
@@ -87,6 +87,10 @@ impl TyExt for Ty {
         matches!(self.kind(Interner), TyKind::Never)
     }
 
+    fn is_str(&self) -> bool {
+        matches!(self.kind(Interner), TyKind::Str)
+    }
+
     fn is_unknown(&self) -> bool {
         matches!(self.kind(Interner), TyKind::Error)
     }
@@ -116,8 +120,10 @@ impl TyExt for Ty {
             TyKind::Scalar(Scalar::Bool) => Some(BuiltinType::Bool),
             TyKind::Scalar(Scalar::Char) => Some(BuiltinType::Char),
             TyKind::Scalar(Scalar::Float(fty)) => Some(BuiltinType::Float(match fty {
+                FloatTy::F128 => BuiltinFloat::F128,
                 FloatTy::F64 => BuiltinFloat::F64,
                 FloatTy::F32 => BuiltinFloat::F32,
+                FloatTy::F16 => BuiltinFloat::F16,
             })),
             TyKind::Scalar(Scalar::Int(ity)) => Some(BuiltinType::Int(match ity {
                 IntTy::Isize => BuiltinInt::Isize,
@@ -186,7 +192,7 @@ impl TyExt for Ty {
         match *self.kind(Interner) {
             TyKind::Adt(AdtId(adt), ..) => Some(adt.into()),
             TyKind::FnDef(callable, ..) => {
-                Some(db.lookup_intern_callable_def(callable.into()).into())
+                Some(GenericDefId::from_callable(db, ToChalk::from_chalk(db, callable)))
             }
             TyKind::AssociatedType(type_alias, ..) => Some(from_assoc_type_id(type_alias).into()),
             TyKind::Foreign(type_alias, ..) => Some(from_foreign_def_id(type_alias).into()),
@@ -196,7 +202,7 @@ impl TyExt for Ty {
 
     fn callable_def(&self, db: &dyn HirDatabase) -> Option<CallableDefId> {
         match self.kind(Interner) {
-            &TyKind::FnDef(def, ..) => Some(db.lookup_intern_callable_def(def.into())),
+            &TyKind::FnDef(def, ..) => Some(ToChalk::from_chalk(db, def)),
             _ => None,
         }
     }
@@ -244,10 +250,8 @@ impl TyExt for Ty {
             TyKind::OpaqueType(opaque_ty_id, subst) => {
                 match db.lookup_intern_impl_trait_id((*opaque_ty_id).into()) {
                     ImplTraitId::AsyncBlockTypeImplTrait(def, _expr) => {
-                        let krate = def.module(db.upcast()).krate();
-                        if let Some(future_trait) =
-                            db.lang_item(krate, LangItem::Future).and_then(|item| item.as_trait())
-                        {
+                        let krate = def.module(db).krate();
+                        if let Some(future_trait) = LangItem::Future.resolve_trait(db, krate) {
                             // This is only used by type walking.
                             // Parameters will be walked outside, and projection predicate is not used.
                             // So just provide the Future trait.
@@ -270,7 +274,7 @@ impl TyExt for Ty {
                             data.substitute(Interner, &subst).into_value_and_skipped_binders().0
                         })
                     }
-                    ImplTraitId::AssociatedTypeImplTrait(alias, idx) => {
+                    ImplTraitId::TypeAliasImplTrait(alias, idx) => {
                         db.type_alias_impl_traits(alias).map(|it| {
                             let data =
                                 (*it).as_ref().map(|rpit| rpit.impl_traits[idx].bounds.clone());
@@ -289,7 +293,7 @@ impl TyExt for Ty {
                             data.substitute(Interner, &opaque_ty.substitution)
                         })
                     }
-                    ImplTraitId::AssociatedTypeImplTrait(alias, idx) => {
+                    ImplTraitId::TypeAliasImplTrait(alias, idx) => {
                         db.type_alias_impl_traits(alias).map(|it| {
                             let data =
                                 (*it).as_ref().map(|rpit| rpit.impl_traits[idx].bounds.clone());
@@ -305,10 +309,10 @@ impl TyExt for Ty {
             TyKind::Placeholder(idx) => {
                 let id = from_placeholder_idx(db, *idx);
                 let generic_params = db.generic_params(id.parent);
-                let param_data = &generic_params.type_or_consts[id.local_id];
+                let param_data = &generic_params[id.local_id];
                 match param_data {
                     TypeOrConstParamData::TypeParamData(p) => match p.provenance {
-                        hir_def::generics::TypeParamProvenance::ArgumentImplTrait => {
+                        TypeParamProvenance::ArgumentImplTrait => {
                             let substs = TyBuilder::placeholder_subst(db, id.parent);
                             let predicates = db
                                 .generic_predicates(id.parent)
@@ -342,17 +346,12 @@ impl TyExt for Ty {
 
     fn associated_type_parent_trait(&self, db: &dyn HirDatabase) -> Option<TraitId> {
         match self.kind(Interner) {
-            TyKind::AssociatedType(id, ..) => {
-                match from_assoc_type_id(*id).lookup(db.upcast()).container {
-                    ItemContainerId::TraitId(trait_id) => Some(trait_id),
-                    _ => None,
-                }
-            }
+            TyKind::AssociatedType(id, ..) => match from_assoc_type_id(*id).lookup(db).container {
+                ItemContainerId::TraitId(trait_id) => Some(trait_id),
+                _ => None,
+            },
             TyKind::Alias(AliasTy::Projection(projection_ty)) => {
-                match from_assoc_type_id(projection_ty.associated_ty_id)
-                    .lookup(db.upcast())
-                    .container
-                {
+                match from_assoc_type_id(projection_ty.associated_ty_id).lookup(db).container {
                     ItemContainerId::TraitId(trait_id) => Some(trait_id),
                     _ => None,
                 }
@@ -362,9 +361,8 @@ impl TyExt for Ty {
     }
 
     fn is_copy(self, db: &dyn HirDatabase, owner: DefWithBodyId) -> bool {
-        let crate_id = owner.module(db.upcast()).krate();
-        let Some(copy_trait) = db.lang_item(crate_id, LangItem::Copy).and_then(|it| it.as_trait())
-        else {
+        let crate_id = owner.module(db).krate();
+        let Some(copy_trait) = LangItem::Copy.resolve_trait(db, crate_id) else {
             return false;
         };
         let trait_ref = TyBuilder::trait_ref(db, copy_trait).push(self).build();
@@ -416,16 +414,15 @@ pub trait ProjectionTyExt {
 impl ProjectionTyExt for ProjectionTy {
     fn trait_ref(&self, db: &dyn HirDatabase) -> TraitRef {
         // FIXME: something like `Split` trait from chalk-solve might be nice.
-        let generics = generics(db.upcast(), from_assoc_type_id(self.associated_ty_id).into());
-        let substitution = Substitution::from_iter(
-            Interner,
-            self.substitution.iter(Interner).skip(generics.len_self()),
-        );
+        let generics = generics(db, from_assoc_type_id(self.associated_ty_id).into());
+        let parent_len = generics.parent_generics().map_or(0, |g| g.len_self());
+        let substitution =
+            Substitution::from_iter(Interner, self.substitution.iter(Interner).take(parent_len));
         TraitRef { trait_id: to_chalk_trait_id(self.trait_(db)), substitution }
     }
 
     fn trait_(&self, db: &dyn HirDatabase) -> TraitId {
-        match from_assoc_type_id(self.associated_ty_id).lookup(db.upcast()).container {
+        match from_assoc_type_id(self.associated_ty_id).lookup(db).container {
             ItemContainerId::TraitId(it) => it,
             _ => panic!("projection ty without parent trait"),
         }
@@ -437,13 +434,25 @@ impl ProjectionTyExt for ProjectionTy {
 }
 
 pub trait DynTyExt {
-    fn principal(&self) -> Option<&TraitRef>;
+    fn principal(&self) -> Option<Binders<Binders<&TraitRef>>>;
+    fn principal_id(&self) -> Option<chalk_ir::TraitId<Interner>>;
 }
 
 impl DynTyExt for DynTy {
-    fn principal(&self) -> Option<&TraitRef> {
+    fn principal(&self) -> Option<Binders<Binders<&TraitRef>>> {
+        self.bounds.as_ref().filter_map(|bounds| {
+            bounds.interned().first().and_then(|b| {
+                b.as_ref().filter_map(|b| match b {
+                    crate::WhereClause::Implemented(trait_ref) => Some(trait_ref),
+                    _ => None,
+                })
+            })
+        })
+    }
+
+    fn principal_id(&self) -> Option<chalk_ir::TraitId<Interner>> {
         self.bounds.skip_binders().interned().first().and_then(|b| match b.skip_binders() {
-            crate::WhereClause::Implemented(trait_ref) => Some(trait_ref),
+            crate::WhereClause::Implemented(trait_ref) => Some(trait_ref.trait_id),
             _ => None,
         })
     }

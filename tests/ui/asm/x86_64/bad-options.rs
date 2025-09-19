@@ -1,6 +1,6 @@
 //@ only-x86_64
 
-#![feature(asm_unwind, asm_goto)]
+#![feature(asm_unwind)]
 
 use std::arch::{asm, global_asm};
 
@@ -33,14 +33,14 @@ fn main() {
 }
 
 global_asm!("", options(nomem));
-//~^ ERROR expected one of
+//~^ ERROR the `nomem` option cannot be used with `global_asm!`
 global_asm!("", options(readonly));
-//~^ ERROR expected one of
+//~^ ERROR the `readonly` option cannot be used with `global_asm!`
 global_asm!("", options(noreturn));
-//~^ ERROR expected one of
+//~^ ERROR the `noreturn` option cannot be used with `global_asm!`
 global_asm!("", options(pure));
-//~^ ERROR expected one of
+//~^ ERROR the `pure` option cannot be used with `global_asm!`
 global_asm!("", options(nostack));
-//~^ ERROR expected one of
+//~^ ERROR the `nostack` option cannot be used with `global_asm!`
 global_asm!("", options(preserves_flags));
-//~^ ERROR expected one of
+//~^ ERROR the `preserves_flags` option cannot be used with `global_asm!`

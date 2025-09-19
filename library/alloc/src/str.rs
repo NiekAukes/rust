@@ -9,19 +9,7 @@
 
 use core::borrow::{Borrow, BorrowMut};
 use core::iter::FusedIterator;
-use core::mem;
-use core::ptr;
-use core::str::pattern::{DoubleEndedSearcher, Pattern, ReverseSearcher, Searcher};
-use core::unicode::conversions;
-
-use crate::borrow::ToOwned;
-use crate::boxed::Box;
-use crate::slice::{Concat, Join, SliceIndex};
-use crate::string::String;
-use crate::vec::Vec;
-
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use core::str::pattern;
+use core::mem::MaybeUninit;
 #[stable(feature = "encode_utf16", since = "1.8.0")]
 pub use core::str::EncodeUtf16;
 #[stable(feature = "split_ascii_whitespace", since = "1.34.0")]
@@ -30,12 +18,11 @@ pub use core::str::SplitAsciiWhitespace;
 pub use core::str::SplitInclusive;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::SplitWhitespace;
-#[unstable(feature = "str_from_raw_parts", issue = "119206")]
-pub use core::str::{from_raw_parts, from_raw_parts_mut};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::str::{from_utf8, from_utf8_mut, Bytes, CharIndices, Chars};
+pub use core::str::pattern;
+use core::str::pattern::{DoubleEndedSearcher, Pattern, ReverseSearcher, Searcher, Utf8Pattern};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::str::{from_utf8_unchecked, from_utf8_unchecked_mut, ParseBoolError};
+pub use core::str::{Bytes, CharIndices, Chars, from_utf8, from_utf8_mut};
 #[stable(feature = "str_escape", since = "1.34.0")]
 pub use core::str::{EscapeDebug, EscapeDefault, EscapeUnicode};
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -48,6 +35,8 @@ pub use core::str::{MatchIndices, RMatchIndices};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::{Matches, RMatches};
 #[stable(feature = "rust1", since = "1.0.0")]
+pub use core::str::{ParseBoolError, from_utf8_unchecked, from_utf8_unchecked_mut};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::{RSplit, Split};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::{RSplitN, SplitN};
@@ -55,6 +44,16 @@ pub use core::str::{RSplitN, SplitN};
 pub use core::str::{RSplitTerminator, SplitTerminator};
 #[stable(feature = "utf8_chunks", since = "1.79.0")]
 pub use core::str::{Utf8Chunk, Utf8Chunks};
+#[unstable(feature = "str_from_raw_parts", issue = "119206")]
+pub use core::str::{from_raw_parts, from_raw_parts_mut};
+use core::unicode::conversions;
+use core::{mem, ptr};
+
+use crate::borrow::ToOwned;
+use crate::boxed::Box;
+use crate::slice::{Concat, Join, SliceIndex};
+use crate::string::String;
+use crate::vec::Vec;
 
 /// Note: `str` in `Concat<str>` is not meaningful here.
 /// This type parameter of the trait only exists to enable another impl.
@@ -206,20 +205,20 @@ impl BorrowMut<str> for String {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl ToOwned for str {
     type Owned = String;
+
     #[inline]
     fn to_owned(&self) -> String {
         unsafe { String::from_utf8_unchecked(self.as_bytes().to_owned()) }
     }
 
+    #[inline]
     fn clone_into(&self, target: &mut String) {
-        let mut b = mem::take(target).into_bytes();
-        self.as_bytes().clone_into(&mut b);
-        *target = unsafe { String::from_utf8_unchecked(b) }
+        target.clear();
+        target.push_str(self);
     }
 }
 
 /// Methods for string slices.
-#[cfg(not(test))]
 impl str {
     /// Converts a `Box<str>` into a `Box<[u8]>` without copying or allocating.
     ///
@@ -235,7 +234,7 @@ impl str {
     #[stable(feature = "str_box_extras", since = "1.20.0")]
     #[must_use = "`self` will be dropped if the result is not used"]
     #[inline]
-    pub fn into_boxed_bytes(self: Box<str>) -> Box<[u8]> {
+    pub fn into_boxed_bytes(self: Box<Self>) -> Box<[u8]> {
         self.into()
     }
 
@@ -246,8 +245,6 @@ impl str {
     /// replaces them with the replacement string slice.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```
     /// let s = "this is old";
@@ -268,8 +265,24 @@ impl str {
                   without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn replace<'a, P: Pattern<'a>>(&'a self, from: P, to: &str) -> String {
-        let mut result = String::new();
+    pub fn replace<P: Pattern>(&self, from: P, to: &str) -> String {
+        // Fast path for replacing a single ASCII character with another.
+        if let Some(from_byte) = match from.as_utf8_pattern() {
+            Some(Utf8Pattern::StringPattern([from_byte])) => Some(*from_byte),
+            Some(Utf8Pattern::CharPattern(c)) => c.as_ascii().map(|ascii_char| ascii_char.to_u8()),
+            _ => None,
+        } {
+            if let [to_byte] = to.as_bytes() {
+                return unsafe { replace_ascii(self.as_bytes(), from_byte, *to_byte) };
+            }
+        }
+        // Set result capacity to self.len() when from.len() <= to.len()
+        let default_capacity = match from.as_utf8_pattern() {
+            Some(Utf8Pattern::StringPattern(s)) if s.len() <= to.len() => self.len(),
+            Some(Utf8Pattern::CharPattern(c)) if c.len_utf8() <= to.len() => self.len(),
+            _ => 0,
+        };
+        let mut result = String::with_capacity(default_capacity);
         let mut last_end = 0;
         for (start, part) in self.match_indices(from) {
             result.push_str(unsafe { self.get_unchecked(last_end..start) });
@@ -288,8 +301,6 @@ impl str {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```
     /// let s = "foo foo 123 foo";
     /// assert_eq!("new new 123 foo", s.replacen("foo", "new", 2));
@@ -305,10 +316,11 @@ impl str {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[rustc_allow_incoherent_impl]
+    #[doc(alias = "replace_first")]
     #[must_use = "this returns the replaced string as a new allocation, \
                   without modifying the original"]
     #[stable(feature = "str_replacen", since = "1.16.0")]
-    pub fn replacen<'a, P: Pattern<'a>>(&'a self, pat: P, to: &str, count: usize) -> String {
+    pub fn replacen<P: Pattern>(&self, pat: P, to: &str, count: usize) -> String {
         // Hope to reduce the times of re-allocation
         let mut result = String::with_capacity(32);
         let mut last_end = 0;
@@ -366,23 +378,19 @@ impl str {
                   without modifying the original"]
     #[stable(feature = "unicode_case_mapping", since = "1.2.0")]
     pub fn to_lowercase(&self) -> String {
-        let out = convert_while_ascii(self.as_bytes(), u8::to_ascii_lowercase);
+        let (mut s, rest) = convert_while_ascii(self, u8::to_ascii_lowercase);
 
-        // Safety: we know this is a valid char boundary since
-        // out.len() is only progressed if ascii bytes are found
-        let rest = unsafe { self.get_unchecked(out.len()..) };
+        let prefix_len = s.len();
 
-        // Safety: We have written only valid ASCII to our vec
-        let mut s = unsafe { String::from_utf8_unchecked(out) };
-
-        for (i, c) in rest[..].char_indices() {
+        for (i, c) in rest.char_indices() {
             if c == 'Σ' {
                 // Σ maps to σ, except at the end of a word where it maps to ς.
                 // This is the only conditional (contextual) but language-independent mapping
                 // in `SpecialCasing.txt`,
                 // so hard-code it rather than have a generic "condition" mechanism.
                 // See https://github.com/rust-lang/rust/issues/26035
-                map_uppercase_sigma(rest, i, &mut s)
+                let sigma_lowercase = map_uppercase_sigma(self, prefix_len + i);
+                s.push(sigma_lowercase);
             } else {
                 match conversions::to_lower(c) {
                     [a, '\0', _] => s.push(a),
@@ -400,13 +408,13 @@ impl str {
         }
         return s;
 
-        fn map_uppercase_sigma(from: &str, i: usize, to: &mut String) {
+        fn map_uppercase_sigma(from: &str, i: usize) -> char {
             // See https://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
             // for the definition of `Final_Sigma`.
             debug_assert!('Σ'.len_utf8() == 2);
             let is_word_final = case_ignorable_then_cased(from[..i].chars().rev())
                 && !case_ignorable_then_cased(from[i + 2..].chars());
-            to.push_str(if is_word_final { "ς" } else { "σ" });
+            if is_word_final { 'ς' } else { 'σ' }
         }
 
         fn case_ignorable_then_cased<I: Iterator<Item = char>>(iter: I) -> bool {
@@ -457,14 +465,7 @@ impl str {
                   without modifying the original"]
     #[stable(feature = "unicode_case_mapping", since = "1.2.0")]
     pub fn to_uppercase(&self) -> String {
-        let out = convert_while_ascii(self.as_bytes(), u8::to_ascii_uppercase);
-
-        // Safety: we know this is a valid char boundary since
-        // out.len() is only progressed if ascii bytes are found
-        let rest = unsafe { self.get_unchecked(out.len()..) };
-
-        // Safety: We have written only valid ASCII to our vec
-        let mut s = unsafe { String::from_utf8_unchecked(out) };
+        let (mut s, rest) = convert_while_ascii(self, u8::to_ascii_uppercase);
 
         for c in rest.chars() {
             match conversions::to_upper(c) {
@@ -497,7 +498,7 @@ impl str {
     #[rustc_allow_incoherent_impl]
     #[must_use = "`self` will be dropped if the result is not used"]
     #[inline]
-    pub fn into_string(self: Box<str>) -> String {
+    pub fn into_string(self: Box<Self>) -> String {
         let slice = Box::<[u8]>::from(self);
         unsafe { String::from_utf8_unchecked(slice.into_vec()) }
     }
@@ -526,6 +527,7 @@ impl str {
     #[rustc_allow_incoherent_impl]
     #[must_use]
     #[stable(feature = "repeat_str", since = "1.16.0")]
+    #[inline]
     pub fn repeat(&self, n: usize) -> String {
         unsafe { String::from_utf8_unchecked(self.as_bytes().repeat(n)) }
     }
@@ -598,6 +600,10 @@ impl str {
 /// Converts a boxed slice of bytes to a boxed string slice without checking
 /// that the string contains valid UTF-8.
 ///
+/// # Safety
+///
+/// * The provided bytes must contain a valid UTF-8 sequence.
+///
 /// # Examples
 ///
 /// ```
@@ -613,50 +619,96 @@ pub unsafe fn from_boxed_utf8_unchecked(v: Box<[u8]>) -> Box<str> {
     unsafe { Box::from_raw(Box::into_raw(v) as *mut str) }
 }
 
-/// Converts the bytes while the bytes are still ascii.
+/// Converts leading ascii bytes in `s` by calling the `convert` function.
+///
 /// For better average performance, this happens in chunks of `2*size_of::<usize>()`.
-/// Returns a vec with the converted bytes.
+///
+/// Returns a tuple of the converted prefix and the remainder starting from
+/// the first non-ascii character.
+///
+/// This function is only public so that it can be verified in a codegen test,
+/// see `issue-123712-str-to-lower-autovectorization.rs`.
+#[unstable(feature = "str_internals", issue = "none")]
+#[doc(hidden)]
 #[inline]
-#[cfg(not(test))]
 #[cfg(not(no_global_oom_handling))]
-fn convert_while_ascii(b: &[u8], convert: fn(&u8) -> u8) -> Vec<u8> {
-    let mut out = Vec::with_capacity(b.len());
+pub fn convert_while_ascii(s: &str, convert: fn(&u8) -> u8) -> (String, &str) {
+    // Process the input in chunks of 16 bytes to enable auto-vectorization.
+    // Previously the chunk size depended on the size of `usize`,
+    // but on 32-bit platforms with sse or neon is also the better choice.
+    // The only downside on other platforms would be a bit more loop-unrolling.
+    const N: usize = 16;
 
-    const USIZE_SIZE: usize = mem::size_of::<usize>();
-    const MAGIC_UNROLL: usize = 2;
-    const N: usize = USIZE_SIZE * MAGIC_UNROLL;
-    const NONASCII_MASK: usize = usize::from_ne_bytes([0x80; USIZE_SIZE]);
+    let mut slice = s.as_bytes();
+    let mut out = Vec::with_capacity(slice.len());
+    let mut out_slice = out.spare_capacity_mut();
 
-    let mut i = 0;
-    unsafe {
-        while i + N <= b.len() {
-            // Safety: we have checks the sizes `b` and `out` to know that our
-            let in_chunk = b.get_unchecked(i..i + N);
-            let out_chunk = out.spare_capacity_mut().get_unchecked_mut(i..i + N);
+    let mut ascii_prefix_len = 0_usize;
+    let mut is_ascii = [false; N];
 
-            let mut bits = 0;
-            for j in 0..MAGIC_UNROLL {
-                // read the bytes 1 usize at a time (unaligned since we haven't checked the alignment)
-                // safety: in_chunk is valid bytes in the range
-                bits |= in_chunk.as_ptr().cast::<usize>().add(j).read_unaligned();
-            }
-            // if our chunks aren't ascii, then return only the prior bytes as init
-            if bits & NONASCII_MASK != 0 {
-                break;
-            }
+    while slice.len() >= N {
+        // SAFETY: checked in loop condition
+        let chunk = unsafe { slice.get_unchecked(..N) };
+        // SAFETY: out_slice has at least same length as input slice and gets sliced with the same offsets
+        let out_chunk = unsafe { out_slice.get_unchecked_mut(..N) };
 
-            // perform the case conversions on N bytes (gets heavily autovec'd)
-            for j in 0..N {
-                // safety: in_chunk and out_chunk is valid bytes in the range
-                let out = out_chunk.get_unchecked_mut(j);
-                out.write(convert(in_chunk.get_unchecked(j)));
-            }
-
-            // mark these bytes as initialised
-            i += N;
+        for j in 0..N {
+            is_ascii[j] = chunk[j] <= 127;
         }
-        out.set_len(i);
+
+        // Auto-vectorization for this check is a bit fragile, sum and comparing against the chunk
+        // size gives the best result, specifically a pmovmsk instruction on x86.
+        // See https://github.com/llvm/llvm-project/issues/96395 for why llvm currently does not
+        // currently recognize other similar idioms.
+        if is_ascii.iter().map(|x| *x as u8).sum::<u8>() as usize != N {
+            break;
+        }
+
+        for j in 0..N {
+            out_chunk[j] = MaybeUninit::new(convert(&chunk[j]));
+        }
+
+        ascii_prefix_len += N;
+        slice = unsafe { slice.get_unchecked(N..) };
+        out_slice = unsafe { out_slice.get_unchecked_mut(N..) };
     }
 
-    out
+    // handle the remainder as individual bytes
+    while slice.len() > 0 {
+        let byte = slice[0];
+        if byte > 127 {
+            break;
+        }
+        // SAFETY: out_slice has at least same length as input slice
+        unsafe {
+            *out_slice.get_unchecked_mut(0) = MaybeUninit::new(convert(&byte));
+        }
+        ascii_prefix_len += 1;
+        slice = unsafe { slice.get_unchecked(1..) };
+        out_slice = unsafe { out_slice.get_unchecked_mut(1..) };
+    }
+
+    unsafe {
+        // SAFETY: ascii_prefix_len bytes have been initialized above
+        out.set_len(ascii_prefix_len);
+
+        // SAFETY: We have written only valid ascii to the output vec
+        let ascii_string = String::from_utf8_unchecked(out);
+
+        // SAFETY: we know this is a valid char boundary
+        // since we only skipped over leading ascii bytes
+        let rest = core::str::from_utf8_unchecked(slice);
+
+        (ascii_string, rest)
+    }
+}
+#[inline]
+#[cfg(not(no_global_oom_handling))]
+#[allow(dead_code)]
+/// Faster implementation of string replacement for ASCII to ASCII cases.
+/// Should produce fast vectorized code.
+unsafe fn replace_ascii(utf8_bytes: &[u8], from: u8, to: u8) -> String {
+    let result: Vec<u8> = utf8_bytes.iter().map(|b| if *b == from { to } else { *b }).collect();
+    // SAFETY: We replaced ascii with ascii on valid utf8 strings.
+    unsafe { String::from_utf8_unchecked(result) }
 }

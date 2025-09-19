@@ -1,5 +1,5 @@
+//@ edition: 2015
 //@ run-pass
-//@ pretty-expanded FIXME #23616
 
 #![deny(warnings)]
 #![allow(unused_imports)]

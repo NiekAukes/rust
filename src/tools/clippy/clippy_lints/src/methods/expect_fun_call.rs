@@ -1,5 +1,5 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::macros::{find_format_args, format_args_inputs_span, root_macro_call_first_node};
+use clippy_utils::macros::{FormatArgsStorage, format_args_inputs_span, root_macro_call_first_node};
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::ty::{is_type_diagnostic_item, is_type_lang_item};
 use rustc_errors::Applicability;
@@ -7,7 +7,7 @@ use rustc_hir as hir;
 use rustc_lint::LateContext;
 use rustc_middle::ty;
 use rustc_span::symbol::sym;
-use rustc_span::Span;
+use rustc_span::{Span, Symbol};
 use std::borrow::Cow;
 
 use super::EXPECT_FUN_CALL;
@@ -16,9 +16,10 @@ use super::EXPECT_FUN_CALL;
 #[allow(clippy::too_many_lines)]
 pub(super) fn check<'tcx>(
     cx: &LateContext<'tcx>,
+    format_args_storage: &FormatArgsStorage,
     expr: &hir::Expr<'_>,
     method_span: Span,
-    name: &str,
+    name: Symbol,
     receiver: &'tcx hir::Expr<'tcx>,
     args: &'tcx [hir::Expr<'tcx>],
 ) {
@@ -53,11 +54,12 @@ pub(super) fn check<'tcx>(
         if is_type_lang_item(cx, arg_ty, hir::LangItem::String) {
             return false;
         }
-        if let ty::Ref(_, ty, ..) = arg_ty.kind() {
-            if ty.is_str() && can_be_static_str(cx, arg) {
-                return false;
-            }
-        };
+        if let ty::Ref(_, ty, ..) = arg_ty.kind()
+            && ty.is_str()
+            && can_be_static_str(cx, arg)
+        {
+            return false;
+        }
         true
     }
 
@@ -82,7 +84,7 @@ pub(super) fn check<'tcx>(
             hir::ExprKind::MethodCall(..) => {
                 cx.typeck_results()
                     .type_dependent_def_id(arg.hir_id)
-                    .map_or(false, |method_id| {
+                    .is_some_and(|method_id| {
                         matches!(
                             cx.tcx.fn_sig(method_id).instantiate_identity().output().skip_binder().kind(),
                             ty::Ref(re, ..) if re.is_static()
@@ -112,7 +114,7 @@ pub(super) fn check<'tcx>(
         }
     }
 
-    if args.len() != 1 || name != "expect" || !is_call(&args[0].kind) {
+    if args.len() != 1 || name != sym::expect || !is_call(&args[0].kind) {
         return;
     }
 
@@ -134,15 +136,15 @@ pub(super) fn check<'tcx>(
     // Special handling for `format!` as arg_root
     if let Some(macro_call) = root_macro_call_first_node(cx, arg_root) {
         if cx.tcx.is_diagnostic_item(sym::format_macro, macro_call.def_id)
-            && let Some(format_args) = find_format_args(cx, arg_root, macro_call.expn)
+            && let Some(format_args) = format_args_storage.get(cx, arg_root, macro_call.expn)
         {
-            let span = format_args_inputs_span(&format_args);
+            let span = format_args_inputs_span(format_args);
             let sugg = snippet_with_applicability(cx, span, "..", &mut applicability);
             span_lint_and_sugg(
                 cx,
                 EXPECT_FUN_CALL,
                 span_replace_word,
-                format!("use of `{name}` followed by a function call"),
+                format!("function call inside of `{name}`"),
                 "try",
                 format!("unwrap_or_else({closure_args} panic!({sugg}))"),
                 applicability,
@@ -160,7 +162,7 @@ pub(super) fn check<'tcx>(
         cx,
         EXPECT_FUN_CALL,
         span_replace_word,
-        format!("use of `{name}` followed by a function call"),
+        format!("function call inside of `{name}`"),
         "try",
         format!("unwrap_or_else({closure_args} {{ panic!(\"{{}}\", {arg_root_snippet}) }})"),
         applicability,

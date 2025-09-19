@@ -1,20 +1,16 @@
-use super::flags::FlagComputation;
-use super::{DebruijnIndex, DebugWithInfcx, InferCtxtLike, TyCtxt, TypeFlags, WithInfcx};
-use crate::arena::Arena;
-use rustc_data_structures::aligned::{align_of, Aligned};
-use rustc_serialize::{Encodable, Encoder};
 use std::alloc::Layout;
 use std::cmp::Ordering;
-use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::iter;
-use std::mem;
 use std::ops::Deref;
-use std::ptr;
-use std::slice;
+use std::{fmt, iter, mem, ptr, slice};
 
-#[cfg(parallel_compiler)]
+use rustc_data_structures::aligned::{Aligned, align_of};
 use rustc_data_structures::sync::DynSync;
+use rustc_serialize::{Encodable, Encoder};
+use rustc_type_ir::FlagComputation;
+
+use super::{DebruijnIndex, TyCtxt, TypeFlags};
+use crate::arena::Arena;
 
 /// `List<T>` is a bit like `&[T]`, but with some critical differences.
 /// - IMPORTANT: Every `List<T>` is *required* to have unique contents. The
@@ -25,7 +21,7 @@ use rustc_data_structures::sync::DynSync;
 ///   pointer.
 /// - Because of this, you cannot get a `List<T>` that is a sub-list of another
 ///   `List<T>`. You can get a sub-slice `&[T]`, however.
-/// - `List<T>` can be used with `CopyTaggedPtr`, which is useful within
+/// - `List<T>` can be used with `TaggedRef`, which is useful within
 ///   structs whose size must be minimized.
 /// - Because of the uniqueness assumption, we can use the address of a
 ///   `List<T>` for faster equality comparisons and hashing.
@@ -61,7 +57,7 @@ impl<T> Default for &List<T> {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     /// A dummy type used to force `List` to be unsized while not requiring
     /// references to it be wide pointers.
     type OpaqueListContents;
@@ -97,7 +93,7 @@ impl<H, T> RawList<H, T> {
         T: Copy,
     {
         assert!(!mem::needs_drop::<T>());
-        assert!(mem::size_of::<T>() != 0);
+        assert!(size_of::<T>() != 0);
         assert!(!slice.is_empty());
 
         let (layout, _offset) =
@@ -106,13 +102,13 @@ impl<H, T> RawList<H, T> {
         let mem = arena.dropless.alloc_raw(layout) as *mut RawList<H, T>;
         unsafe {
             // Write the header
-            ptr::addr_of_mut!((*mem).skel.header).write(header);
+            (&raw mut (*mem).skel.header).write(header);
 
             // Write the length
-            ptr::addr_of_mut!((*mem).skel.len).write(slice.len());
+            (&raw mut (*mem).skel.len).write(slice.len());
 
             // Write the elements
-            ptr::addr_of_mut!((*mem).skel.data)
+            (&raw mut (*mem).skel.data)
                 .cast::<T>()
                 .copy_from_nonoverlapping(slice.as_ptr(), slice.len());
 
@@ -133,6 +129,20 @@ impl<H, T> RawList<H, T> {
     }
 }
 
+impl<'a, H, T: Copy> rustc_type_ir::inherent::SliceLike for &'a RawList<H, T> {
+    type Item = T;
+
+    type IntoIter = iter::Copied<<&'a [T] as IntoIterator>::IntoIter>;
+
+    fn iter(self) -> Self::IntoIter {
+        (*self).iter()
+    }
+
+    fn as_slice(&self) -> &[Self::Item] {
+        (*self).as_slice()
+    }
+}
+
 macro_rules! impl_list_empty {
     ($header_ty:ty, $header_init:expr) => {
         impl<T> RawList<$header_ty, T> {
@@ -145,11 +155,11 @@ macro_rules! impl_list_empty {
                 static EMPTY: ListSkeleton<$header_ty, MaxAlign> =
                     ListSkeleton { header: $header_init, len: 0, data: [] };
 
-                assert!(mem::align_of::<T>() <= mem::align_of::<MaxAlign>());
+                assert!(align_of::<T>() <= align_of::<MaxAlign>());
 
                 // SAFETY: `EMPTY` is sufficiently aligned to be an empty list for all
                 // types with `align_of(T) <= align_of(MaxAlign)`, which we checked above.
-                unsafe { &*(std::ptr::addr_of!(EMPTY) as *const RawList<$header_ty, T>) }
+                unsafe { &*((&raw const EMPTY) as *const RawList<$header_ty, T>) }
             }
         }
     };
@@ -160,14 +170,6 @@ impl_list_empty!((), ());
 impl<H, T: fmt::Debug> fmt::Debug for RawList<H, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (**self).fmt(f)
-    }
-}
-impl<'tcx, H, T: DebugWithInfcx<TyCtxt<'tcx>>> DebugWithInfcx<TyCtxt<'tcx>> for RawList<H, T> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        fmt::Debug::fmt(&this.map(|this| this.as_slice()), f)
     }
 }
 
@@ -235,7 +237,7 @@ impl<H, T> Deref for RawList<H, T> {
 impl<H, T> AsRef<[T]> for RawList<H, T> {
     #[inline(always)]
     fn as_ref(&self) -> &[T] {
-        let data_ptr = ptr::addr_of!(self.skel.data).cast::<T>();
+        let data_ptr = (&raw const self.skel.data).cast::<T>();
         // SAFETY: `data_ptr` has the same provenance as `self` and can therefore
         // access the `self.skel.len` elements stored at `self.skel.data`.
         // Note that we specifically don't reborrow `&self.skel.data`, because that
@@ -256,7 +258,6 @@ impl<'a, H, T: Copy> IntoIterator for &'a RawList<H, T> {
 unsafe impl<H: Sync, T: Sync> Sync for RawList<H, T> {}
 
 // We need this since `List` uses extern type `OpaqueListContents`.
-#[cfg(parallel_compiler)]
 unsafe impl<H: DynSync, T: DynSync> DynSync for RawList<H, T> {}
 
 // Safety:
@@ -298,8 +299,8 @@ impl TypeInfo {
     }
 }
 
-impl From<FlagComputation> for TypeInfo {
-    fn from(computation: FlagComputation) -> TypeInfo {
+impl<'tcx> From<FlagComputation<TyCtxt<'tcx>>> for TypeInfo {
+    fn from(computation: FlagComputation<TyCtxt<'tcx>>) -> TypeInfo {
         TypeInfo {
             flags: computation.flags,
             outer_exclusive_binder: computation.outer_exclusive_binder,

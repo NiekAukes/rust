@@ -8,9 +8,9 @@
 // See https://github.com/rust-lang/rust/issues/71078 for more details.
 
 static FOO: () = FOO;
-//~^ ERROR could not evaluate static initializer
+//~^ ERROR encountered static that tried to initialize itself with itself
 
-static A: () = B; //~ cycle detected when evaluating initializer of static `A`
+static A: () = B; //~ ERROR cycle detected when evaluating initializer of static `A`
 static B: () = A;
 
 fn main() {

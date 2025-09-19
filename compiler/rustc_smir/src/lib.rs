@@ -6,16 +6,20 @@
 //!
 //! This API is still completely unstable and subject to change.
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
+#![allow(rustc::usage_of_ty_tykind)]
+#![cfg_attr(not(bootstrap), feature(sized_hierarchy))]
 #![doc(
     html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
     test(attr(allow(unused_variables), deny(warnings)))
 )]
 #![doc(rust_logo)]
 #![feature(rustdoc_internals)]
-#![allow(internal_features)]
-#![allow(rustc::usage_of_ty_tykind)]
+// tidy-alphabetical-end
 
 pub mod rustc_internal;
 
-// Make this module private for now since external users should not call these directly.
-mod rustc_smir;
+pub mod rustc_smir;
+
+pub mod stable_mir;

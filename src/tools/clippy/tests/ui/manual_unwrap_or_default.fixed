@@ -26,14 +26,22 @@ fn main() {
         Some(x) => x,
         None => &[],
     };
+
+    let x: Result<String, i64> = Ok(String::new());
+    x.unwrap_or_default();
+
+    let x: Result<String, i64> = Ok(String::new());
+    x.unwrap_or_default();
 }
 
 // Issue #12531
 unsafe fn no_deref_ptr(a: Option<i32>, b: *const Option<i32>) -> i32 {
-    match a {
-        // `*b` being correct depends on `a == Some(_)`
-        Some(_) => (*b).unwrap_or_default(),
-        _ => 0,
+    unsafe {
+        match a {
+            // `*b` being correct depends on `a == Some(_)`
+            Some(_) => (*b).unwrap_or_default(),
+            _ => 0,
+        }
     }
 }
 
@@ -71,4 +79,43 @@ fn issue_12569() {
     } else {
         0
     };
+}
+
+// Should not warn!
+fn issue_12928() {
+    let x = Some((1, 2));
+    let y = if let Some((a, _)) = x { a } else { 0 };
+    let y = if let Some((a, ..)) = x { a } else { 0 };
+    let x = Some([1, 2]);
+    let y = if let Some([a, _]) = x { a } else { 0 };
+    let y = if let Some([a, ..]) = x { a } else { 0 };
+
+    struct X {
+        a: u8,
+        b: u8,
+    }
+    let x = Some(X { a: 0, b: 0 });
+    let y = if let Some(X { a, .. }) = x { a } else { 0 };
+    struct Y(u8, u8);
+    let x = Some(Y(0, 0));
+    let y = if let Some(Y(a, _)) = x { a } else { 0 };
+    let y = if let Some(Y(a, ..)) = x { a } else { 0 };
+}
+
+// For symetry with `manual_unwrap_or` test
+fn allowed_manual_unwrap_or_zero() -> u32 {
+    Some(42).unwrap_or_default()
+}
+
+mod issue14716 {
+    struct Foo {
+        name: Option<String>,
+    }
+
+    fn bar(project: &Foo) {
+        let _name = match project.name {
+            Some(ref x) => x,
+            None => "",
+        };
+    }
 }

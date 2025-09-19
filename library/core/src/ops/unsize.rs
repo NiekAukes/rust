@@ -1,4 +1,4 @@
-use crate::marker::Unsize;
+use crate::marker::{PointeeSized, Unsize};
 
 /// Trait that indicates that this is a pointer or a wrapper for one,
 /// where unsizing can be performed on the pointee.
@@ -33,43 +33,43 @@ use crate::marker::Unsize;
 /// [nomicon-coerce]: ../../nomicon/coercions.html
 #[unstable(feature = "coerce_unsized", issue = "18598")]
 #[lang = "coerce_unsized"]
-pub trait CoerceUnsized<T: ?Sized> {
+pub trait CoerceUnsized<T: PointeeSized> {
     // Empty.
 }
 
 // &mut T -> &mut U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a mut U> for &'a mut T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a mut U> for &'a mut T {}
 // &mut T -> &U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<'a, 'b: 'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a U> for &'b mut T {}
+impl<'a, 'b: 'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a U> for &'b mut T {}
 // &mut T -> *mut U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*mut U> for &'a mut T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*mut U> for &'a mut T {}
 // &mut T -> *const U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*const U> for &'a mut T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for &'a mut T {}
 
 // &T -> &U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<'a, 'b: 'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a U> for &'b T {}
+impl<'a, 'b: 'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a U> for &'b T {}
 // &T -> *const U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*const U> for &'a T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for &'a T {}
 
 // *mut T -> *mut U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*mut U> for *mut T {}
+impl<T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*mut U> for *mut T {}
 // *mut T -> *const U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*const U> for *mut T {}
+impl<T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for *mut T {}
 
 // *const T -> *const U
 #[unstable(feature = "coerce_unsized", issue = "18598")]
-impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*const U> for *const T {}
+impl<T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for *const T {}
 
-/// `DispatchFromDyn` is used in the implementation of object safety checks (specifically allowing
-/// arbitrary self types), to guarantee that a method's receiver type can be dispatched on.
+/// `DispatchFromDyn` is used in the implementation of dyn-compatibility[^1] checks (specifically
+/// allowing arbitrary self types), to guarantee that a method's receiver type can be dispatched on.
 ///
 /// Note: `DispatchFromDyn` was briefly named `CoerceSized` (and had a slightly different
 /// interpretation).
@@ -80,7 +80,7 @@ impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*const U> for *const T {}
 /// type). The compiler must generate an implicit conversion from the trait object/wide pointer to
 /// the concrete reference/narrow pointer. Implementing `DispatchFromDyn` indicates that that
 /// conversion is allowed and thus that the type implementing `DispatchFromDyn` is safe to use as
-/// the self type in an object-safe method. (in the above example, the compiler will require
+/// the self type in an dyn-compatible method. (in the above example, the compiler will require
 /// `DispatchFromDyn` is implemented for `&'a U`).
 ///
 /// `DispatchFromDyn` does not specify the conversion from wide pointer to narrow pointer; the
@@ -112,6 +112,8 @@ impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<*const U> for *const T {}
 ///     T: Unsize<U>,
 /// {}
 /// ```
+///
+/// [^1]: Formerly known as *object safety*.
 #[unstable(feature = "dispatch_from_dyn", issue = "none")]
 #[lang = "dispatch_from_dyn"]
 pub trait DispatchFromDyn<T> {
@@ -120,13 +122,13 @@ pub trait DispatchFromDyn<T> {
 
 // &T -> &U
 #[unstable(feature = "dispatch_from_dyn", issue = "none")]
-impl<'a, T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<&'a U> for &'a T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<&'a U> for &'a T {}
 // &mut T -> &mut U
 #[unstable(feature = "dispatch_from_dyn", issue = "none")]
-impl<'a, T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<&'a mut U> for &'a mut T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<&'a mut U> for &'a mut T {}
 // *const T -> *const U
 #[unstable(feature = "dispatch_from_dyn", issue = "none")]
-impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<*const U> for *const T {}
+impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*const U> for *const T {}
 // *mut T -> *mut U
 #[unstable(feature = "dispatch_from_dyn", issue = "none")]
-impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<*mut U> for *mut T {}
+impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*mut U> for *mut T {}

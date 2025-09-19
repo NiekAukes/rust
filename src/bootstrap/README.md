@@ -1,28 +1,28 @@
-# rustbuild - Bootstrapping Rust
+# Bootstrapping Rust
 
 This README is aimed at helping to explain how Rust is bootstrapped,
-and some of the technical details of the build system.
+and some of the technical details of the bootstrap build system.
 
 Note that this README only covers internal information, not how to use the tool.
 Please check [bootstrapping dev guide][bootstrapping-dev-guide] for further information.
 
-[bootstrapping-dev-guide]: https://rustc-dev-guide.rust-lang.org/building/bootstrapping.html
+[bootstrapping-dev-guide]: https://rustc-dev-guide.rust-lang.org/building/bootstrapping/intro.html
 
 ## Introduction
 
 The build system defers most of the complicated logic of managing invocations
 of rustc and rustdoc to Cargo itself. However, moving through various stages
-and copying artifacts is still necessary for it to do. Each time rustbuild
+and copying artifacts is still necessary for it to do. Each time bootstrap
 is invoked, it will iterate through the list of predefined steps and execute
 each serially in turn if it matches the paths passed or is a default rule.
-For each step, rustbuild relies on the step internally being incremental and
-parallel. Note, though, that the `-j` parameter to rustbuild gets forwarded
+For each step, bootstrap relies on the step internally being incremental and
+parallel. Note, though, that the `-j` parameter to bootstrap gets forwarded
 to appropriate test harnesses and such.
 
 ## Build phases
 
-The rustbuild build system goes through a few phases to actually build the
-compiler. What actually happens when you invoke rustbuild is:
+Bootstrap build system goes through a few phases to actually build the
+compiler. What actually happens when you invoke bootstrap is:
 
 1. The entry point script (`x` for unix like systems, `x.ps1` for windows systems,
    `x.py` cross-platform) is run. This script is responsible for downloading the stage0
@@ -105,6 +105,10 @@ build/
       debuginfo/
       ...
 
+    # Bootstrap host tools (which are always compiled with the stage0 compiler)
+    # are stored here.
+    bootstrap-tools/
+
     # Location where the stage0 Cargo and Rust compiler are unpacked. This
     # directory is purely an extracted and overlaid tarball of these two (done
     # by the bootstrap Python script). In theory, the build system does not
@@ -151,9 +155,9 @@ build/
     stage3/
 ```
 
-## Extending rustbuild
+## Extending bootstrap
 
-When you use the bootstrap system, you'll call it through the entry point script
+When you use bootstrap, you'll call it through the entry point script
 (`x`, `x.ps1`, or `x.py`). However, most of the code lives in `src/bootstrap`.
 `bootstrap` has a difficult problem: it is written in Rust, but yet it is run
 before the Rust compiler is built! To work around this, there are two components
@@ -163,7 +167,7 @@ compiler, which will then build the bootstrap binary written in Rust.
 
 Because there are two separate codebases behind `x.py`, they need to
 be kept in sync. In particular, both `bootstrap.py` and the bootstrap binary
-parse `config.toml` and read the same command line arguments. `bootstrap.py`
+parse `bootstrap.toml` and read the same command line arguments. `bootstrap.py`
 keeps these in sync by setting various environment variables, and the
 programs sometimes have to add arguments that are explicitly ignored, to be
 read by the other.
@@ -182,10 +186,8 @@ Some general areas that you may be interested in modifying are:
   `Config` struct.
 * Adding a sanity check? Take a look at `bootstrap/src/core/sanity.rs`.
 
-If you make a major change on bootstrap configuration, please remember to:
-
-+ Update `CONFIG_CHANGE_HISTORY` in `src/bootstrap/src/utils/change_tracker.rs`.
-* Update `change-id = {pull-request-id}` in `config.example.toml`.
+If you make a major change on bootstrap configuration, please add a new entry to
+`CONFIG_CHANGE_HISTORY` in `src/bootstrap/src/utils/change_tracker.rs`.
 
 A 'major change' includes
 
@@ -201,6 +203,10 @@ please file issues on the [Rust issue tracker][rust-issue-tracker].
 
 [rust-bootstrap-zulip]: https://rust-lang.zulipchat.com/#narrow/stream/t-infra.2Fbootstrap
 [rust-issue-tracker]: https://github.com/rust-lang/rust/issues
+
+## Testing
+
+To run bootstrap tests, execute `x test bootstrap`. If you want to bless snapshot tests, then install `cargo-insta` (`cargo install cargo-insta`) and then run `cargo insta review --manifest-path src/bootstrap/Cargo.toml`.
 
 ## Changelog
 

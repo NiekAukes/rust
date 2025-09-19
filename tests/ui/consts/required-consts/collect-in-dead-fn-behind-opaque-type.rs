@@ -8,7 +8,7 @@
 mod m {
     struct Fail<T>(T);
     impl<T> Fail<T> {
-        const C: () = panic!(); //~ERROR evaluation of `m::Fail::<i32>::C` failed
+        const C: () = panic!(); //~ERROR: evaluation panicked: explicit panic
     }
 
     pub type NotCalledFn = impl Fn();
@@ -20,6 +20,7 @@ mod m {
         }
     }
 
+    #[define_opaque(NotCalledFn)]
     fn mk_not_called() -> NotCalledFn {
         not_called::<i32>
     }

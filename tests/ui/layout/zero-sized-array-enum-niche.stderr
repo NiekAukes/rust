@@ -1,10 +1,9 @@
 error: layout_of(Result<[u32; 0], bool>) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Aggregate {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -25,6 +24,7 @@ error: layout_of(Result<[u32; 0], bool>) = Layout {
                    valid_range: 0..=1,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -38,11 +38,10 @@ error: layout_of(Result<[u32; 0], bool>) = Layout {
                variants: [
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -54,19 +53,20 @@ error: layout_of(Result<[u32; 0], bool>) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(4 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -87,29 +87,31 @@ error: layout_of(Result<[u32; 0], bool>) = Layout {
                                valid_range: 0..=1,
                            },
                        ),
+                       uninhabited: false,
                        variants: Single {
                            index: 1,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
            max_repr_align: None,
            unadjusted_abi_align: Align(4 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/zero-sized-array-enum-niche.rs:13:1
+  --> $DIR/zero-sized-array-enum-niche.rs:14:1
    |
 LL | type AlignedResult = Result<[u32; 0], bool>;
    | ^^^^^^^^^^^^^^^^^^
 
 error: layout_of(MultipleAlignments) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Aggregate {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -130,6 +132,7 @@ error: layout_of(MultipleAlignments) = Layout {
                    valid_range: 0..=2,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -143,11 +146,10 @@ error: layout_of(MultipleAlignments) = Layout {
                variants: [
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(2 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -159,19 +161,20 @@ error: layout_of(MultipleAlignments) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(2 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -183,19 +186,20 @@ error: layout_of(MultipleAlignments) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 1,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(4 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -216,29 +220,31 @@ error: layout_of(MultipleAlignments) = Layout {
                                valid_range: 0..=1,
                            },
                        ),
+                       uninhabited: false,
                        variants: Single {
                            index: 2,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
            max_repr_align: None,
            unadjusted_abi_align: Align(4 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/zero-sized-array-enum-niche.rs:21:1
+  --> $DIR/zero-sized-array-enum-niche.rs:22:1
    |
 LL | enum MultipleAlignments {
    | ^^^^^^^^^^^^^^^^^^^^^^^
 
 error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Aggregate {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -259,6 +265,7 @@ error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
                    valid_range: 0..=1,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -272,11 +279,10 @@ error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
                variants: [
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -288,19 +294,20 @@ error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(4 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(3 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -321,29 +328,31 @@ error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
                                valid_range: 1..=65535,
                            },
                        ),
+                       uninhabited: false,
                        variants: Single {
                            index: 1,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
            max_repr_align: None,
            unadjusted_abi_align: Align(4 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/zero-sized-array-enum-niche.rs:37:1
+  --> $DIR/zero-sized-array-enum-niche.rs:38:1
    |
 LL | type NicheLosesToTagged = Result<[u32; 0], Packed<std::num::NonZero<u16>>>;
    | ^^^^^^^^^^^^^^^^^^^^^^^
 
 error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Aggregate {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -364,6 +373,7 @@ error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
                    valid_range: 0..=1,
                },
            ),
+           uninhabited: false,
            variants: Multiple {
                tag: Initialized {
                    value: Int(
@@ -381,11 +391,10 @@ error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
                variants: [
                    Layout {
                        size: Size(0 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -397,19 +406,20 @@ error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
                            ],
                        },
                        largest_niche: None,
+                       uninhabited: false,
                        variants: Single {
                            index: 0,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(4 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -430,18 +440,21 @@ error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
                                valid_range: 0..=0,
                            },
                        ),
+                       uninhabited: false,
                        variants: Single {
                            index: 1,
                        },
                        max_repr_align: None,
                        unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
            max_repr_align: None,
            unadjusted_abi_align: Align(4 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/zero-sized-array-enum-niche.rs:44:1
+  --> $DIR/zero-sized-array-enum-niche.rs:45:1
    |
 LL | type NicheWinsOverTagged = Result<[u32; 0], Packed<U16IsZero>>;
    | ^^^^^^^^^^^^^^^^^^^^^^^^

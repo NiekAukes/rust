@@ -20,11 +20,11 @@
 //!
 //! unsafe impl GlobalAlloc for MyAllocator {
 //!     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-//!         System.alloc(layout)
+//!         unsafe { System.alloc(layout) }
 //!     }
 //!
 //!     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-//!         System.dealloc(ptr, layout)
+//!         unsafe { System.dealloc(ptr, layout) }
 //!     }
 //! }
 //!
@@ -56,10 +56,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![stable(feature = "alloc_module", since = "1.28.0")]
 
-use core::hint;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, Ordering};
-use core::{mem, ptr};
+use core::sync::atomic::{Atomic, AtomicPtr, Ordering};
+use core::{hint, mem, ptr};
 
 #[stable(feature = "alloc_module", since = "1.28.0")]
 #[doc(inline)]
@@ -73,7 +72,9 @@ pub use alloc_crate::alloc::*;
 /// work, such as to serve alignment requests greater than the alignment
 /// provided directly by the backing system allocator.
 ///
-/// This type implements the `GlobalAlloc` trait and Rust programs by default
+/// This type implements the [`GlobalAlloc`] trait. Currently the default
+/// global allocator is unspecified. Libraries, however, like `cdylib`s and
+/// `staticlib`s are guaranteed to use the [`System`] by default and as such
 /// work as if they had this definition:
 ///
 /// ```rust
@@ -101,7 +102,7 @@ pub use alloc_crate::alloc::*;
 ///
 /// unsafe impl GlobalAlloc for Counter {
 ///     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-///         let ret = System.alloc(layout);
+///         let ret = unsafe { System.alloc(layout) };
 ///         if !ret.is_null() {
 ///             ALLOCATED.fetch_add(layout.size(), Relaxed);
 ///         }
@@ -109,7 +110,7 @@ pub use alloc_crate::alloc::*;
 ///     }
 ///
 ///     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-///         System.dealloc(ptr, layout);
+///         unsafe { System.dealloc(ptr, layout); }
 ///         ALLOCATED.fetch_sub(layout.size(), Relaxed);
 ///     }
 /// }
@@ -286,7 +287,7 @@ unsafe impl Allocator for System {
     }
 }
 
-static HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static HOOK: Atomic<*mut ()> = AtomicPtr::new(ptr::null_mut());
 
 /// Registers a custom allocation error hook, replacing any that was previously registered.
 ///
@@ -344,9 +345,10 @@ pub fn take_alloc_error_hook() -> fn(Layout) {
 }
 
 fn default_alloc_error_hook(layout: Layout) {
-    extern "Rust" {
+    unsafe extern "Rust" {
         // This symbol is emitted by rustc next to __rust_alloc_error_handler.
         // Its value depends on the -Zoom={panic,abort} compiler option.
+        #[rustc_std_internal_symbol]
         static __rust_alloc_error_handler_should_panic: u8;
     }
 

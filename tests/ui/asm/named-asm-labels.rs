@@ -10,9 +10,7 @@
 // which causes less readable LLVM errors and in the worst cases causes ICEs
 // or segfaults based on system dependent behavior and codegen flags.
 
-#![feature(naked_functions, asm_const)]
-
-use std::arch::{asm, global_asm};
+use std::arch::{asm, global_asm, naked_asm};
 
 #[no_mangle]
 pub static FOO: usize = 42;
@@ -28,11 +26,13 @@ fn main() {
         // Multiple labels on one line
         asm!("foo: bar1: nop");
         //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
 
         // Multiple lines
         asm!("foo1: nop", "nop"); //~ ERROR avoid using named labels
         asm!("foo2: foo3: nop", "nop");
         //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
         asm!("nop", "foo4: nop"); //~ ERROR avoid using named labels
         asm!("foo5: nop", "foo6: nop");
         //~^ ERROR avoid using named labels
@@ -41,16 +41,19 @@ fn main() {
         // Statement separator
         asm!("foo7: nop; foo8: nop");
         //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
         asm!("foo9: nop; nop"); //~ ERROR avoid using named labels
         asm!("nop; foo10: nop"); //~ ERROR avoid using named labels
 
         // Escaped newline
         asm!("bar2: nop\n bar3: nop");
         //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
         asm!("bar4: nop\n nop"); //~ ERROR avoid using named labels
         asm!("nop\n bar5: nop"); //~ ERROR avoid using named labels
         asm!("nop\n bar6: bar7: nop");
         //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
 
         // Raw strings
         asm!(
@@ -59,6 +62,7 @@ fn main() {
             blah3: nop
             "
         );
+        //~^^^^ ERROR avoid using named labels
         //~^^^^ ERROR avoid using named labels
 
         asm!(
@@ -81,9 +85,15 @@ fn main() {
         asm!("blah1: 2bar: nop"); //~ ERROR avoid using named labels
 
         // Duplicate labels
-        asm!("def: def: nop"); //~ ERROR avoid using named labels
-        asm!("def: nop\ndef: nop"); //~ ERROR avoid using named labels
-        asm!("def: nop; def: nop"); //~ ERROR avoid using named labels
+        asm!("def: def: nop");
+        //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
+        asm!("def: nop\ndef: nop");
+        //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
+        asm!("def: nop; def: nop");
+        //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
 
         // Trying to break parsing
         asm!(":");
@@ -116,6 +126,7 @@ fn main() {
 
         // Tests usage of colons in non-label positions
         asm!(":lo12:FOO"); // this is apparently valid aarch64
+
         // is there an example that is valid x86 for this test?
         asm!(":bbb nop");
 
@@ -141,7 +152,11 @@ fn main() {
         asm!("{1}: nop", "/* {0} */", const 10, const 20); //~ ERROR avoid using named labels
 
         // Test include_str in asm
-        asm!(include_str!("named-asm-labels.s")); //~ ERROR avoid using named labels
+        asm!(include_str!("named-asm-labels.s"));
+        //~^ ERROR avoid using named labels
+        //~^^ ERROR avoid using named labels
+        //~^^^ ERROR avoid using named labels
+        //~^^^^ ERROR avoid using named labels
 
         // Test allowing or warning on the lint instead
         #[allow(named_asm_labels)]
@@ -158,9 +173,10 @@ fn main() {
 
 // Trigger on naked fns too, even though they can't be inlined, reusing a
 // label or LTO can cause labels to break
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn foo() -> i32 {
-    unsafe { asm!(".Lfoo: mov rax, {}; ret;", "nop", const 1, options(noreturn)) } //~ ERROR avoid using named labels
+    naked_asm!(".Lfoo: mov rax, {}; ret;", "nop", const 1)
+    //~^ ERROR avoid using named labels
 }
 
 // Make sure that non-naked attributes *do* still let the lint happen
@@ -170,21 +186,21 @@ pub extern "C" fn bar() {
     //~^ ERROR avoid using named labels
 }
 
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn aaa() {
     fn _local() {}
 
-    unsafe { asm!(".Laaa: nop; ret;", options(noreturn)) } //~ ERROR avoid using named labels
+    naked_asm!(".Laaa: nop; ret;") //~ ERROR avoid using named labels
 }
 
 pub fn normal() {
     fn _local1() {}
 
-    #[naked]
+    #[unsafe(naked)]
     pub extern "C" fn bbb() {
         fn _very_local() {}
 
-        unsafe { asm!(".Lbbb: nop; ret;", options(noreturn)) } //~ ERROR avoid using named labels
+        naked_asm!(".Lbbb: nop; ret;") //~ ERROR avoid using named labels
     }
 
     fn _local2() {}
@@ -201,9 +217,9 @@ fn closures() {
     };
 
     || {
-        #[naked]
-        unsafe extern "C" fn _nested() {
-            asm!("ret;", options(noreturn));
+        #[unsafe(naked)]
+        extern "C" fn _nested() {
+            naked_asm!("ret;");
         }
 
         unsafe {

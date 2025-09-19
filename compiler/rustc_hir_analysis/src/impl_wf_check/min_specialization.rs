@@ -34,7 +34,7 @@
 //! impl<T, I: Iterator<Item=T>> SpecExtend<T> for I { /* default impl */ }
 //! ```
 //!
-//! We get that the generic pamameters for `impl2` are `[T, std::vec::IntoIter<T>]`.
+//! We get that the generic parameters for `impl2` are `[T, std::vec::IntoIter<T>]`.
 //! `T` is constrained to be `<I as Iterator>::Item`, so we check only
 //! `std::vec::IntoIter<T>` for repeated parameters, which it doesn't have. The
 //! predicates of `impl1` are only `T: Sized`, which is also a predicate of
@@ -65,22 +65,22 @@
 //! cause use after frees with purely safe code in the same way as specializing
 //! on traits with methods can.
 
-use crate::errors::GenericArgsOnOverriddenImpl;
-use crate::{constrained_generic_params as cgp, errors};
-
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_infer::infer::outlives::env::OutlivesEnvironment;
 use rustc_infer::infer::TyCtxtInferExt;
+use rustc_infer::traits::ObligationCause;
 use rustc_infer::traits::specialization_graph::Node;
 use rustc_middle::ty::trait_def::TraitSpecializationKind;
-use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
-use rustc_middle::ty::{GenericArg, GenericArgs, GenericArgsRef};
+use rustc_middle::ty::{
+    self, GenericArg, GenericArgs, GenericArgsRef, TyCtxt, TypeVisitableExt, TypingMode,
+};
 use rustc_span::{ErrorGuaranteed, Span};
-use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt;
-use rustc_trait_selection::traits::outlives_bounds::InferCtxtExt as _;
-use rustc_trait_selection::traits::{self, translate_args_with_cause, wf, ObligationCtxt};
+use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+use rustc_trait_selection::traits::{self, ObligationCtxt, translate_args_with_cause, wf};
+use tracing::{debug, instrument};
+
+use crate::errors::GenericArgsOnOverriddenImpl;
+use crate::{constrained_generic_params as cgp, errors};
 
 pub(super) fn check_min_specialization(
     tcx: TyCtxt<'_>,
@@ -119,7 +119,6 @@ fn check_always_applicable(
     impl2_node: Node,
 ) -> Result<(), ErrorGuaranteed> {
     let span = tcx.def_span(impl1_def_id);
-    let mut res = check_has_items(tcx, impl1_def_id, impl2_node, span);
 
     let (impl1_args, impl2_args) = get_impl_args(tcx, impl1_def_id, impl2_node)?;
     let impl2_def_id = impl2_node.def_id();
@@ -131,12 +130,10 @@ fn check_always_applicable(
         unconstrained_parent_impl_args(tcx, impl2_def_id, impl2_args)
     };
 
-    res = res.and(check_constness(tcx, impl1_def_id, impl2_node, span));
-    res = res.and(check_static_lifetimes(tcx, &parent_args, span));
-    res = res.and(check_duplicate_params(tcx, impl1_args, parent_args, span));
-    res = res.and(check_predicates(tcx, impl1_def_id, impl1_args, impl2_node, impl2_args, span));
-
-    res
+    check_has_items(tcx, impl1_def_id, impl2_node, span)
+        .and(check_static_lifetimes(tcx, &parent_args, span))
+        .and(check_duplicate_params(tcx, impl1_args, parent_args, span))
+        .and(check_predicates(tcx, impl1_def_id, impl1_args, impl2_node, impl2_args, span))
 }
 
 fn check_has_items(
@@ -150,30 +147,6 @@ fn check_has_items(
     {
         let base_impl_span = tcx.def_span(impl2_id);
         return Err(tcx.dcx().emit_err(errors::EmptySpecialization { span, base_impl_span }));
-    }
-    Ok(())
-}
-
-/// Check that the specializing impl `impl1` is at least as const as the base
-/// impl `impl2`
-fn check_constness(
-    tcx: TyCtxt<'_>,
-    impl1_def_id: LocalDefId,
-    impl2_node: Node,
-    span: Span,
-) -> Result<(), ErrorGuaranteed> {
-    if impl2_node.is_from_trait() {
-        // This isn't a specialization
-        return Ok(());
-    }
-
-    let impl1_constness = tcx.constness(impl1_def_id.to_def_id());
-    let impl2_constness = tcx.constness(impl2_node.def_id());
-
-    if let hir::Constness::Const = impl2_constness {
-        if let hir::Constness::NotConst = impl1_constness {
-            return Err(tcx.dcx().emit_err(errors::ConstSpecialize { span }));
-        }
     }
     Ok(())
 }
@@ -195,11 +168,10 @@ fn get_impl_args(
     impl1_def_id: LocalDefId,
     impl2_node: Node,
 ) -> Result<(GenericArgsRef<'_>, GenericArgsRef<'_>), ErrorGuaranteed> {
-    let infcx = &tcx.infer_ctxt().build();
-    let ocx = ObligationCtxt::new(infcx);
+    let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+    let ocx = ObligationCtxt::new_with_diagnostics(infcx);
     let param_env = tcx.param_env(impl1_def_id);
     let impl1_span = tcx.def_span(impl1_def_id);
-    let assumed_wf_types = ocx.assumed_wf_types_and_report_errors(param_env, impl1_def_id)?;
 
     let impl1_args = GenericArgs::identity_for_item(tcx, impl1_def_id);
     let impl2_args = translate_args_with_cause(
@@ -208,13 +180,7 @@ fn get_impl_args(
         impl1_def_id.to_def_id(),
         impl1_args,
         impl2_node,
-        |_, span| {
-            traits::ObligationCause::new(
-                impl1_span,
-                impl1_def_id,
-                traits::ObligationCauseCode::BindingObligation(impl2_node.def_id(), span),
-            )
-        },
+        &ObligationCause::misc(impl1_span, impl1_def_id),
     );
 
     let errors = ocx.select_all_or_error();
@@ -223,9 +189,8 @@ fn get_impl_args(
         return Err(guar);
     }
 
-    let implied_bounds = infcx.implied_bounds_tys(param_env, impl1_def_id, &assumed_wf_types);
-    let outlives_env = OutlivesEnvironment::with_bounds(param_env, implied_bounds);
-    let _ = ocx.resolve_regions_and_report_errors(impl1_def_id, &outlives_env);
+    let assumed_wf_types = ocx.assumed_wf_types_and_report_errors(param_env, impl1_def_id)?;
+    let _ = ocx.resolve_regions_and_report_errors(impl1_def_id, param_env, assumed_wf_types);
     let Ok(impl2_args) = infcx.fully_resolve(impl2_args) else {
         let span = tcx.def_span(impl1_def_id);
         let guar = tcx.dcx().emit_err(GenericArgsOnOverriddenImpl { span });
@@ -258,23 +223,20 @@ fn unconstrained_parent_impl_args<'tcx>(
     // unconstrained parameters.
     for (clause, _) in impl_generic_predicates.predicates.iter() {
         if let ty::ClauseKind::Projection(proj) = clause.kind().skip_binder() {
-            let projection_ty = proj.projection_ty;
-            let projected_ty = proj.term;
-
-            let unbound_trait_ref = projection_ty.trait_ref(tcx);
+            let unbound_trait_ref = proj.projection_term.trait_ref(tcx);
             if Some(unbound_trait_ref) == impl_trait_ref {
                 continue;
             }
 
-            unconstrained_parameters.extend(cgp::parameters_for(tcx, projection_ty, true));
+            unconstrained_parameters.extend(cgp::parameters_for(tcx, proj.projection_term, true));
 
-            for param in cgp::parameters_for(tcx, projected_ty, false) {
+            for param in cgp::parameters_for(tcx, proj.term, false) {
                 if !unconstrained_parameters.contains(&param) {
                     constrained_params.insert(param.0);
                 }
             }
 
-            unconstrained_parameters.extend(cgp::parameters_for(tcx, projected_ty, true));
+            unconstrained_parameters.extend(cgp::parameters_for(tcx, proj.term, true));
         }
     }
 
@@ -412,9 +374,12 @@ fn check_predicates<'tcx>(
 
     // Include the well-formed predicates of the type parameters of the impl.
     for arg in tcx.impl_trait_ref(impl1_def_id).unwrap().instantiate_identity().args {
-        let infcx = &tcx.infer_ctxt().build();
+        let Some(term) = arg.as_term() else {
+            continue;
+        };
+        let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
         let obligations =
-            wf::obligations(infcx, tcx.param_env(impl1_def_id), impl1_def_id, 0, arg, span)
+            wf::obligations(infcx, tcx.param_env(impl1_def_id), impl1_def_id, 0, term, span)
                 .unwrap();
 
         assert!(!obligations.has_infer());
@@ -460,7 +425,7 @@ fn trait_predicates_eq<'tcx>(
     predicate1: ty::Predicate<'tcx>,
     predicate2: ty::Predicate<'tcx>,
 ) -> bool {
-    // FIXME(effects)
+    // FIXME(const_trait_impl)
     predicate1 == predicate2
 }
 
@@ -495,11 +460,11 @@ fn check_specialization_on<'tcx>(
                     .emit())
             }
         }
-        ty::ClauseKind::Projection(ty::ProjectionPredicate { projection_ty, term }) => Err(tcx
+        ty::ClauseKind::Projection(ty::ProjectionPredicate { projection_term, term }) => Err(tcx
             .dcx()
             .struct_span_err(
                 span,
-                format!("cannot specialize on associated type `{projection_ty} == {term}`",),
+                format!("cannot specialize on associated type `{projection_term} == {term}`",),
             )
             .emit()),
         ty::ClauseKind::ConstArgHasType(..) => {
@@ -533,6 +498,7 @@ fn trait_specialization_kind<'tcx>(
         | ty::ClauseKind::Projection(_)
         | ty::ClauseKind::ConstArgHasType(..)
         | ty::ClauseKind::WellFormed(_)
-        | ty::ClauseKind::ConstEvaluatable(..) => None,
+        | ty::ClauseKind::ConstEvaluatable(..)
+        | ty::ClauseKind::HostEffect(..) => None,
     }
 }

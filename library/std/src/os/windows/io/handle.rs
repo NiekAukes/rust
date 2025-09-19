@@ -3,15 +3,11 @@
 #![stable(feature = "io_safety", since = "1.63.0")]
 
 use super::raw::{AsRawHandle, FromRawHandle, IntoRawHandle, RawHandle};
-use crate::fmt;
-use crate::fs;
-use crate::io;
 use crate::marker::PhantomData;
-use crate::mem::{forget, ManuallyDrop};
-use crate::ptr;
-use crate::sys;
+use crate::mem::ManuallyDrop;
 use crate::sys::cvt;
 use crate::sys_common::{AsInner, FromInner, IntoInner};
+use crate::{fmt, fs, io, ptr, sys};
 
 /// A borrowed handle.
 ///
@@ -135,7 +131,7 @@ unsafe impl Sync for HandleOrInvalid {}
 unsafe impl Sync for BorrowedHandle<'_> {}
 
 impl BorrowedHandle<'_> {
-    /// Return a `BorrowedHandle` holding the given raw handle.
+    /// Returns a `BorrowedHandle` holding the given raw handle.
     ///
     /// # Safety
     ///
@@ -319,9 +315,7 @@ impl AsRawHandle for OwnedHandle {
 impl IntoRawHandle for OwnedHandle {
     #[inline]
     fn into_raw_handle(self) -> RawHandle {
-        let handle = self.handle;
-        forget(self);
-        handle
+        ManuallyDrop::new(self).handle
     }
 }
 
@@ -485,6 +479,14 @@ impl<T: AsHandle + ?Sized> AsHandle for crate::sync::Arc<T> {
 
 #[stable(feature = "as_windows_ptrs", since = "1.71.0")]
 impl<T: AsHandle + ?Sized> AsHandle for crate::rc::Rc<T> {
+    #[inline]
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        (**self).as_handle()
+    }
+}
+
+#[unstable(feature = "unique_rc_arc", issue = "112566")]
+impl<T: AsHandle + ?Sized> AsHandle for crate::rc::UniqueRc<T> {
     #[inline]
     fn as_handle(&self) -> BorrowedHandle<'_> {
         (**self).as_handle()
@@ -656,5 +658,47 @@ impl<T> From<crate::thread::JoinHandle<T>> for OwnedHandle {
     #[inline]
     fn from(join_handle: crate::thread::JoinHandle<T>) -> OwnedHandle {
         join_handle.into_inner().into_handle().into_inner()
+    }
+}
+
+#[stable(feature = "anonymous_pipe", since = "1.87.0")]
+impl AsHandle for io::PipeReader {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.0.as_handle()
+    }
+}
+
+#[stable(feature = "anonymous_pipe", since = "1.87.0")]
+impl From<io::PipeReader> for OwnedHandle {
+    fn from(pipe: io::PipeReader) -> Self {
+        pipe.into_inner().into_inner()
+    }
+}
+
+#[stable(feature = "anonymous_pipe", since = "1.87.0")]
+impl AsHandle for io::PipeWriter {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.0.as_handle()
+    }
+}
+
+#[stable(feature = "anonymous_pipe", since = "1.87.0")]
+impl From<io::PipeWriter> for OwnedHandle {
+    fn from(pipe: io::PipeWriter) -> Self {
+        pipe.into_inner().into_inner()
+    }
+}
+
+#[stable(feature = "anonymous_pipe", since = "1.87.0")]
+impl From<OwnedHandle> for io::PipeReader {
+    fn from(owned_handle: OwnedHandle) -> Self {
+        Self::from_inner(FromInner::from_inner(owned_handle))
+    }
+}
+
+#[stable(feature = "anonymous_pipe", since = "1.87.0")]
+impl From<OwnedHandle> for io::PipeWriter {
+    fn from(owned_handle: OwnedHandle) -> Self {
+        Self::from_inner(FromInner::from_inner(owned_handle))
     }
 }

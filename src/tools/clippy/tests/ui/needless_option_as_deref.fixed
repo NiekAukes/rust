@@ -5,11 +5,14 @@
 fn main() {
     // should lint
     let _: Option<&usize> = Some(&1);
+    //~^ needless_option_as_deref
     let _: Option<&mut usize> = Some(&mut 1);
+    //~^ needless_option_as_deref
 
     let mut y = 0;
     let mut x = Some(&mut y);
     let _ = x;
+    //~^ needless_option_as_deref
 
     // should not lint
     let _ = Some(Box::new(1)).as_deref();
@@ -51,4 +54,35 @@ struct S<'a> {
 
 fn from_field<'a>(s: &'a mut S<'a>) -> Option<&'a mut usize> {
     s.opt.as_deref_mut()
+}
+
+mod issue_non_copy_13077 {
+    pub fn something(mut maybe_side_effect: Option<&mut String>) {
+        for _ in 0..10 {
+            let _ = S {
+                field: other(maybe_side_effect.as_deref_mut()),
+            };
+        }
+    }
+
+    fn other(_maybe_side_effect: Option<&mut String>) {
+        unimplemented!()
+    }
+
+    pub struct S {
+        pub field: (),
+    }
+}
+
+mod issue14148 {
+    pub trait SomeTrait {
+        fn something(&self, mut maybe_side_effect: Option<&mut String>) {
+            other(maybe_side_effect.as_deref_mut());
+            other(maybe_side_effect);
+        }
+    }
+
+    fn other(_maybe_side_effect: Option<&mut String>) {
+        unimplemented!()
+    }
 }

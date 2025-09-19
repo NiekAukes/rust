@@ -1,5 +1,4 @@
 //@ compile-flags: -C opt-level=3
-//@ min-llvm-version: 17.0.2
 #![crate_type = "lib"]
 
 // Regression test for issue 97217 (the following should result in no allocations)
@@ -16,6 +15,6 @@ pub fn issue97217() -> i32 {
     let v1 = vec![5, 6, 7];
     let v1_iter = v1.iter();
     let total: i32 = v1_iter.sum();
-    println!("{}",total);
+    println!("{}", total);
     total
 }

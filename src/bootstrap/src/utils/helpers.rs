@@ -1,27 +1,42 @@
-//! Various utility functions used throughout rustbuild.
+//! Various utility functions used throughout bootstrap.
 //!
 //! Simple things like testing the various filesystem operations here and there,
 //! not a lot of interesting happenings here unfortunately.
 
-use build_helper::util::fail;
-use std::env;
 use std::ffi::OsStr;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::str;
 use std::sync::OnceLock;
+use std::thread::panicking;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{env, fs, io, panic, str};
 
+use object::read::archive::ArchiveFile;
+
+use crate::LldMode;
 use crate::core::builder::Builder;
 use crate::core::config::{Config, TargetSelection};
-use crate::LldMode;
-
-pub use crate::utils::dylib::{dylib_path, dylib_path_var};
+use crate::utils::exec::{BootstrapCommand, command};
+pub use crate::utils::shared_helpers::{dylib_path, dylib_path_var};
 
 #[cfg(test)]
 mod tests;
+
+/// A wrapper around `std::panic::Location` used to track the location of panics
+/// triggered by `t` macro usage.
+pub struct PanicTracker<'a>(pub &'a panic::Location<'a>);
+
+impl Drop for PanicTracker<'_> {
+    fn drop(&mut self) {
+        if panicking() {
+            eprintln!(
+                "Panic was initiated from {}:{}:{}",
+                self.0.file(),
+                self.0.line(),
+                self.0.column()
+            );
+        }
+    }
+}
 
 /// A helper macro to `unwrap` a result except also print out details like:
 ///
@@ -33,29 +48,75 @@ mod tests;
 /// using a `Result` with `try!`, but this may change one day...
 #[macro_export]
 macro_rules! t {
-    ($e:expr) => {
+    ($e:expr) => {{
+        let _panic_guard = $crate::PanicTracker(std::panic::Location::caller());
         match $e {
             Ok(e) => e,
             Err(e) => panic!("{} failed with {}", stringify!($e), e),
         }
-    };
+    }};
     // it can show extra info in the second parameter
-    ($e:expr, $extra:expr) => {
+    ($e:expr, $extra:expr) => {{
+        let _panic_guard = $crate::PanicTracker(std::panic::Location::caller());
         match $e {
             Ok(e) => e,
             Err(e) => panic!("{} failed with {} ({:?})", stringify!($e), e, $extra),
         }
-    };
+    }};
 }
-pub use t;
 
+pub use t;
 pub fn exe(name: &str, target: TargetSelection) -> String {
-    crate::utils::dylib::exe(name, &target.triple)
+    crate::utils::shared_helpers::exe(name, &target.triple)
+}
+
+/// Returns the path to the split debug info for the specified file if it exists.
+pub fn split_debuginfo(name: impl Into<PathBuf>) -> Option<PathBuf> {
+    // FIXME: only msvc is currently supported
+
+    let path = name.into();
+    let pdb = path.with_extension("pdb");
+    if pdb.exists() {
+        return Some(pdb);
+    }
+
+    // pdbs get named with '-' replaced by '_'
+    let file_name = pdb.file_name()?.to_str()?.replace("-", "_");
+
+    let pdb: PathBuf = [path.parent()?, Path::new(&file_name)].into_iter().collect();
+    pdb.exists().then_some(pdb)
 }
 
 /// Returns `true` if the file name given looks like a dynamic library.
-pub fn is_dylib(name: &str) -> bool {
-    name.ends_with(".dylib") || name.ends_with(".so") || name.ends_with(".dll")
+pub fn is_dylib(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
+        ext == "dylib" || ext == "so" || ext == "dll" || (ext == "a" && is_aix_shared_archive(path))
+    })
+}
+
+/// Return the path to the containing submodule if available.
+pub fn submodule_path_of(builder: &Builder<'_>, path: &str) -> Option<String> {
+    let submodule_paths = builder.submodule_paths();
+    submodule_paths.iter().find_map(|submodule_path| {
+        if path.starts_with(submodule_path) { Some(submodule_path.to_string()) } else { None }
+    })
+}
+
+fn is_aix_shared_archive(path: &Path) -> bool {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let reader = object::ReadCache::new(file);
+    let archive = match ArchiveFile::parse(&reader) {
+        Ok(result) => result,
+        Err(_) => return false,
+    };
+
+    archive
+        .members()
+        .filter_map(Result::ok)
+        .any(|entry| String::from_utf8_lossy(entry.name()).contains(".so"))
 }
 
 /// Returns `true` if the file name given looks like a debug info file
@@ -67,42 +128,17 @@ pub fn is_debug_info(name: &str) -> bool {
 /// Returns the corresponding relative library directory that the compiler's
 /// dylibs will be found in.
 pub fn libdir(target: TargetSelection) -> &'static str {
-    if target.is_windows() { "bin" } else { "lib" }
+    if target.is_windows() || target.contains("cygwin") { "bin" } else { "lib" }
 }
 
 /// Adds a list of lookup paths to `cmd`'s dynamic library lookup path.
 /// If the dylib_path_var is already set for this cmd, the old value will be overwritten!
-pub fn add_dylib_path(path: Vec<PathBuf>, cmd: &mut Command) {
+pub fn add_dylib_path(path: Vec<PathBuf>, cmd: &mut BootstrapCommand) {
     let mut list = dylib_path();
     for path in path {
         list.insert(0, path);
     }
     cmd.env(dylib_path_var(), t!(env::join_paths(list)));
-}
-
-/// Adds a list of lookup paths to `cmd`'s link library lookup path.
-pub fn add_link_lib_path(path: Vec<PathBuf>, cmd: &mut Command) {
-    let mut list = link_lib_path();
-    for path in path {
-        list.insert(0, path);
-    }
-    cmd.env(link_lib_path_var(), t!(env::join_paths(list)));
-}
-
-/// Returns the environment variable which the link library lookup path
-/// resides in for this platform.
-fn link_lib_path_var() -> &'static str {
-    if cfg!(target_env = "msvc") { "LIB" } else { "LIBRARY_PATH" }
-}
-
-/// Parses the `link_lib_path_var()` environment variable, returning a list of
-/// paths that are members of this lookup path.
-fn link_lib_path() -> Vec<PathBuf> {
-    let var = match env::var_os(link_lib_path_var()) {
-        Some(v) => v,
-        None => return vec![],
-    };
-    env::split_paths(&var).collect()
 }
 
 pub struct TimeIt(bool, Instant);
@@ -121,21 +157,13 @@ impl Drop for TimeIt {
     }
 }
 
-/// Used for download caching
-pub(crate) fn program_out_of_date(stamp: &Path, key: &str) -> bool {
-    if !stamp.exists() {
-        return true;
-    }
-    t!(fs::read_to_string(stamp)) != key
-}
-
 /// Symlinks two directories, using junctions on Windows and normal symlinks on
 /// Unix.
 pub fn symlink_dir(config: &Config, original: &Path, link: &Path) -> io::Result<()> {
     if config.dry_run() {
         return Ok(());
     }
-    let _ = fs::remove_dir(link);
+    let _ = fs::remove_dir_all(link);
     return symlink_dir_inner(original, link);
 
     #[cfg(not(windows))]
@@ -146,7 +174,24 @@ pub fn symlink_dir(config: &Config, original: &Path, link: &Path) -> io::Result<
 
     #[cfg(windows)]
     fn symlink_dir_inner(target: &Path, junction: &Path) -> io::Result<()> {
-        junction::create(&target, &junction)
+        junction::create(target, junction)
+    }
+}
+
+/// Return the host target on which we are currently running.
+pub fn get_host_target() -> TargetSelection {
+    TargetSelection::from_user(env!("BUILD_TRIPLE"))
+}
+
+/// Rename a file if from and to are in the same filesystem or
+/// copy and remove the file otherwise
+pub fn move_file<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
+    match fs::rename(&from, &to) {
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+            std::fs::copy(&from, &to)?;
+            std::fs::remove_file(&from)
+        }
+        r => r,
     }
 }
 
@@ -186,7 +231,9 @@ pub fn target_supports_cranelift_backend(target: TargetSelection) -> bool {
             || target.contains("aarch64")
             || target.contains("s390x")
             || target.contains("riscv64gc")
-    } else if target.contains("darwin") || target.is_windows() {
+    } else if target.contains("darwin") {
+        target.contains("x86_64") || target.contains("aarch64")
+    } else if target.is_windows() {
         target.contains("x86_64")
     } else {
         false
@@ -226,23 +273,6 @@ pub fn is_valid_test_suite_arg<'a, P: AsRef<Path>>(
     }
 }
 
-pub fn check_run(cmd: &mut Command, print_cmd_on_fail: bool) -> bool {
-    let status = match cmd.status() {
-        Ok(status) => status,
-        Err(e) => {
-            println!("failed to execute command: {cmd:?}\nERROR: {e}");
-            return false;
-        }
-    };
-    if !status.success() && print_cmd_on_fail {
-        println!(
-            "\n\ncommand did not execute successfully: {cmd:?}\n\
-             expected success, got: {status}\n\n"
-        );
-    }
-    status.success()
-}
-
 pub fn make(host: &str) -> PathBuf {
     if host.contains("dragonfly")
         || host.contains("freebsd")
@@ -253,22 +283,6 @@ pub fn make(host: &str) -> PathBuf {
     } else {
         PathBuf::from("make")
     }
-}
-
-#[track_caller]
-pub fn output(cmd: &mut Command) -> String {
-    let output = match cmd.stderr(Stdio::inherit()).output() {
-        Ok(status) => status,
-        Err(e) => fail(&format!("failed to execute command: {cmd:?}\nERROR: {e}")),
-    };
-    if !output.status.success() {
-        panic!(
-            "command did not execute successfully: {:?}\n\
-             expected success, got: {}",
-            cmd, output.status
-        );
-    }
-    String::from_utf8(output.stdout).unwrap()
 }
 
 /// Returns the last-modified time for `path`, or zero if it doesn't exist.
@@ -316,127 +330,18 @@ fn dir_up_to_date(src: &Path, threshold: SystemTime) -> bool {
     })
 }
 
-/// Copied from `std::path::absolute` until it stabilizes.
-///
-/// FIXME: this shouldn't exist.
-pub(crate) fn absolute(path: &Path) -> PathBuf {
-    if path.as_os_str().is_empty() {
-        panic!("can't make empty path absolute");
-    }
-    #[cfg(unix)]
-    {
-        t!(absolute_unix(path), format!("could not make path absolute: {}", path.display()))
-    }
-    #[cfg(windows)]
-    {
-        t!(absolute_windows(path), format!("could not make path absolute: {}", path.display()))
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        println!("WARNING: bootstrap is not supported on non-unix platforms");
-        t!(std::fs::canonicalize(t!(std::env::current_dir()))).join(path)
-    }
-}
-
-#[cfg(unix)]
-/// Make a POSIX path absolute without changing its semantics.
-fn absolute_unix(path: &Path) -> io::Result<PathBuf> {
-    // This is mostly a wrapper around collecting `Path::components`, with
-    // exceptions made where this conflicts with the POSIX specification.
-    // See 4.13 Pathname Resolution, IEEE Std 1003.1-2017
-    // https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap04.html#tag_04_13
-
-    use std::os::unix::prelude::OsStrExt;
-    let mut components = path.components();
-    let path_os = path.as_os_str().as_bytes();
-
-    let mut normalized = if path.is_absolute() {
-        // "If a pathname begins with two successive <slash> characters, the
-        // first component following the leading <slash> characters may be
-        // interpreted in an implementation-defined manner, although more than
-        // two leading <slash> characters shall be treated as a single <slash>
-        // character."
-        if path_os.starts_with(b"//") && !path_os.starts_with(b"///") {
-            components.next();
-            PathBuf::from("//")
-        } else {
-            PathBuf::new()
-        }
-    } else {
-        env::current_dir()?
-    };
-    normalized.extend(components);
-
-    // "Interfaces using pathname resolution may specify additional constraints
-    // when a pathname that does not name an existing directory contains at
-    // least one non- <slash> character and contains one or more trailing
-    // <slash> characters".
-    // A trailing <slash> is also meaningful if "a symbolic link is
-    // encountered during pathname resolution".
-
-    if path_os.ends_with(b"/") {
-        normalized.push("");
-    }
-
-    Ok(normalized)
-}
-
-#[cfg(windows)]
-fn absolute_windows(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    use std::ffi::OsString;
-    use std::io::Error;
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::ptr::null_mut;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetFullPathNameW(
-            lpFileName: *const u16,
-            nBufferLength: u32,
-            lpBuffer: *mut u16,
-            lpFilePart: *mut *const u16,
-        ) -> u32;
-    }
-
-    unsafe {
-        // encode the path as UTF-16
-        let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-        let mut buffer = Vec::new();
-        // Loop until either success or failure.
-        loop {
-            // Try to get the absolute path
-            let len = GetFullPathNameW(
-                path.as_ptr(),
-                buffer.len().try_into().unwrap(),
-                buffer.as_mut_ptr(),
-                null_mut(),
-            );
-            match len as usize {
-                // Failure
-                0 => return Err(Error::last_os_error()),
-                // Buffer is too small, resize.
-                len if len > buffer.len() => buffer.resize(len, 0),
-                // Success!
-                len => {
-                    buffer.truncate(len);
-                    return Ok(OsString::from_wide(&buffer).into());
-                }
-            }
-        }
-    }
-}
-
 /// Adapted from <https://github.com/llvm/llvm-project/blob/782e91224601e461c019e0a4573bbccc6094fbcd/llvm/cmake/modules/HandleLLVMOptions.cmake#L1058-L1079>
 ///
 /// When `clang-cl` is used with instrumentation, we need to add clang's runtime library resource
 /// directory to the linker flags, otherwise there will be linker errors about the profiler runtime
 /// missing. This function returns the path to that directory.
-pub fn get_clang_cl_resource_dir(clang_cl_path: &str) -> PathBuf {
+pub fn get_clang_cl_resource_dir(builder: &Builder<'_>, clang_cl_path: &str) -> PathBuf {
     // Similar to how LLVM does it, to find clang's library runtime directory:
     // - we ask `clang-cl` to locate the `clang_rt.builtins` lib.
-    let mut builtins_locator = Command::new(clang_cl_path);
+    let mut builtins_locator = command(clang_cl_path);
     builtins_locator.args(["/clang:-print-libgcc-file-name", "/clang:--rtlib=compiler-rt"]);
 
-    let clang_rt_builtins = output(&mut builtins_locator);
+    let clang_rt_builtins = builtins_locator.run_capture_stdout(builder).stdout();
     let clang_rt_builtins = Path::new(clang_rt_builtins.trim());
     assert!(
         clang_rt_builtins.exists(),
@@ -452,7 +357,7 @@ pub fn get_clang_cl_resource_dir(clang_cl_path: &str) -> PathBuf {
 /// Returns a flag that configures LLD to use only a single thread.
 /// If we use an external LLD, we need to find out which version is it to know which flag should we
 /// pass to it (LLD older than version 10 had a different flag).
-fn lld_flag_no_threads(lld_mode: LldMode, is_windows: bool) -> &'static str {
+fn lld_flag_no_threads(builder: &Builder<'_>, lld_mode: LldMode, is_windows: bool) -> &'static str {
     static LLD_NO_THREADS: OnceLock<(&'static str, &'static str)> = OnceLock::new();
 
     let new_flags = ("/threads:1", "--threads=1");
@@ -461,7 +366,9 @@ fn lld_flag_no_threads(lld_mode: LldMode, is_windows: bool) -> &'static str {
     let (windows_flag, other_flag) = LLD_NO_THREADS.get_or_init(|| {
         let newer_version = match lld_mode {
             LldMode::External => {
-                let out = output(Command::new("lld").arg("-flavor").arg("ld").arg("--version"));
+                let mut cmd = command("lld");
+                cmd.arg("-flavor").arg("ld").arg("--version");
+                let out = cmd.run_capture_stdout(builder).stdout();
                 match (out.find(char::is_numeric), out.find('.')) {
                     (Some(b), Some(e)) => out.as_str()[b..e].parse::<i32>().ok().unwrap_or(14) > 10,
                     _ => true,
@@ -475,7 +382,7 @@ fn lld_flag_no_threads(lld_mode: LldMode, is_windows: bool) -> &'static str {
 }
 
 pub fn dir_is_empty(dir: &Path) -> bool {
-    t!(std::fs::read_dir(dir)).next().is_none()
+    t!(std::fs::read_dir(dir), dir).next().is_none()
 }
 
 /// Extract the beta revision from the full version string.
@@ -484,9 +391,7 @@ pub fn dir_is_empty(dir: &Path) -> bool {
 /// the "y" part from the string.
 pub fn extract_beta_rev(version: &str) -> Option<String> {
     let parts = version.splitn(2, "-beta.").collect::<Vec<_>>();
-    let count = parts.get(1).and_then(|s| s.find(' ').map(|p| s[..p].to_string()));
-
-    count
+    parts.get(1).and_then(|s| s.find(' ').map(|p| s[..p].to_string()))
 }
 
 pub enum LldThreads {
@@ -518,12 +423,25 @@ pub fn linker_flags(
 ) -> Vec<String> {
     let mut args = vec![];
     if !builder.is_lld_direct_linker(target) && builder.config.lld_mode.is_used() {
-        args.push(String::from("-Clink-arg=-fuse-ld=lld"));
+        match builder.config.lld_mode {
+            LldMode::External => {
+                args.push("-Zlinker-features=+lld".to_string());
+                // FIXME(kobzol): remove this flag once MCP510 gets stabilized
+                args.push("-Zunstable-options".to_string());
+            }
+            LldMode::SelfContained => {
+                args.push("-Zlinker-features=+lld".to_string());
+                args.push("-Clink-self-contained=+linker".to_string());
+                // FIXME(kobzol): remove this flag once MCP510 gets stabilized
+                args.push("-Zunstable-options".to_string());
+            }
+            LldMode::Unused => unreachable!(),
+        };
 
         if matches!(lld_threads, LldThreads::No) {
             args.push(format!(
                 "-Clink-arg=-Wl,{}",
-                lld_flag_no_threads(builder.config.lld_mode, target.is_windows())
+                lld_flag_no_threads(builder, builder.config.lld_mode, target.is_windows())
             ));
         }
     }
@@ -531,7 +449,7 @@ pub fn linker_flags(
 }
 
 pub fn add_rustdoc_cargo_linker_args(
-    cmd: &mut Command,
+    cmd: &mut BootstrapCommand,
     builder: &Builder<'_>,
     target: TargetSelection,
     lld_threads: LldThreads,
@@ -561,7 +479,7 @@ where
     use std::fmt::Write;
 
     input.as_ref().iter().fold(String::with_capacity(input.as_ref().len() * 2), |mut acc, &byte| {
-        write!(&mut acc, "{:02x}", byte).expect("Failed to write byte to the hex String.");
+        write!(&mut acc, "{byte:02x}").expect("Failed to write byte to the hex String.");
         acc
     })
 }
@@ -582,4 +500,44 @@ pub fn check_cfg_arg(name: &str, values: Option<&[&str]>) -> String {
         None => "".to_string(),
     };
     format!("--check-cfg=cfg({name}{next})")
+}
+
+/// Prepares `BootstrapCommand` that runs git inside the source directory if given.
+///
+/// Whenever a git invocation is needed, this function should be preferred over
+/// manually building a git `BootstrapCommand`. This approach allows us to manage
+/// bootstrap-specific needs/hacks from a single source, rather than applying them on next to every
+/// git command creation, which is painful to ensure that the required change is applied
+/// on each one of them correctly.
+#[track_caller]
+pub fn git(source_dir: Option<&Path>) -> BootstrapCommand {
+    let mut git = command("git");
+
+    if let Some(source_dir) = source_dir {
+        git.current_dir(source_dir);
+        // If we are running inside git (e.g. via a hook), `GIT_DIR` is set and takes precedence
+        // over the current dir. Un-set it to make the current dir matter.
+        git.env_remove("GIT_DIR");
+        // Also un-set some other variables, to be on the safe side (based on cargo's
+        // `fetch_with_cli`). In particular un-setting `GIT_INDEX_FILE` is required to fix some odd
+        // misbehavior.
+        git.env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    }
+
+    git
+}
+
+/// Sets the file times for a given file at `path`.
+pub fn set_file_times<P: AsRef<Path>>(path: P, times: fs::FileTimes) -> io::Result<()> {
+    // Windows requires file to be writable to modify file times. But on Linux CI the file does not
+    // need to be writable to modify file times and might be read-only.
+    let f = if cfg!(windows) {
+        fs::File::options().write(true).open(path)?
+    } else {
+        fs::File::open(path)?
+    };
+    f.set_times(times)
 }

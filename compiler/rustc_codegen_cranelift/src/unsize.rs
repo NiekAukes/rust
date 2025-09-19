@@ -2,6 +2,8 @@
 //!
 //! [`PointerCoercion::Unsize`]: `rustc_middle::ty::adjustment::PointerCoercion::Unsize`
 
+use rustc_codegen_ssa::base::validate_trivial_unsize;
+use rustc_middle::ty::layout::HasTypingEnv;
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 
 use crate::base::codegen_panic_nounwind;
@@ -22,25 +24,29 @@ pub(crate) fn unsized_info<'tcx>(
     old_info: Option<Value>,
 ) -> Value {
     let (source, target) =
-        fx.tcx.struct_lockstep_tails_erasing_lifetimes(source, target, ParamEnv::reveal_all());
+        fx.tcx.struct_lockstep_tails_for_codegen(source, target, fx.typing_env());
     match (&source.kind(), &target.kind()) {
-        (&ty::Array(_, len), &ty::Slice(_)) => fx
-            .bcx
-            .ins()
-            .iconst(fx.pointer_type, len.eval_target_usize(fx.tcx, ParamEnv::reveal_all()) as i64),
+        (&ty::Array(_, len), &ty::Slice(_)) => fx.bcx.ins().iconst(
+            fx.pointer_type,
+            len.try_to_target_usize(fx.tcx).expect("expected monomorphic const in codegen") as i64,
+        ),
         (&ty::Dynamic(data_a, _, src_dyn_kind), &ty::Dynamic(data_b, _, target_dyn_kind))
             if src_dyn_kind == target_dyn_kind =>
         {
             let old_info =
                 old_info.expect("unsized_info: missing old info for trait upcasting coercion");
-            if data_a.principal_def_id() == data_b.principal_def_id() {
+            let b_principal_def_id = data_b.principal_def_id();
+            if data_a.principal_def_id() == b_principal_def_id || b_principal_def_id.is_none() {
                 // A NOP cast that doesn't actually change anything, should be allowed even with invalid vtables.
+                debug_assert!(
+                    validate_trivial_unsize(fx.tcx, data_a, data_b),
+                    "NOP unsize vtable changed principal trait ref: {data_a} -> {data_b}"
+                );
                 return old_info;
             }
 
             // trait upcasting coercion
-            let vptr_entry_idx =
-                fx.tcx.vtable_trait_upcasting_coercion_new_vptr_slot((source, target));
+            let vptr_entry_idx = fx.tcx.supertrait_vtable_slot((source, target));
 
             if let Some(entry_idx) = vptr_entry_idx {
                 let entry_idx = u32::try_from(entry_idx).unwrap();
@@ -55,7 +61,12 @@ pub(crate) fn unsized_info<'tcx>(
                 old_info
             }
         }
-        (_, ty::Dynamic(data, ..)) => crate::vtable::get_vtable(fx, source, data.principal()),
+        (_, ty::Dynamic(data, ..)) => crate::vtable::get_vtable(
+            fx,
+            source,
+            data.principal()
+                .map(|principal| fx.tcx.instantiate_bound_regions_with_erased(principal)),
+        ),
         _ => bug!("unsized_info: invalid unsizing {:?} -> {:?}", source, target),
     }
 }
@@ -127,7 +138,7 @@ pub(crate) fn coerce_unsized_into<'tcx>(
     let dst_ty = dst.layout().ty;
     let mut coerce_ptr = || {
         let (base, info) =
-            if fx.layout_of(src.layout().ty.builtin_deref(true).unwrap().ty).is_unsized() {
+            if fx.layout_of(src.layout().ty.builtin_deref(true).unwrap()).is_unsized() {
                 let (old_base, old_info) = src.load_scalar_pair(fx);
                 unsize_ptr(fx, old_base, src.layout(), dst.layout(), Some(old_info))
             } else {
@@ -201,7 +212,7 @@ pub(crate) fn size_and_align_of<'tcx>(
             // load size/align from vtable
             (
                 crate::vtable::size_of_obj(fx, info.unwrap()),
-                crate::vtable::min_align_of_obj(fx, info.unwrap()),
+                crate::vtable::align_of_obj(fx, info.unwrap()),
             )
         }
         ty::Slice(_) | ty::Str => {
@@ -229,7 +240,7 @@ pub(crate) fn size_and_align_of<'tcx>(
                 })
             });
 
-            codegen_panic_nounwind(fx, &msg_str, None);
+            codegen_panic_nounwind(fx, &msg_str, fx.mir.span);
 
             fx.bcx.switch_to_block(next_block);
 

@@ -356,17 +356,17 @@ impl Connection {
             Ok(msg) => {
                 return Err(ProtocolError::new(format!(
                     "unexpected message during shutdown: {msg:?}"
-                )))
+                )));
             }
             Err(RecvTimeoutError::Timeout) => {
                 return Err(ProtocolError::new(
                     "timed out waiting for exit notification".to_owned(),
-                ))
+                ));
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(ProtocolError::new(
                     "channel disconnected waiting for exit notification".to_owned(),
-                ))
+                ));
             }
         }
         Ok(true)
@@ -433,8 +433,7 @@ mod tests {
         initialize_start_test(TestCase {
             test_messages: vec![notification_msg.clone()],
             expected_resp: Err(ProtocolError::new(format!(
-                "expected initialize request, got {:?}",
-                notification_msg
+                "expected initialize request, got {notification_msg:?}"
             ))),
         });
     }

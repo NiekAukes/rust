@@ -1,5 +1,5 @@
 //@compile-flags: -Zmiri-permissive-provenance
-#![feature(core_intrinsics, layout_for_ptr)]
+#![feature(core_intrinsics, layout_for_ptr, ptr_metadata)]
 //! Tests for various intrinsics that do not fit anywhere else.
 
 use std::intrinsics;
@@ -33,20 +33,24 @@ fn main() {
     assert_eq!(intrinsics::likely(false), false);
     assert_eq!(intrinsics::unlikely(true), true);
 
-    let mut saw_true = false;
-    let mut saw_false = false;
+    // Skip this test when we use the fallback bodies, as that one is deterministic.
+    // (CI sets `--cfg force_intrinsic_fallback` together with `-Zmiri-force-intrinsic-fallback`.)
+    if !cfg!(force_intrinsic_fallback) {
+        let mut saw_true = false;
+        let mut saw_false = false;
 
-    for _ in 0..50 {
-        if intrinsics::is_val_statically_known(0) {
-            saw_true = true;
-        } else {
-            saw_false = true;
+        for _ in 0..50 {
+            if intrinsics::is_val_statically_known(0) {
+                saw_true = true;
+            } else {
+                saw_false = true;
+            }
         }
+        assert!(
+            saw_true && saw_false,
+            "`is_val_statically_known` failed to return both true and false. Congrats, you won the lottery!"
+        );
     }
-    assert!(
-        saw_true && saw_false,
-        "`is_val_statically_known` failed to return both true and false. Congrats, you won the lottery!"
-    );
 
     intrinsics::forget(Bomb);
 
@@ -57,4 +61,10 @@ fn main() {
     // Make sure that even if the discriminant is stored together with data, the intrinsic returns
     // only the discriminant, nothing about the data.
     assert_eq!(discriminant(&Some(false)), discriminant(&Some(true)));
+
+    let () = intrinsics::ptr_metadata(&[1, 2, 3]);
+    let len = intrinsics::ptr_metadata(&[1, 2, 3][..]);
+    assert_eq!(len, 3);
+    let dyn_meta = intrinsics::ptr_metadata(&[1, 2, 3] as &dyn std::fmt::Debug);
+    assert_eq!(dyn_meta.size_of(), 12);
 }

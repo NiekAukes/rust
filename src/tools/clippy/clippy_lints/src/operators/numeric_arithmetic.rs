@@ -1,5 +1,5 @@
 use super::FLOAT_ARITHMETIC;
-use clippy_utils::consts::constant_simple;
+use clippy_utils::consts::ConstEvalCtxt;
 use clippy_utils::diagnostics::span_lint;
 use rustc_hir as hir;
 use rustc_lint::LateContext;
@@ -14,7 +14,7 @@ pub struct Context {
 }
 impl Context {
     fn skip_expr(&mut self, e: &hir::Expr<'_>) -> bool {
-        self.expr_id.is_some() || self.const_span.map_or(false, |span| span.contains(e.span))
+        self.expr_id.is_some() || self.const_span.is_some_and(|span| span.contains(e.span))
     }
 
     pub fn check_binary<'tcx>(
@@ -43,8 +43,8 @@ impl Context {
             _ => (),
         }
 
-        let (_, r_ty) = (cx.typeck_results().expr_ty(l), cx.typeck_results().expr_ty(r));
-        if r_ty.peel_refs().is_floating_point() && r_ty.peel_refs().is_floating_point() {
+        let (l_ty, r_ty) = (cx.typeck_results().expr_ty(l), cx.typeck_results().expr_ty(r));
+        if l_ty.peel_refs().is_floating_point() && r_ty.peel_refs().is_floating_point() {
             span_lint(cx, FLOAT_ARITHMETIC, expr.span, "floating-point arithmetic detected");
             self.expr_id = Some(expr.hir_id);
         }
@@ -55,7 +55,7 @@ impl Context {
             return;
         }
         let ty = cx.typeck_results().expr_ty(arg);
-        if constant_simple(cx, cx.typeck_results(), expr).is_none() && ty.is_floating_point() {
+        if ConstEvalCtxt::new(cx).eval_simple(expr).is_none() && ty.is_floating_point() {
             span_lint(cx, FLOAT_ARITHMETIC, expr.span, "floating-point arithmetic detected");
             self.expr_id = Some(expr.hir_id);
         }
@@ -68,32 +68,32 @@ impl Context {
     }
 
     pub fn enter_body(&mut self, cx: &LateContext<'_>, body: &hir::Body<'_>) {
-        let body_owner = cx.tcx.hir().body_owner(body.id());
-        let body_owner_def_id = cx.tcx.hir().body_owner_def_id(body.id());
+        let body_owner = cx.tcx.hir_body_owner(body.id());
+        let body_owner_def_id = cx.tcx.hir_body_owner_def_id(body.id());
 
-        match cx.tcx.hir().body_owner_kind(body_owner_def_id) {
+        match cx.tcx.hir_body_owner_kind(body_owner_def_id) {
             hir::BodyOwnerKind::Static(_) | hir::BodyOwnerKind::Const { .. } => {
-                let body_span = cx.tcx.hir().span_with_body(body_owner);
+                let body_span = cx.tcx.hir_span_with_body(body_owner);
 
-                if let Some(span) = self.const_span {
-                    if span.contains(body_span) {
-                        return;
-                    }
+                if let Some(span) = self.const_span
+                    && span.contains(body_span)
+                {
+                    return;
                 }
                 self.const_span = Some(body_span);
             },
-            hir::BodyOwnerKind::Fn | hir::BodyOwnerKind::Closure => (),
+            hir::BodyOwnerKind::Fn | hir::BodyOwnerKind::Closure | hir::BodyOwnerKind::GlobalAsm => (),
         }
     }
 
     pub fn body_post(&mut self, cx: &LateContext<'_>, body: &hir::Body<'_>) {
-        let body_owner = cx.tcx.hir().body_owner(body.id());
-        let body_span = cx.tcx.hir().span_with_body(body_owner);
+        let body_owner = cx.tcx.hir_body_owner(body.id());
+        let body_span = cx.tcx.hir_span_with_body(body_owner);
 
-        if let Some(span) = self.const_span {
-            if span.contains(body_span) {
-                return;
-            }
+        if let Some(span) = self.const_span
+            && span.contains(body_span)
+        {
+            return;
         }
         self.const_span = None;
     }
