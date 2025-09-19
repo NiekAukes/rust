@@ -96,8 +96,9 @@ impl<'m> TypeNVVM<'m> {
     }
 
     pub fn is_zst(&self) -> bool {
-        match self {
+        match *self {
             TypeNVVM::Zst => true,
+            TypeNVVM::Array(_, 0) => true,
             _ => false,
         }
     }

@@ -154,6 +154,19 @@ impl<'m> FunctionNVVM<'m> {
         }
         s.push_str(") {\n");
 
+
+        // pregenerate the labels for all values that need them
+        for bb in unsafe { &*self.basic_blocks.get() } {
+            for value in bb.instrs() {
+                let ValueNVVM::Instr(instr) = value.0 else {
+                    continue;
+                };
+                if instr.has_ret() {
+                    self.assign_label_to_val(value);
+                }
+            }
+        }
+
         // basic blocks
         for bb in unsafe { &*self.basic_blocks.get() } {
             s.push_str(&format!("{}:\n", bb.name));

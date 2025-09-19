@@ -34,7 +34,7 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
                 let value = ValueNVVM::Constant(Const::NullPtr);
                 self.get_module_mut().create_val(value, Some(t))
             }
-            TypeNVVM::Struct(_) | TypeNVVM::Array(_, _) => {
+            TypeNVVM::Struct(_) | TypeNVVM::Array(_, _) | TypeNVVM::Union(_) => {
                 let value = ValueNVVM::Constant(Const::ZeroInitializer);
                 self.get_module_mut().create_val(value, Some(t))
             }
@@ -338,7 +338,8 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
                         let f = f64::from_bits(b);
                         self.const_real(llty, f)
                     }
-                    _ => todo!(),
+                    _ if i.is_null() => self.const_null(llty),
+                    _ => panic!("unsupported int size for scalar_to_backend: {:?}. Value: {:?}", (sz, llty), i),
                 }
             }
             InterpScalar::Ptr(p, _) => {

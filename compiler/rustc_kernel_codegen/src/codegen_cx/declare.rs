@@ -141,7 +141,12 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
         let ret = if abi.ret.is_indirect() {
             self.type_void()
         } else {
-            self.backend_type(abi.ret.layout)
+            let ty = self.backend_type(abi.ret.layout);
+            if ty.is_zst() {
+                self.type_void()
+            } else {
+                ty
+            }
         };
 
         // build the type

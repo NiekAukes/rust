@@ -1092,11 +1092,43 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn insert_value(&mut self, agg_val: Self::Value, elt: Self::Value, idx: u64) -> Self::Value {
-        let instr = Instruction::InsertValue { aggregate: agg_val, elt, idx };
+        // convert argument if necessary
+        let final_ty = self.cx().val_ty(agg_val);
+        // the type must be an aggregate type, indexable by idx
+        let to_ty = match final_ty.0 {
+            TypeNVVM::Struct(els) => {
+                if (idx as usize) >= els.len() {
+                    panic!("Index out of bounds: {} >= {}", idx, els.len());
+                }
+                els[idx as usize].clone()
+            }
+            TypeNVVM::AdtDefForwardDecl(did, name) => {
+                let els = match self.cx().get_module().get_adt(*did) {
+                    Some((_, ty)) => match ty.0 {
+                        TypeNVVM::Struct(els) => els,
+                        _ => panic!("Expected struct type, found {:?}", ty),
+                    },
+                    None => {
+                        panic!("Adt not found: {:?}", did);
+                    }
+                };
+                if (idx as usize) >= els.len() {
+                    panic!("Index out of bounds: {} >= {}", idx, els.len());
+                }
+                els[idx as usize].clone()
+            }
+            _ => panic!("Expected struct type, found {:?}", final_ty),
+        };
+        
+        let conv = self.convert_argument(elt, to_ty);
+
+        // create a new insert value instruction
+        let instr = Instruction::InsertValue { aggregate: agg_val, elt: conv, idx };
+
         let v = self
             .cx()
             .get_module_mut()
-            .create_val(ValueNVVM::Instr(instr), Some(self.cx().val_ty(agg_val)));
+            .create_val(ValueNVVM::Instr(instr), Some(final_ty));
         self.basic_block.add_instr(v);
         v
     }
@@ -1217,6 +1249,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             bug!("Expected function type, found {:?}", llty);
         };
 
+        let ret = if ret.is_zst() {
+            self.cx().type_void()
+        } else {
+            *ret
+        };
+
         let mut args_vec = Vec::new();
         let fn_decl_ty = self.cx().fn_decl_backend_type(fn_abi.unwrap());
         let unpacked_fn_abi = match fn_decl_ty.0 {
@@ -1233,8 +1271,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             args_vec.push(self.convert_argument(*arg, *expected_ty));
         }
 
-        let instr = Instruction::Call { ret_ty: *ret, fn_val: llfn, fn_ty: llty, args: args_vec };
-        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(*ret));
+        let instr = Instruction::Call { ret_ty: ret, fn_val: llfn, fn_ty: llty, args: args_vec };
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(ret));
         self.basic_block.add_instr(v);
         v
     }

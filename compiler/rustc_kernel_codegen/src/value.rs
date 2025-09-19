@@ -536,7 +536,8 @@ impl<'m> ValueNVVM<'m> {
             }
             ValueNVVM::Instr(instr) => {
                 if instr.has_ret() {
-                    let label = func.assign_label_to_val(*value);
+                    //let label = func.assign_label_to_val(*value);
+                    let label = func.label_of_val(*value).expect("Instruction should have a label");
                     let instr = instr.assemble(module, func, value);
                     format!("{} = {}", label, instr)
                 } else {

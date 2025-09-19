@@ -122,6 +122,12 @@ impl<'m> ModuleNVVM<'m> {
                     _ => {}
                 }
             }
+            TypeNVVM::Struct(ref fields) => {
+                if fields.len() == 1 && matches!(*fields[0], TypeNVVM::Pointer(_)) {
+                    // correct to just the inner type
+                    return fields[0];
+                }
+            }
             _ => {}
         }
 
@@ -261,6 +267,7 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     let forward_decls = module.forward_decls.clone();
     for (_, (name, ty)) in forward_decls.iter() {
         if let Some(ty) = ty {
+            println!("Defining forward declaration: {} with {:#?}", name, ty);
             let ty_str = ty.assemble(module);
             s.push_str(&format!("%{} = type {}\n", name, ty_str));
         } else {
