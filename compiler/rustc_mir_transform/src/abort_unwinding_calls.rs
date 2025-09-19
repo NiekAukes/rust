@@ -2,7 +2,7 @@ use rustc_abi::ExternAbi;
 use rustc_ast::InlineAsmOptions;
 use rustc_middle::mir::*;
 use rustc_middle::span_bug;
-use rustc_middle::ty::{self, layout, TyCtxt};
+use rustc_middle::ty::{self, TyCtxt, layout};
 use rustc_target::spec::PanicStrategy;
 
 /// A pass that runs which is targeted at ensuring that codegen guarantees about
@@ -56,7 +56,7 @@ impl<'tcx> AbortUnwindingCalls {
             ty::Coroutine(..) => ExternAbi::Rust,
             ty::Error(_) => return,
             // if we are working with a kernel, we know that the ABI is Rust
-            _ if !device_code && tcx.is_kernel(def_id) => Abi::Rust,
+            _ if !device_code && tcx.is_kernel(def_id) => ExternAbi::Rust,
             _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
         };
 

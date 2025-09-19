@@ -8,23 +8,11 @@ use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt, HasTypingEnv, TyAndLayout};
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt, TypeFoldable, TypeVisitableExt};
 use rustc_middle::{bug, mir, span_bug};
 use rustc_target::callconv::{FnAbi, PassMode};
+use rustc_target::spec::HasTargetSpec;
 use tracing::{debug, instrument};
 
 use crate::base;
 use crate::traits::*;
-use rustc_index::bit_set::BitSet;
-use rustc_index::IndexVec;
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::mir;
-use rustc_middle::mir::traversal;
-use rustc_middle::mir::UnwindTerminateReason;
-use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt, TyAndLayout};
-use rustc_middle::ty::{self, Instance, Ty, TyCtxt, TypeFoldable, TypeVisitableExt};
-use rustc_middle::{bug, span_bug};
-use rustc_target::abi::call::{FnAbi, PassMode};
-use rustc_target::spec::HasTargetSpec;
-
-use std::iter;
 
 mod analyze;
 mod block;
@@ -187,7 +175,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let tcx = cx.tcx();
     let llfn = cx.get_fn(instance);
 
-    let mir = if cx.target_spec().arch == "nvvm" {
+    let mir = if cx.arch() == "nvvm" {
         cx.tcx().instance_device_mir(instance.def)
     } else {
         cx.tcx().instance_mir(instance.def)

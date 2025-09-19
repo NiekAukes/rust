@@ -4,14 +4,14 @@ use std::hash::Hash;
 
 use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
 use rustc_attr_data_structures::InlineAttr;
-use rustc_data_structures::base_n::{BaseNString, ToBaseN, CASE_INSENSITIVE};
+use rustc_data_structures::base_n::{BaseNString, CASE_INSENSITIVE, ToBaseN};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher, ToStableHashKey};
 use rustc_data_structures::unord::UnordMap;
 use rustc_hashes::Hash128;
-use rustc_hir::def_id::{CrateNum, DefId, DefIdSet, LOCAL_CRATE};
 use rustc_hir::ItemId;
+use rustc_hir::def_id::{CrateNum, DefId, DefIdSet, LOCAL_CRATE};
 use rustc_index::Idx;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use rustc_query_system::ich::StableHashingContext;
@@ -119,7 +119,7 @@ impl<'tcx> MonoItem<'tcx> {
     pub fn is_kernel(&self, tcx: TyCtxt<'tcx>) -> bool {
         match self {
             MonoItem::Fn(instance) => match instance.def {
-                InstanceDef::Item(def) => tcx
+                InstanceKind::Item(def) => tcx
                     .codegen_fn_attrs(def)
                     .flags
                     .contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::KERNEL),

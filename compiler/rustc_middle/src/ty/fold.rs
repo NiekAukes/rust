@@ -2,12 +2,11 @@ use rustc_data_structures::fx::FxIndexMap;
 use rustc_hir::def_id::DefId;
 use rustc_type_ir::data_structures::DelayedMap;
 
+use super::RegionKind;
 use crate::ty::{
     self, Binder, BoundTy, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable,
     TypeVisitableExt,
 };
-
-use super::RegionKind;
 
 ///////////////////////////////////////////////////////////////////////////
 // Some sample folders
@@ -377,8 +376,8 @@ impl<'tcx> TyCtxt<'tcx> {
                 ty::Ty::new_bound(self.tcx, ty::INNERMOST, bt)
             }
 
-            fn replace_const(&mut self, bv: ty::BoundVar, ty: Ty<'tcx>) -> ty::Const<'tcx> {
-                ty::Const::new_bound(self.tcx, ty::INNERMOST, bv, ty)
+            fn replace_const(&mut self, bv: ty::BoundVar) -> ty::Const<'tcx> {
+                ty::Const::new_bound(self.tcx, ty::INNERMOST, bv)
             }
         }
 

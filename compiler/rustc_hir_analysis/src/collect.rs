@@ -21,40 +21,30 @@ use std::ops::Bound;
 
 use rustc_abi::ExternAbi;
 use rustc_ast::Recovered;
-use rustc_data_structures::captures::Captures;
-use rustc_data_structures::fx::{FxHashSet, FxHashSet, FxIndexMap, FxIndexMap};
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_data_structures::unord::UnordMap;
 use rustc_errors::{
-    struct_span_code_err, Applicability, Applicability, Diag, Diag, DiagCtxtHandle,
-    ErrorGuaranteed, ErrorGuaranteed, StashKey, StashKey, E0228,
+    Applicability, Diag, DiagCtxtHandle, E0228, ErrorGuaranteed, StashKey, struct_span_code_err,
 };
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{DefId, DefId, LocalDefId, LocalDefId};
-use rustc_hir::intravisit::{self, walk_generics, InferKind, Visitor, Visitor, VisitorExt};
-use rustc_hir::{
-    self as hir, GenericParamKind, GenericParamKind, HirId, Node, Node, PreciseCapturingArgKind,
-};
-use rustc_infer::infer::{InferCtxt, InferCtxt, TyCtxtInferExt, TyCtxtInferExt};
-use rustc_infer::traits::{DynCompatibilityViolation, ObligationCause, ObligationCause};
-use rustc_middle::hir::nested_filter;
-use rustc_middle::mir::tcx;
+use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::intravisit::{InferKind, Visitor, VisitorExt, walk_generics};
+use rustc_hir::{GenericParamKind, HirId, Node, PreciseCapturingArgKind};
+use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
+use rustc_infer::traits::{DynCompatibilityViolation, ObligationCause};
 use rustc_middle::query::Providers;
-use rustc_middle::ty::util::{Discr, Discr, IntTypeExt, IntTypeExt};
+use rustc_middle::ty::util::{Discr, IntTypeExt};
 use rustc_middle::ty::{
-    self, self, fold_regions, AdtKind, AdtKind, Const, Const, IsSuggestable, IsSuggestable,
-    ToPredicate, Ty, Ty, TyCtxt, TyCtxt, TypeVisitableExt, TypingMode,
+    self, AdtKind, Const, IsSuggestable, Ty, TyCtxt, TypeVisitableExt, TypingMode, fold_regions,
 };
 use rustc_middle::{bug, span_bug};
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{kw, sym, Ident, Span, Span, Symbol, DUMMY_SP, DUMMY_SP};
-use rustc_target::abi::FieldIdx;
-use rustc_target::spec::abi;
+use rustc_span::symbol::{Ident, Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, Span};
 use rustc_trait_selection::error_reporting::traits::suggestions::NextTypeParamName;
 use rustc_trait_selection::infer::InferCtxtExt;
-use rustc_trait_selection::traits::error_reporting::suggestions::NextTypeParamName;
 use rustc_trait_selection::traits::{
-    hir_ty_lowering_dyn_compatibility_violations, FulfillmentError, ObligationCtxt, ObligationCtxt,
+    FulfillmentError, ObligationCtxt, hir_ty_lowering_dyn_compatibility_violations,
 };
 use tracing::{debug, instrument};
 
@@ -1550,11 +1540,7 @@ pub fn suggest_impl_trait<'tcx>(
         }
         let sugg = infcx.probe(|_| {
             let args = ty::GenericArgs::for_item(infcx.tcx, trait_def_id, |param, _| {
-                if param.index == 0 {
-                    ret_ty.into()
-                } else {
-                    infcx.var_for_def(DUMMY_SP, param)
-                }
+                if param.index == 0 { ret_ty.into() } else { infcx.var_for_def(DUMMY_SP, param) }
             });
             if !infcx
                 .type_implements_trait(trait_def_id, args, param_env)

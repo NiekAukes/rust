@@ -2,12 +2,12 @@
 
 use std::sync::LazyLock;
 
-use rustc_data_structures::fx::FxHashMap;
-use rustc_span::edition::Edition;
-use rustc_span::{sym, Symbol};
 use AttributeDuplicates::*;
 use AttributeGate::*;
 use AttributeType::*;
+use rustc_data_structures::fx::FxHashMap;
+use rustc_span::edition::Edition;
+use rustc_span::{Symbol, sym};
 
 use crate::Features;
 
@@ -480,11 +480,6 @@ pub static BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ungated!(
         crate_type, CrateLevel, template!(NameValueStr: "bin|lib|..."), DuplicatesOk,
         EncodeCrossCrate::No,
-    ),
-
-    // engine
-    ungated!(
-        engine, CrateLevel, template!(List: "path"), ErrorFollowing, EncodeCrossCrate::Yes,
     ),
 
     // ABI, linking, symbols, and FFI

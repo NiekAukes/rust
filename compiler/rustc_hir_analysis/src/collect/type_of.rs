@@ -8,12 +8,12 @@ use rustc_middle::query::plumbing::CyclePlaceholder;
 use rustc_middle::ty::print::with_forced_trimmed_paths;
 use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{
-    self, fold_regions, DefiningScopeKind, IsSuggestable, Ty, TyCtxt, TypeVisitableExt,
+    self, DefiningScopeKind, IsSuggestable, Ty, TyCtxt, TypeVisitableExt, fold_regions,
 };
 use rustc_middle::{bug, span_bug};
-use rustc_span::{Ident, Span, DUMMY_SP};
+use rustc_span::{DUMMY_SP, Ident, Span, sym};
 
-use super::{bad_placeholder, HirPlaceholderCollector, ItemCtxt};
+use super::{HirPlaceholderCollector, ItemCtxt, bad_placeholder};
 use crate::errors::TypeofReservedKeywordUsed;
 use crate::hir_ty_lowering::HirTyLowerer;
 
@@ -52,11 +52,7 @@ fn anon_const_type_of<'tcx>(icx: &ItemCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx
         Node::Ty(&hir::Ty { kind: TyKind::Typeof(ref e), span, .. }) if e.hir_id == hir_id => {
             let ty = tcx.typeck(def_id).node_type(tcx.local_def_id_to_hir_id(def_id));
             let ty = fold_regions(tcx, ty, |r, _| {
-                if r.is_erased() {
-                    ty::Region::new_error_misc(tcx)
-                } else {
-                    r
-                }
+                if r.is_erased() { ty::Region::new_error_misc(tcx) } else { r }
             });
             let (ty, opt_sugg) = if let Some(ty) = ty.make_suggestable(tcx, false, None) {
                 (ty, Some((span, Applicability::MachineApplicable)))
@@ -252,7 +248,7 @@ pub(super) fn type_of_inner(
                 }
                 _ => icx.lower_ty(*self_ty),
             },
-            ItemKind::Fn(fn_sig, ..) => {
+            ItemKind::Fn { sig, .. } => {
                 // check if the `#[kernel]` attribute is present,
                 // if it is, the final type of this function will be a kernel adt
                 if tcx.has_attr(def_id, sym::kernel) && !original {
@@ -261,19 +257,22 @@ pub(super) fn type_of_inner(
                     //rustc_hir::Path
                     // create a hir Ty from the path
 
-                    let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
+                    // TODO GPU find alternative method for kernel type
+                    //let Some(kernel_def_id) = todo!("FIND KERNEL TYPE") else {
+                    {
                         let guar = tcx
                             .dcx()
                             .emit_err(crate::errors::KernelTypeMissing { span: item.span });
                         //bug!("kernel attribute present but no kernel type found");
                         return ty::EarlyBinder::bind(Ty::new_error(tcx, guar));
                     };
+                    let kernel_def_id: DefId = todo!();
                     let kernel_type = tcx.type_of(kernel_def_id);
                     // we now have the kernel type, but we still need populate the generic args
                     // they are: the dimension (for now just usize)
                     // and the arguments of the function wrapped inside a tuple
                     let mut types = vec![];
-                    for arg in fn_sig.decl.inputs.iter() {
+                    for arg in sig.decl.inputs.iter() {
                         // it is important to strip some lifetimes here,
                         // when the function has a reference parameter,
                         // the lifetime of that reference will break the compiler

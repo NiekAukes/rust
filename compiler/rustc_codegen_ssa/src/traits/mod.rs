@@ -59,4 +59,5 @@ pub trait CodegenMethods<'tcx> = LayoutOf<'tcx, LayoutOfResult = TyAndLayout<'tc
     + StaticCodegenMethods
     + DebugInfoCodegenMethods<'tcx>
     + AsmCodegenMethods<'tcx>
-    + PreDefineCodegenMethods<'tcx>;
+    + PreDefineCodegenMethods<'tcx>
+    + HasTargetSpec;

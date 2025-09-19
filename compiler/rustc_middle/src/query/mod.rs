@@ -68,8 +68,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustc_arena::TypedArena;
-use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_ast::expand::StrippedCfgItem;
+use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::sorted_map::SortedMap;
@@ -88,17 +88,17 @@ use rustc_lint_defs::LintId;
 use rustc_macros::rustc_queries;
 use rustc_query_system::ich::StableHashingContext;
 use rustc_query_system::query::{
-    try_get_cached, QueryCache, QueryMode, QueryStackDeferred, QueryState,
+    QueryCache, QueryMode, QueryStackDeferred, QueryState, try_get_cached,
 };
+use rustc_session::Limits;
 use rustc_session::config::{EntryFnType, OptLevel, OutputFilenames, SymbolManglingVersion};
 use rustc_session::cstore::{
     CrateDepKind, CrateSource, ExternCrate, ForeignModule, LinkagePreference, NativeLib,
 };
 use rustc_session::lint::LintExpectationId;
-use rustc_session::Limits;
 use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::source_map::Spanned;
-use rustc_span::{Span, Symbol, DUMMY_SP};
+use rustc_span::{DUMMY_SP, Span, Symbol};
 use rustc_target::spec::PanicStrategy;
 use {rustc_abi as abi, rustc_ast as ast, rustc_attr_data_structures as attr, rustc_hir as hir};
 
@@ -114,13 +114,12 @@ use crate::middle::resolve_bound_vars::{ObjectLifetimeDefault, ResolveBoundVars,
 use crate::middle::stability::{self, DeprecationEntry};
 use crate::mir::interpret::{
     AllocDecodingSession, EvalStaticInitializerRawResult, EvalToAllocationRawResult,
-    EvalToConstValueResult, EvalToValTreeResult, GlobalId, GlobalId, LitToConstError,
-    LitToConstInput, LitToConstInput,
+    EvalToConstValueResult, EvalToValTreeResult, GlobalId, LitToConstInput,
 };
 use crate::mir::mono::{CodegenUnit, CollectionMode, MonoItem, MonoItemPartitions};
-use crate::query::erase::{erase, restore, Erase};
+use crate::query::erase::{Erase, erase, restore};
 use crate::query::plumbing::{
-    query_ensure, query_ensure_error_guaranteed, query_get_at, CyclePlaceholder, DynamicQuery,
+    CyclePlaceholder, DynamicQuery, query_ensure, query_ensure_error_guaranteed, query_get_at,
 };
 use crate::traits::query::{
     CanonicalAliasGoal, CanonicalDropckOutlivesGoal, CanonicalImpliedOutlivesBoundsGoal,
@@ -130,18 +129,18 @@ use crate::traits::query::{
     OutlivesBound,
 };
 use crate::traits::{
-    specialization_graph, CodegenObligationError, DynCompatibilityViolation, EvaluationResult,
-    ImplSource, ObligationCause, OverflowError, WellFormedLoc,
+    CodegenObligationError, DynCompatibilityViolation, EvaluationResult, ImplSource,
+    ObligationCause, OverflowError, WellFormedLoc, specialization_graph,
 };
 use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::layout::ValidityRequirement;
-use crate::ty::print::{describe_as_module, PrintTraitRefExt};
+use crate::ty::print::{PrintTraitRefExt, describe_as_module};
 use crate::ty::util::AlwaysRequiresDrop;
 use crate::ty::{
     self, CrateInherentImpls, GenericArg, GenericArgsRef, PseudoCanonicalInput, SizedTraitKind, Ty,
     TyCtxt, TyCtxtFeed,
 };
-use crate::{dep_graph, mir, mir, thir};
+use crate::{dep_graph, mir, thir};
 
 mod arena_cached;
 pub mod erase;
@@ -328,7 +327,7 @@ rustc_queries! {
         feedable
     }
 
-    query type_of_kernel(key: DefId) -> ty::EarlyBinder<Ty<'tcx>> {
+    query type_of_kernel(key: DefId) -> ty::EarlyBinder<'tcx, Ty<'tcx>> {
         desc { |tcx|
             "{action} `{path}`",
             action = {
@@ -1454,7 +1453,7 @@ rustc_queries! {
     }
 
     /// Generates a kernel MIR body for the shim.
-    query kernel_mir_shims(key: ty::InstanceDef<'tcx>) -> &'tcx mir::Body<'tcx> {
+    query kernel_mir_shims(key: ty::InstanceKind<'tcx>) -> &'tcx mir::Body<'tcx> {
         arena_cache
         desc { |tcx| "generating kernel MIR shim for `{}`", tcx.def_path_str(key.def_id()) }
     }
@@ -2713,6 +2712,11 @@ rustc_queries! {
     }
 
     query items_of_instance(key: (ty::Instance<'tcx>, CollectionMode)) -> (&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]) {
+        desc { "collecting items used by `{}`", key.0 }
+        cache_on_disk_if { true }
+    }
+
+    query items_of_kernel_instance(key: (ty::Instance<'tcx>, CollectionMode)) -> (&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]) {
         desc { "collecting items used by `{}`", key.0 }
         cache_on_disk_if { true }
     }

@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use rustc_abi::{FieldIdx, FIRST_VARIANT};
+use rustc_abi::{FIRST_VARIANT, FieldIdx};
 use rustc_ast::UnsafeBinderCastKind;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir as hir;
@@ -18,7 +18,7 @@ use rustc_middle::ty::{
     self, AdtKind, GenericArgs, InlineConstArgs, InlineConstArgsParts, ScalarInt, Ty, UpvarArgs,
 };
 use rustc_middle::{bug, span_bug};
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 use tracing::{debug, info, instrument, trace};
 
 use crate::thir::cx::ThirBuildCx;
@@ -1031,8 +1031,9 @@ impl<'tcx> ThirBuildCx<'tcx> {
             Res::Def(DefKind::Static { .. }, id) | Res::Def(DefKind::Fn, id)
                 if self.tcx.is_kernel(id) || self.tcx.is_static(id) =>
             {
-                let ty = self.tcx.static_ptr_ty(id);
-                let temp_lifetime = self
+                // this is &raw for extern static or static mut, and & for other statics
+                let ty = self.tcx.static_ptr_ty(id, self.typing_env);
+                let (temp_lifetime, backwards_incompatible) = self
                     .rvalue_scopes
                     .temporary_scope(self.region_scope_tree, expr.hir_id.local_id);
                 let kind = if self.tcx.is_thread_local_static(id) {
@@ -1042,7 +1043,12 @@ impl<'tcx> ThirBuildCx<'tcx> {
                     ExprKind::StaticRef { alloc_id, ty, def_id: id }
                 };
                 ExprKind::Deref {
-                    arg: self.thir.exprs.push(Expr { ty, temp_lifetime, span: expr.span, kind }),
+                    arg: self.thir.exprs.push(Expr {
+                        ty,
+                        temp_lifetime: TempLifetime { temp_lifetime, backwards_incompatible },
+                        span: expr.span,
+                        kind,
+                    }),
                 }
             }
 

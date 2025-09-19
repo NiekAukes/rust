@@ -189,14 +189,14 @@ impl<'tcx> Instance<'tcx> {
     /// Returns the `Ty` corresponding to this `Instance`, with generic instantiations applied and
     /// lifetimes erased, allowing a `ParamEnv` to be specified for use during normalization.
 
-     pub fn ty(&self, tcx: TyCtxt<'tcx>, typing_env: ty::TypingEnv<'tcx>) -> Ty<'tcx> {
+    pub fn ty(&self, tcx: TyCtxt<'tcx>, typing_env: ty::TypingEnv<'tcx>) -> Ty<'tcx> {
         let ty = if tcx.is_kernel(self.def.def_id()) {
             tcx.type_of_kernel(self.def.def_id())
         } else {
             tcx.type_of(self.def.def_id())
         };
         tcx.instantiate_and_normalize_erasing_regions(self.args, typing_env, ty)
-
+    }
     /// Finds a crate that contains a monomorphization of this instance that
     /// can be linked to from the local crate. A return value of `None` means
     /// no upstream crate provides such an exported monomorphization.

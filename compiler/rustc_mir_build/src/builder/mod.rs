@@ -4,9 +4,9 @@
 //! See <https://github.com/rust-lang/rust/pull/134365>.
 
 use itertools::Itertools;
-use rustc_abi::{ExternAbi, FieldIdx};
-use rustc_apfloat::ieee::{Double, Half, Quad, Single};
+use rustc_abi::{ExternAbi, FieldIdx, VariantIdx};
 use rustc_apfloat::Float;
+use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_ast::attr;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sorted_map::SortedIndexMultiMap;
@@ -20,19 +20,19 @@ use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_middle::hir::place::PlaceBase as HirPlaceBase;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::region;
-use rustc_middle::mir::interpret::{Allocation, Scalar};
+use rustc_middle::mir::interpret::{AllocBytes, Allocation, Scalar};
 use rustc_middle::mir::*;
 use rustc_middle::thir::{self, ExprId, LintLevel, LocalVarId, Param, ParamId, PatKind, Thir};
 use rustc_middle::ty::{
-    self, self, CanonicalUserType, CanonicalUserTypeAnnotation, Region, RegionKind, ScalarInt, Ty,
-    Ty, TyCtxt, TyCtxt, TyKind, TypeVisitableExt, TypeVisitableExt, TypingMode, UserType,
+    CanonicalUserType, CanonicalUserTypeAnnotation, List, Region, RegionKind, ScalarInt, Ty,
+    TyCtxt, TyKind, TypeVisitableExt, TypingMode, UniverseIndex, UserType, UserTypeKind,
 };
-use rustc_middle::{bug, span_bug};
+use rustc_middle::{bug, span_bug, ty};
 use rustc_span::symbol::sym;
-use rustc_span::{sym, Span, Span, Symbol, Symbol};
-use rustc_target::abi::{FieldIdx, VariantIdx};
-use rustc_target::spec::abi::Abi;
+use rustc_span::{Span, Symbol};
 
+//use rustc_::abi::{FieldIdx, VariantIdx};
+//use rustc_target::spec::abi::Abi;
 use crate::builder::expr::as_place::PlaceBuilder;
 use crate::builder::scope::DropKind;
 
@@ -1157,9 +1157,10 @@ pub fn construct_literal_const<'tcx>(
     let mut canonical_user_type_annotations = IndexVec::new();
 
     // get kernel ADT def id
-    let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
-        bug!("kernel attribute present but no kernel type found")
-    };
+    let kernel_def_id: DefId = todo!("FILL IN KERNEL DEF ID");
+    // let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
+    //     bug!("kernel attribute present but no kernel type found")
+    // };
 
     // create &[u8] type
     let tykind = TyKind::Ref(
@@ -1170,7 +1171,8 @@ pub fn construct_literal_const<'tcx>(
     let code_ty = tcx.mk_ty_from_kind(tykind);
 
     // create const allocation for the code
-    let allocation = Allocation::from_bytes_byte_aligned_immutable(code);
+
+    let allocation = Allocation::from_bytes_byte_aligned_immutable(code, ());
     let allocation = tcx.mk_const_alloc(allocation);
     let value = ConstValue::Slice { data: allocation, meta: allocation.inner().size().bytes() };
     let constant = Const::Val(value, code_ty);
@@ -1187,7 +1189,7 @@ pub fn construct_literal_const<'tcx>(
     let str_ty = tcx.mk_ty_from_kind(ty_kind);
 
     // create allocation for the name of the kernel
-    let allocation = Allocation::from_bytes_byte_aligned_immutable(name.as_bytes());
+    let allocation = Allocation::from_bytes_byte_aligned_immutable(name.as_bytes(), ());
     let allocation = tcx.mk_const_alloc(allocation);
     let value = ConstValue::Slice { data: allocation, meta: allocation.inner().size().bytes() };
     let constant = Const::Val(value, str_ty);
@@ -1195,12 +1197,11 @@ pub fn construct_literal_const<'tcx>(
     let name_op = Operand::Constant(Box::new(constant));
 
     let aggr_ty = tcx.type_of(def_id).instantiate_identity(); //.instantiate(tcx, g_args);
-    let user_ty = UserType::Ty(aggr_ty);
+    let user_ty = UserType::new(UserTypeKind::Ty(aggr_ty));
     let canon_user_ty = CanonicalUserType {
         value: user_ty,
-        max_universe: ty::UniverseIndex::default(),
-        defining_opaque_types: ty::List::empty(),
-        variables: ty::List::empty(),
+        max_universe: UniverseIndex::default(),
+        variables: List::empty(),
     };
     let canon_user_ty_annotation = CanonicalUserTypeAnnotation {
         span: Span::default(),

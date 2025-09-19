@@ -220,7 +220,7 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::interpret::{AllocId, ErrorHandled, GlobalAlloc, Scalar};
 use rustc_middle::mir::mono::{CollectionMode, InstantiationMode, MonoItem};
 use rustc_middle::mir::visit::Visitor as MirVisitor;
-use rustc_middle::mir::{self, Location, MentionedItem, traversal, UnwindTerminateReason};
+use rustc_middle::mir::{self, Location, MentionedItem, UnwindTerminateReason, traversal};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::adjustment::{CustomCoerceUnsized, PointerCoercion};
 use rustc_middle::ty::layout::ValidityRequirement;
@@ -354,6 +354,7 @@ fn collect_items_root<'tcx>(
     starting_item: Spanned<MonoItem<'tcx>>,
     state: &SharedState<'tcx>,
     recursion_limit: Limit,
+    is_in_kernel: bool,
 ) {
     if !state.visited.lock_mut().insert(starting_item.node) {
         // We've been here already, no need to search again.
@@ -367,6 +368,7 @@ fn collect_items_root<'tcx>(
         &mut recursion_depths,
         recursion_limit,
         CollectionMode::UsedItems,
+        is_in_kernel,
     );
 }
 
@@ -447,7 +449,6 @@ fn collect_items_rec<'tcx>(
                         &mut used_items,
                     );
                     //visit_drop_use(tcx, ty, true, starting_item.span, &mut used_items);
-
                 }
 
                 if let Ok(alloc) = tcx.eval_static_initializer(def_id) {
@@ -485,17 +486,21 @@ fn collect_items_rec<'tcx>(
             ));
 
             rustc_data_structures::stack::ensure_sufficient_stack(|| {
-                collect_items_of_instance(
-                    tcx,
-                    instance,
-                    &mut used_items,
-                    &mut mentioned_items,
-                    mode,
-                    is_in_kernel,
-                )aaAAAAA;
-                // let (used, mentioned) = tcx.items_of_instance((instance, mode));
-                // used_items.extend(used.into_iter().copied());
-                // mentioned_items.extend(mentioned.into_iter().copied());
+                // collect_items_of_instance(
+                //     tcx,
+                //     instance,
+                //     &mut used_items,
+                //     &mut mentioned_items,
+                //     mode,
+                //     is_in_kernel,
+                // )aaAAAAA;
+                let (used, mentioned) = if is_in_kernel {
+                    tcx.items_of_kernel_instance((instance, mode))
+                } else {
+                    tcx.items_of_instance((instance, mode))
+                };
+                used_items.extend(used.into_iter().copied());
+                mentioned_items.extend(mentioned.into_iter().copied());
             });
         }
         MonoItem::GlobalAsm(item_id) => {
@@ -842,7 +847,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
             }
 
             let instance = Instance::mono(tcx, tcx.require_lang_item(lang_item, source));
-            if tcx.should_codegen_locally(instance) {
+            if tcx.should_codegen_locally(instance, in_kernel) {
                 this.used_items.push(create_fn_mono_item(tcx, instance, source));
             }
         };
@@ -854,7 +859,14 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
                 // *Before* monomorphizing, record that we already handled this mention.
                 self.used_mentioned_items.insert(MentionedItem::Fn(callee_ty));
                 let callee_ty = self.monomorphize(callee_ty);
-                visit_fn_use(self.tcx, callee_ty, true, source, self.is_in_kernel, &mut self.used_items)
+                visit_fn_use(
+                    self.tcx,
+                    callee_ty,
+                    true,
+                    source,
+                    self.is_in_kernel,
+                    &mut self.used_items,
+                )
             }
             mir::TerminatorKind::Drop { ref place, .. } => {
                 let ty = place.ty(self.body, self.tcx).ty;
@@ -995,7 +1007,7 @@ fn visit_instance_use<'tcx>(
             if !is_in_kernel {
                 let def_id = tcx.require_lang_item(LangItem::PanicNounwind, source);
                 let panic_instance = Instance::mono(tcx, def_id);
-                if tcx.should_codegen_locally(panic_instance) {
+                if tcx.should_codegen_locally(panic_instance, is_in_kernel) {
                     output.push(create_fn_mono_item(tcx, panic_instance, source));
                 }
             }
@@ -1075,7 +1087,8 @@ pub(crate) fn should_codegen_locally<'tcx>(
         return true;
     }
 
-    if tcx.is_reachable_non_generic(def_id) || instance.upstream_monomorphization(tcx).is_some() && !is_in_kernel
+    if tcx.is_reachable_non_generic(def_id)
+        || instance.upstream_monomorphization(tcx).is_some() && !is_in_kernel
     {
         // We can link to the item in question, no instance needed in this crate.
         return false;
@@ -1251,9 +1264,8 @@ fn create_mono_items_for_vtable_methods<'tcx>(
                     // all super trait items already covered, so skip them.
                     None
                 }
-                VtblEntry::Method(instance) => {
-                    Some(*instance).filter(|instance| tcx.should_codegen_locally(*instance, is_in_kernel))
-                }
+                VtblEntry::Method(instance) => Some(*instance)
+                    .filter(|instance| tcx.should_codegen_locally(*instance, is_in_kernel)),
             })
             .map(|item| create_fn_mono_item(tcx, item, source));
         output.extend(methods);
@@ -1266,7 +1278,7 @@ fn create_mono_items_for_vtable_methods<'tcx>(
     // This matches the check in vtable_allocation_provider in middle/ty/vtable.rs,
     // if we don't need drop we're not adding an actual pointer to the vtable.
     if impl_ty.needs_drop(tcx, ty::TypingEnv::fully_monomorphized()) {
-        visit_drop_use(tcx, impl_ty, false, source, output);
+        visit_drop_use(tcx, impl_ty, false, is_in_kernel, source, output);
     }
 }
 
@@ -1325,7 +1337,7 @@ fn collect_items_of_instance<'tcx>(
     instance: Instance<'tcx>,
     mode: CollectionMode,
     is_in_kernel: bool,
-) {
+) -> (MonoItems<'tcx>, MonoItems<'tcx>) {
     tcx.ensure_ok().check_mono_item(instance);
 
     let body = if is_in_kernel {
@@ -1386,16 +1398,25 @@ fn collect_items_of_instance<'tcx>(
     (used_items, mentioned_items)
 }
 
-fn items_of_instance<'tcx>(
+fn items_of_instance_inner<'tcx>(
     tcx: TyCtxt<'tcx>,
     (instance, mode): (Instance<'tcx>, CollectionMode),
+    is_in_kernel: bool,
 ) -> (&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]) {
-    let (used_items, mentioned_items) = collect_items_of_instance(tcx, instance, mode);
+    let (used_items, mentioned_items) =
+        collect_items_of_instance(tcx, instance, mode, is_in_kernel);
 
     let used_items = tcx.arena.alloc_from_iter(used_items);
     let mentioned_items = tcx.arena.alloc_from_iter(mentioned_items);
 
     (used_items, mentioned_items)
+}
+
+fn kernel_items_of_instance<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    (instance, mode): (Instance<'tcx>, CollectionMode),
+) -> (&'tcx [Spanned<MonoItem<'tcx>>], &'tcx [Spanned<MonoItem<'tcx>>]) {
+    items_of_instance_inner(tcx, (instance, mode), true)
 }
 
 /// `item` must be already monomorphized.
@@ -1824,7 +1845,7 @@ pub(crate) fn collect_crate_mono_items<'tcx>(
 
     tcx.sess.time("monomorphization_collector_graph_walk", || {
         par_for_each_in(roots, |root| {
-            collect_items_root(tcx, dummy_spanned(*root), &state, recursion_limit);
+            collect_items_root(tcx, dummy_spanned(*root), &state, recursion_limit, false);
         });
     });
 
@@ -1839,45 +1860,41 @@ pub(crate) fn collect_crate_mono_items<'tcx>(
 
 pub(crate) fn provide(providers: &mut Providers) {
     providers.hooks.should_codegen_locally = should_codegen_locally;
-    providers.items_of_instance = items_of_instance;
+    providers.items_of_instance = |tcx, key| items_of_instance_inner(tcx, key, false);
 }
 
 //=-----------------------------------------------------------------------------
 // Kernel entry point
 //=-----------------------------------------------------------------------------
 
-pub fn collect_kernel_mono_items(
-    tcx: TyCtxt<'_>,
+pub fn collect_kernel_mono_items<'tcx>(
+    tcx: TyCtxt<'tcx>,
     def_id: DefId,
-) -> (FxHashSet<MonoItem<'_>>, UsageMap<'_>) {
+) -> (Vec<MonoItem<'tcx>>, UsageMap<'tcx>) {
     // only the kernel is a root
     let root = MonoItem::Fn(Instance::mono(tcx, def_id));
 
     // below we use the same code as in `collect_crate_mono_items`, but with a single root
-    let mut state = SharedState {
-        visited: MTLock::new(FxHashSet::default()),
-        mentioned: MTLock::new(FxHashSet::default()),
+    let state = SharedState {
+        visited: MTLock::new(UnordSet::default()),
+        mentioned: MTLock::new(UnordSet::default()),
         usage_map: MTLock::new(UsageMap::new()),
     };
 
     let recursion_limit = tcx.recursion_limit();
 
-    {
-        let state: LRef<'_, _> = &mut state;
-
-        tcx.sess.time("monomorphization_collector_graph_walk", || {
-            let mut recursion_depths = DefIdMap::default();
-            collect_items_rec(
-                tcx,
-                dummy_spanned(root),
-                state,
-                &mut recursion_depths,
-                recursion_limit,
-                CollectionMode::UsedItems,
-                true,
-            );
+    let roots = std::iter::once(root).collect::<Vec<_>>();
+    tcx.sess.time("monomorphization_collector_graph_walk", || {
+        par_for_each_in(roots, |root| {
+            collect_items_root(tcx, dummy_spanned(*root), &state, recursion_limit, true);
         });
-    }
+    });
 
-    (state.visited.into_inner(), state.usage_map.into_inner())
+    // The set of MonoItems was created in an inherently indeterministic order because
+    // of parallelism. We sort it here to ensure that the output is deterministic.
+    let mono_items = tcx.with_stable_hashing_context(move |ref hcx| {
+        state.visited.into_inner().into_sorted(hcx, true)
+    });
+
+    (mono_items, state.usage_map.into_inner())
 }
