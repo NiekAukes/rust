@@ -84,7 +84,7 @@ declare_hooks! {
     ///
     /// Note: this hook isn't called within `rustc_middle` but #127779 suggests it's a hook instead
     /// of a normal function because external tools might want to override it.
-    hook should_codegen_locally(instance: crate::ty::Instance<'tcx>) -> bool;
+    hook should_codegen_locally(instance: crate::ty::Instance<'tcx>, is_in_kernel) -> bool;
 
     hook alloc_self_profile_query_strings() -> ();
 
