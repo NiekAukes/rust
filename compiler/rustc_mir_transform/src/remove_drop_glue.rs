@@ -1,8 +1,9 @@
 use rustc_middle::mir::{
-    BasicBlock, BasicBlockData, Body, MirPass, Statement, StatementKind, 
-    Terminator, TerminatorKind
+    BasicBlock, BasicBlockData, Body, Statement, StatementKind, Terminator, TerminatorKind,
 };
 use rustc_middle::ty::TyCtxt;
+
+use crate::MirPass;
 
 pub struct RemoveDropGlue;
 
@@ -15,14 +16,15 @@ impl<'tcx> MirPass<'tcx> for RemoveDropGlue {
         true
     }
 
+    fn is_required(&self) -> bool {
+        true
+    }
+
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let current_fn_def_id = body.source.def_id();
         let fn_path_str = tcx.def_path_str(current_fn_def_id);
 
-        println!(
-            "RemoveDropGlue: Processing function {} to remove drop glue",
-            fn_path_str
-        );
+        println!("RemoveDropGlue: Processing function {} to remove drop glue", fn_path_str);
 
         self.remove_drop_statements_and_terminators(body, &fn_path_str);
         self.remove_cleanup_blocks(body, &fn_path_str);
@@ -32,30 +34,27 @@ impl<'tcx> MirPass<'tcx> for RemoveDropGlue {
 impl RemoveDropGlue {
     fn remove_drop_statements_and_terminators(&self, body: &mut Body<'_>, fn_path_str: &str) {
         for (block_idx, block_data) in body.basic_blocks_mut().iter_enumerated_mut() {
-            block_data.statements.retain(|stmt| {
-                match &stmt.kind {
-                    StatementKind::StorageDead(_) => {
-                        println!(
-                            "RemoveDropGlue: In {}, removed StorageDead statement in block {:?}",
-                            fn_path_str, block_idx
-                        );
-                        false
-                    }
-                    _ => true,
+            block_data.statements.retain(|stmt| match &stmt.kind {
+                StatementKind::StorageDead(_) => {
+                    println!(
+                        "RemoveDropGlue: In {}, removed StorageDead statement in block {:?}",
+                        fn_path_str, block_idx
+                    );
+                    false
                 }
+                _ => true,
             });
 
             match &block_data.terminator().kind {
                 TerminatorKind::Drop { target, .. } => {
                     block_data.terminator_mut().kind = TerminatorKind::Goto { target: *target };
-                    
+
                     println!(
                         "RemoveDropGlue: In {}, replaced Drop terminator with Goto in block {:?}",
                         fn_path_str, block_idx
                     );
                 }
-                _ => {
-                }
+                _ => {}
             }
         }
     }
@@ -94,18 +93,16 @@ impl RemoveDropGlue {
         let only_cleanup_statements = block_data.statements.iter().all(|stmt| {
             matches!(
                 stmt.kind,
-                StatementKind::StorageDead(_) | 
-                StatementKind::StorageLive(_) |
-                StatementKind::Nop
+                StatementKind::StorageDead(_) | StatementKind::StorageLive(_) | StatementKind::Nop
             )
         });
 
         let cleanup_terminator = matches!(
             block_data.terminator().kind,
-            TerminatorKind::Drop { .. } |
-            TerminatorKind::UnwindResume |
-            TerminatorKind::UnwindTerminate(_) |
-            TerminatorKind::Unreachable
+            TerminatorKind::Drop { .. }
+                | TerminatorKind::UnwindResume
+                | TerminatorKind::UnwindTerminate(_)
+                | TerminatorKind::Unreachable
         );
 
         only_cleanup_statements && cleanup_terminator

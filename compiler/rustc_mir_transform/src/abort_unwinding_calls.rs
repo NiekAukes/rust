@@ -59,6 +59,7 @@ impl<'tcx> AbortUnwindingCalls {
             _ if !device_code && tcx.is_kernel(def_id) => ExternAbi::Rust,
             _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
         };
+        let body_can_unwind = layout::fn_can_unwind(tcx, Some(def_id), body_abi);
 
         // Look in this function body for any basic blocks which are terminated
         // with a function call, and whose function we're calling may unwind.
@@ -80,32 +81,33 @@ impl<'tcx> AbortUnwindingCalls {
                 continue;
             }
 
-            let call_can_unwind = match &terminator.kind {
-                TerminatorKind::Call { func, .. } => {
-                    let ty = func.ty(&body.local_decls, tcx);
-                    let sig = ty.fn_sig(tcx);
-                    let fn_def_id = match ty.kind() {
-                        ty::FnPtr(..) => None,
-                        &ty::FnDef(def_id, _) => Some(def_id),
-                        _ => span_bug!(span, "invalid callee of type {:?}", ty),
-                    };
-                    layout::fn_can_unwind(tcx, fn_def_id, sig.abi())
-                }
-                TerminatorKind::Drop { .. } => {
-                    tcx.sess.opts.unstable_opts.panic_in_drop == PanicStrategy::Unwind
-                        && layout::fn_can_unwind(tcx, None, ExternAbi::Rust)
-                }
-                TerminatorKind::Assert { .. } | TerminatorKind::FalseUnwind { .. } => {
-                    layout::fn_can_unwind(tcx, None, ExternAbi::Rust)
-                }
-                TerminatorKind::InlineAsm { options, .. } => {
-                    options.contains(InlineAsmOptions::MAY_UNWIND)
-                }
-                _ if terminator.unwind().is_some() => {
-                    span_bug!(span, "unexpected terminator that may unwind {:?}", terminator)
-                }
-                _ => continue,
-            };
+            let call_can_unwind = !device_code
+                && match &terminator.kind {
+                    TerminatorKind::Call { func, .. } => {
+                        let ty = func.ty(&body.local_decls, tcx);
+                        let sig = ty.fn_sig(tcx);
+                        let fn_def_id = match ty.kind() {
+                            ty::FnPtr(..) => None,
+                            &ty::FnDef(def_id, _) => Some(def_id),
+                            _ => span_bug!(span, "invalid callee of type {:?}", ty),
+                        };
+                        layout::fn_can_unwind(tcx, fn_def_id, sig.abi())
+                    }
+                    TerminatorKind::Drop { .. } => {
+                        tcx.sess.opts.unstable_opts.panic_in_drop == PanicStrategy::Unwind
+                            && layout::fn_can_unwind(tcx, None, ExternAbi::Rust)
+                    }
+                    TerminatorKind::Assert { .. } | TerminatorKind::FalseUnwind { .. } => {
+                        layout::fn_can_unwind(tcx, None, ExternAbi::Rust)
+                    }
+                    TerminatorKind::InlineAsm { options, .. } => {
+                        options.contains(InlineAsmOptions::MAY_UNWIND)
+                    }
+                    _ if terminator.unwind().is_some() => {
+                        span_bug!(span, "unexpected terminator that may unwind {:?}", terminator)
+                    }
+                    _ => continue,
+                };
 
             if !call_can_unwind {
                 // If this function call can't unwind, then there's no need for it
@@ -125,22 +127,6 @@ impl<'tcx> AbortUnwindingCalls {
                 let cleanup = block.terminator_mut().unwind_mut().unwrap();
                 *cleanup = UnwindAction::Terminate(UnwindTerminateReason::Abi);
             }
-        }
-
-        let should_do_unreachable = device_code || tcx.is_kernel(def_id);
-
-        for id in calls_to_terminate {
-            let cleanup = body.basic_blocks_mut()[id].terminator_mut().unwind_mut().unwrap();
-            if should_do_unreachable {
-                *cleanup = UnwindAction::Unreachable;
-            } else {
-                *cleanup = UnwindAction::Terminate(UnwindTerminateReason::Abi);
-            }
-        }
-
-        for id in cleanups_to_remove {
-            let cleanup = body.basic_blocks_mut()[id].terminator_mut().unwind_mut().unwrap();
-            *cleanup = UnwindAction::Unreachable;
         }
 
         // We may have invalidated some `cleanup` blocks so clean those up now.

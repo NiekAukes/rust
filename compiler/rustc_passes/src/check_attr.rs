@@ -9,17 +9,17 @@ use std::cell::Cell;
 use std::collections::hash_map::Entry;
 
 use rustc_abi::{Align, ExternAbi, Size};
-use rustc_ast::{ast, AttrStyle, LitKind, MetaItemInner, MetaItemKind, MetaItemLit};
-use rustc_attr_data_structures::{find_attr, AttributeKind, InlineAttr, ReprAttr};
+use rustc_ast::{AttrStyle, LitKind, MetaItemInner, MetaItemKind, MetaItemLit, ast};
+use rustc_attr_data_structures::{AttributeKind, InlineAttr, ReprAttr, find_attr};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{Applicability, DiagCtxtHandle, IntoDiagArg, MultiSpan, StashKey};
-use rustc_feature::{AttributeDuplicates, AttributeType, BuiltinAttribute, BUILTIN_ATTRIBUTE_MAP};
+use rustc_feature::{AttributeDuplicates, AttributeType, BUILTIN_ATTRIBUTE_MAP, BuiltinAttribute};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalModDefId;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{
-    self as hir, self, AssocItemKind, Attribute, FnSig, ForeignItem, HirId, Item, ItemKind,
-    MethodKind, Safety, Target, TraitItem, CRATE_HIR_ID, CRATE_OWNER_ID,
+    self as hir, self, AssocItemKind, Attribute, CRATE_HIR_ID, CRATE_OWNER_ID, FnSig, ForeignItem,
+    HirId, Item, ItemKind, MethodKind, Safety, Target, TraitItem,
 };
 use rustc_macros::LintDiagnostic;
 use rustc_middle::hir::nested_filter;
@@ -35,7 +35,7 @@ use rustc_session::lint::builtin::{
     UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES, UNUSED_ATTRIBUTES,
 };
 use rustc_session::parse::feature_err;
-use rustc_span::{edition, kw, sym, BytePos, Span, Symbol, DUMMY_SP};
+use rustc_span::{BytePos, DUMMY_SP, Span, Symbol, edition, kw, sym};
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::infer::{TyCtxtInferExt, ValuePairs};
 use rustc_trait_selection::traits::ObligationCtxt;
@@ -206,7 +206,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                         ),
                         [sym::no_link, ..] => self.check_no_link(hir_id, attr, span, target),
                         [sym::export_name, ..] => self.check_export_name(hir_id, attr, span, target),
-                        [sym::kernel, ..] => self.check_kernel(attr, span, target),
+                        [sym::kernel, ..] => self.check_kernel(hir_id, attr, span, target),
                         [sym::rustc_layout_scalar_valid_range_start, ..]
                         | [sym::rustc_layout_scalar_valid_range_end, ..] => {
                             self.check_rustc_layout_scalar_valid_range(attr, span, target)
@@ -2180,11 +2180,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
             || (int_reprs == 1
                 && is_c
                 && item.is_some_and(|item| {
-                    if let ItemLike::Item(item) = item {
-                        is_c_like_enum(item)
-                    } else {
-                        false
-                    }
+                    if let ItemLike::Item(item) = item { is_c_like_enum(item) } else { false }
                 }))
         {
             self.tcx.emit_node_span_lint(

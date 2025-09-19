@@ -175,7 +175,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let tcx = cx.tcx();
     let llfn = cx.get_fn(instance);
 
-    let mir = if cx.arch() == "nvvm" {
+    let mut mir = if cx.target_spec().arch == "nvvm" {
         cx.tcx().instance_device_mir(instance.def)
     } else {
         cx.tcx().instance_mir(instance.def)

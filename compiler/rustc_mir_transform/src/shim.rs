@@ -1,7 +1,7 @@
 use std::assert_matches::assert_matches;
 use std::{fmt, iter};
 
-use rustc_abi::{ExternAbi, FieldIdx, VariantIdx, FIRST_VARIANT};
+use rustc_abi::{ExternAbi, FIRST_VARIANT, FieldIdx, VariantIdx};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
@@ -13,16 +13,17 @@ use rustc_middle::ty::{
     self, CoroutineArgs, CoroutineArgsExt, EarlyBinder, GenericArgs, Ty, TyCtxt,
 };
 use rustc_middle::{bug, span_bug};
-use rustc_span::source_map::{dummy_spanned, Spanned};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::source_map::{Spanned, dummy_spanned};
+use rustc_span::{DUMMY_SP, Span};
 use tracing::{debug, instrument};
 
-use crate::elaborate_drop::{elaborate_drop, DropElaborator, DropFlagMode, DropStyle, Unwind};
+use crate::elaborate_drop::{DropElaborator, DropFlagMode, DropStyle, Unwind, elaborate_drop};
+use crate::kernel_lang_item_swap::KernelLangItemSwap;
 use crate::patch::MirPatch;
 use crate::{
-    abort_unwinding_calls, add_call_guards, add_moves_for_packed_drops, deref_separator, inline,
-    instsimplify, mentioned_items, pass_manager as pm, remove_noop_landing_pads,
-    run_optimization_passes, simplify,
+    AbortUnwindingCalls, MirPass, abort_unwinding_calls, add_call_guards,
+    add_moves_for_packed_drops, deref_separator, inline, instsimplify, mentioned_items,
+    pass_manager as pm, remove_noop_landing_pads, run_optimization_passes, simplify,
 };
 
 mod async_destructor_ctor;
@@ -32,7 +33,7 @@ pub(super) fn provide(providers: &mut Providers) {
     providers.kernel_mir_shims = make_shim_kernel;
 }
 
-fn make_shim_kernel<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceDef<'tcx>) -> Body<'tcx> {
+fn make_shim_kernel<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>) -> Body<'tcx> {
     let mut shim = make_shim(tcx, instance);
 
     let kernel_swap_pass = KernelLangItemSwap::new(tcx);

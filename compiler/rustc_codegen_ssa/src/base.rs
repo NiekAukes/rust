@@ -903,7 +903,7 @@ pub fn is_call_from_compiler_builtins_to_upstream_monomorphization<'tcx>(
     !def_id.is_local()
         && tcx.is_compiler_builtins(LOCAL_CRATE)
         && !is_llvm_intrinsic(tcx, def_id)
-        && !tcx.should_codegen_locally(instance)
+        && !tcx.should_codegen_locally(instance, false)
 }
 
 impl CrateInfo {

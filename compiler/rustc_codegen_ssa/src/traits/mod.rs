@@ -30,6 +30,7 @@ use std::fmt;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
 use rustc_target::callconv::FnAbi;
+use rustc_target::spec::HasTargetSpec;
 
 pub use self::abi::AbiBuilderMethods;
 pub use self::asm::{

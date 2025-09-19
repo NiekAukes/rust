@@ -6,6 +6,7 @@ use rustc_ast::{LitKind, MetaItem, MetaItemInner, attr};
 use rustc_attr_data_structures::{
     AttributeKind, InlineAttr, InstructionSetAttr, OptimizeAttr, ReprAttr, find_attr,
 };
+use rustc_errors::{E0648, struct_span_code_err};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
 use rustc_hir::weak_lang_items::WEAK_LANG_ITEMS;
@@ -248,7 +249,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                         // so it may not contain any null characters.
                         struct_span_code_err!(
                             tcx.dcx(),
-                            attr.span,
+                            attr.span(),
                             E0648,
                             "`target` may not contain null characters"
                         )

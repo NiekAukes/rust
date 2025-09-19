@@ -104,10 +104,10 @@ use rustc_attr_data_structures::InlineAttr;
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::sync;
 use rustc_data_structures::unord::{UnordMap, UnordSet};
+use rustc_hir::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, DefIdSet, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathDataName;
-use rustc_hir::LangItem;
 use rustc_middle::bug;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::exported_symbols::{SymbolExportInfo, SymbolExportLevel};
@@ -118,8 +118,8 @@ use rustc_middle::mir::mono::{
 use rustc_middle::ty::print::{characteristic_def_id_of_type, with_no_trimmed_paths};
 use rustc_middle::ty::{self, InstanceKind, TyCtxt};
 use rustc_middle::util::Providers;
-use rustc_session::config::{DumpMonoStatsFormat, SwitchWithOptPath};
 use rustc_session::CodegenUnits;
+use rustc_session::config::{DumpMonoStatsFormat, SwitchWithOptPath};
 use rustc_span::Symbol;
 use rustc_target::spec::SymbolVisibility;
 use tracing::debug;
@@ -1340,7 +1340,7 @@ pub fn collect_mono_items_for_def<'tcx>(
         &mut CodegenUnitNameBuilder::new(tcx),
         def_id,
         false,
-        &mut FxHashMap::default(),
+        &mut CguNameCache::default(),
     );
     let mut cgu = CodegenUnit::new(cgu_name);
     cgu.items_mut().extend(mono_items.iter().map(|item| {

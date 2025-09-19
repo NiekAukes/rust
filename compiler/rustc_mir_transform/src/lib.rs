@@ -19,23 +19,20 @@ use rustc_const_eval::util;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::steal::Steal;
 use rustc_hir as hir;
-use rustc_hir::def::{CtorKind, DefKind, DefKind};
-use rustc_hir::def_id::{DefId, LocalDefId, LocalDefId};
-use rustc_hir::intravisit::{self, Visitor};
+use rustc_hir::def::{CtorKind, DefKind};
+use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_index::IndexVec;
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::mir::visit::Visitor as _;
 use rustc_middle::mir::{
     AnalysisPhase, Body, CallSource, ClearCrossCrate, ConstOperand, ConstQualifs, LocalDecl,
-    MirPhase, Operand, Place, ProjectionElem, Promoted, RuntimePhase, Rvalue, SourceInfo,
-    Statement, StatementKind, TerminatorKind, START_BLOCK,
+    MirPhase, Operand, Place, ProjectionElem, Promoted, RuntimePhase, Rvalue, START_BLOCK,
+    SourceInfo, Statement, StatementKind, TerminatorKind,
 };
 use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
 use rustc_middle::util::Providers;
 use rustc_middle::{bug, query, span_bug};
 use rustc_mir_build::builder::build_mir;
 use rustc_span::source_map::Spanned;
-use rustc_span::{sym, DUMMY_SP};
+use rustc_span::{DUMMY_SP, sym};
 use tracing::debug;
 
 #[macro_use]
