@@ -1,26 +1,23 @@
-use std::{borrow::BorrowMut, cell::RefCell};
+use std::borrow::BorrowMut;
+use std::cell::RefCell;
 
-use rustc_codegen_ssa::traits::{MiscMethods, PreDefineMethods, TypeMembershipMethods};
+use rustc_codegen_ssa::traits::{MiscCodegenMethods, PreDefineCodegenMethods};
 use rustc_data_structures::fx::FxHashMap;
-use rustc_middle::{query::queries::symbol_name, ty::{layout::HasTyCtxt, Instance, List, ParamEnv, PolyExistentialTraitRef, Ty}};
+use rustc_middle::query::queries::symbol_name;
+use rustc_middle::ty::layout::HasTyCtxt;
+use rustc_middle::ty::{Instance, List, ParamEnv, PolyExistentialTraitRef, Ty, TypingEnv};
+use rustc_span::DUMMY_SP;
 
-use crate::{
-    function::FunctionNVVM,
-    value::{Val, ValueNVVM},
-};
+use super::CodegenCx;
+use super::declare::fix_ptx_name;
+use crate::function::FunctionNVVM;
+use crate::value::{Val, ValueNVVM};
 
-use super::{declare::fix_ptx_name, CodegenCx};
-
-impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
+impl<'m, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn vtables(
         &self,
     ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), Self::Value>> {
         &self.vtables
-    }
-
-    fn check_overflow(&self) -> bool {
-        //todo!()
-        false
     }
 
     fn get_fn(&self, instance: rustc_middle::ty::Instance<'tcx>) -> Self::Function {
@@ -51,7 +48,7 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
         }
     }
 
-    fn eh_personality(&self) -> Self::Value {
+    fn eh_personality(&self) -> &'m FunctionNVVM<'m> {
         // define the exception handling personality function
         // this is a function that is called when an exception is thrown
         if let Some(personality) = self.eh_personality.get() {
@@ -60,11 +57,12 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
 
         let module = unsafe { &mut *self.module.get() };
         let llfn = match self.tcx.lang_items().eh_personality() {
-            Some(def_id) => self.get_fn_addr(Instance::expect_resolve(
+            Some(def_id) => self.get_fn(Instance::expect_resolve(
                 self.tcx,
-                ParamEnv::reveal_all(),
+                TypingEnv::fully_monomorphized(),
                 def_id,
                 List::empty(),
+                DUMMY_SP,
             )),
             None => {
                 // no personality function
@@ -87,10 +85,6 @@ impl<'l, 'tcx> MiscMethods<'tcx> for CodegenCx<'l, 'tcx> {
 
     fn sess(&self) -> &rustc_session::Session {
         self.tcx.sess
-    }
-
-    fn codegen_unit(&self) -> &'tcx rustc_middle::mir::mono::CodegenUnit<'tcx> {
-        todo!()
     }
 
     fn set_frame_pointer_type(&self, llfn: Self::Function) {

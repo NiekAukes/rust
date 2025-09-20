@@ -1,44 +1,47 @@
-use rustc_codegen_ssa::{mir::{operand::OperandRef, place::PlaceRef}, traits::{ConstMethods, IntrinsicCallMethods}};
-use rustc_middle::ty::{layout::HasTyCtxt, ParamEnv, Ty, TyKind};
-use rustc_span::sym;
-use rustc_target::abi::call::PassMode;
-use rustc_codegen_ssa::traits::BuilderMethods;
-
-use crate::function::FunctionNVVM;
+use rustc_codegen_ssa::mir::operand::OperandRef;
+use rustc_codegen_ssa::mir::place::PlaceRef;
+use rustc_codegen_ssa::traits::{BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods};
+use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt};
+use rustc_middle::ty::{Instance, List, ParamEnv, Ty, TyKind, TypingEnv};
+use rustc_span::{Span, sym};
+use rustc_target::callconv::{FnAbi, PassMode};
 
 use super::Builder;
+use crate::function::FunctionNVVM;
 
-impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
+impl<'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     fn codegen_intrinsic_call(
         &mut self,
-        instance: rustc_middle::ty::Instance<'tcx>,
-        fn_abi: &rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
-        args: &[rustc_codegen_ssa::mir::operand::OperandRef<'tcx, Self::Value>],
-        llresult: Self::Value,
-        span: rustc_span::Span,
+        instance: Instance<'tcx>,
+        args: &[OperandRef<'tcx, Self::Value>],
+        llresult: PlaceRef<'tcx, Self::Value>,
+        span: Span,
     ) -> Result<(), rustc_middle::ty::Instance<'tcx>> {
         //todo!()
         let tcx = self.tcx();
-        let callee_ty = instance.ty(tcx, ParamEnv::reveal_all());
+        let callee_ty = instance.ty(tcx, TypingEnv::fully_monomorphized());
 
         let TyKind::FnDef(def_id, fn_args) = *callee_ty.kind() else {
             panic!("expected fn item type, found {}", callee_ty);
         };
 
         let sig = callee_ty.fn_sig(tcx);
-        let sig = tcx.normalize_erasing_late_bound_regions(ParamEnv::reveal_all(), sig);
+        let sig = tcx.normalize_erasing_late_bound_regions(TypingEnv::fully_monomorphized(), sig);
         let arg_tys = sig.inputs();
         let ret_ty = sig.output();
         let name = tcx.item_name(def_id);
 
         let llret_ty = self.lower_ty(&ret_ty);
-        let result = PlaceRef::new_sized(llresult, fn_abi.ret.layout);
+
+        let fn_abi = self.cx().fn_abi_of_instance(instance, List::empty());
+
+        //let result = PlaceRef::new_sized(llresult, fn_abi.ret.layout);
 
         //let simple = get_simple_intrinsic(self, name);
-        
+
         let val = match name {
             sym::unlikely => self
-            .call_intrinsic("llvm.expect.i1", &[args[0].immediate(), self.const_bool(false)]),
+                .call_intrinsic("llvm.expect.i1", &[args[0].immediate(), self.const_bool(false)]),
             sym::ctpop => {
                 let arg = args[0].immediate();
                 self.call_intrinsic("llvm.ctpop", &[arg])
@@ -48,15 +51,14 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
 
         if !fn_abi.ret.is_ignore() {
             if let PassMode::Cast { .. } = &fn_abi.ret.mode {
-                self.store(val, result.val.llval, result.val.align);
+                self.store(val, llresult.val.llval, llresult.val.align);
             } else {
-                OperandRef::from_immediate_or_packed_pair(self, val, result.layout)
+                OperandRef::from_immediate_or_packed_pair(self, val, llresult.layout)
                     .val
-                    .store(self, result);
+                    .store(self, llresult);
             }
         }
         Ok(())
-        
     }
 
     fn abort(&mut self) {
@@ -71,15 +73,11 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
         todo!()
     }
 
-    fn type_test(&mut self, pointer: Self::Value, typeid: Self::Value) -> Self::Value {
-        todo!()
-    }
-
     fn type_checked_load(
         &mut self,
         llvtable: Self::Value,
         vtable_byte_offset: u64,
-        typeid: Self::Value,
+        metadata: (),
     ) -> Self::Value {
         todo!()
     }

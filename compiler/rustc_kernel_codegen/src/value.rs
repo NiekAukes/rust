@@ -1,15 +1,15 @@
-use std::{cell::UnsafeCell, fmt::Display};
+use std::cell::UnsafeCell;
+use std::fmt::Display;
+use std::hash::Hash;
 
-use crate::{
-    basic_block::BasicBlock,
-    function::FunctionNVVM,
-    global::{ConstExpr, GlobalNVVM},
-    module::{Assemble, ModuleNVVM},
-    ty::{self, TyNVVM, TypeNVVM},
-};
-use rustc_ast::token::BinOpToken::Plus;
 use rustc_data_structures::intern::Interned;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
+
+use crate::basic_block::BasicBlock;
+use crate::function::FunctionNVVM;
+use crate::global::{ConstExpr, GlobalNVVM};
+use crate::module::{Assemble, ModuleNVVM};
+use crate::ty::{self, TyNVVM, TypeNVVM};
 
 pub trait ToVal<'m> {
     fn to_val(self, module: &mut ModuleNVVM<'m>) -> Val<'m>;

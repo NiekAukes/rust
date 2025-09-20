@@ -1,9 +1,9 @@
-use std::{fmt::Display, ptr};
+use std::fmt::Display;
+use std::ptr;
 
 use rustc_ast::Ty;
 use rustc_data_structures::intern::Interned;
 use rustc_hir::def_id::DefId;
-use rustc_mir_build::build;
 
 use crate::module::{Assemble, ModuleNVVM};
 

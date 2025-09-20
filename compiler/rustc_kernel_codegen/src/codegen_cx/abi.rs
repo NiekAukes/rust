@@ -1,35 +1,30 @@
-use std::{marker::Tuple, num::NonZeroUsize};
+use std::marker::Tuple;
+use std::num::NonZeroUsize;
+
+use rustc_abi::{
+    AddressSpace, Align, BackendRepr, FieldIdx, FieldsShape, Float, HasDataLayout, Integer,
+    PointeeInfo, Primitive, Reg, Scalar, Size, TargetDataLayout, TyAndLayout, Variants,
+};
+use rustc_codegen_ssa::common::TypeKind;
+use rustc_codegen_ssa::traits::{
+    BaseTypeCodegenMethods, LayoutTypeCodegenMethods, TypeMembershipCodegenMethods,
+};
+use rustc_middle::bug;
+use rustc_middle::ty::layout::{FnAbiOf, FnAbiOfHelpers, LayoutOfHelpers};
+use rustc_middle::ty::{self, DynKind, Ty};
+use rustc_target::callconv::{CastTarget, FnAbi, PassMode};
 use tracing::debug;
 
-use rustc_codegen_ssa::{
-    common::TypeKind,
-    traits::{BaseTypeMethods, LayoutTypeMethods, TypeMembershipMethods},
-};
-use rustc_middle::{
-    bug,
-    ty::{
-        self,
-        layout::{FnAbiOf, FnAbiOfHelpers, LayoutOfHelpers},
-        DynKind, Ty,
-    },
-};
-use rustc_target::abi::{
-    call::{FnAbi, PassMode}, Abi, AddressSpace, Align, FieldIdx, FieldsShape, HasDataLayout, Integer, PointeeInfo, Primitive, Scalar, Size, TyAndLayout, Variants
-};
-
-use crate::{
-    ty::{TyNVVM, TypeNVVM},
-    value::ValueNVVM,
-};
-
 use super::CodegenCx;
+use crate::ty::{TyNVVM, TypeNVVM};
+use crate::value::ValueNVVM;
 
-impl<'tcx> TypeMembershipMethods<'tcx> for CodegenCx<'_, 'tcx> {
+impl<'tcx> TypeMembershipCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
     fn add_type_metadata(&self, _function: Self::Function, _typeid: String) {}
 
     fn set_type_metadata(&self, _function: Self::Function, _typeid: String) {}
 
-    fn typeid_metadata(&self, _typeid: String) -> Option<Self::Value> {
+    fn typeid_metadata(&self, _typeid: String) -> Option<()> {
         None
     }
 
@@ -39,7 +34,7 @@ impl<'tcx> TypeMembershipMethods<'tcx> for CodegenCx<'_, 'tcx> {
 }
 
 impl<'tcx> FnAbiOfHelpers<'tcx> for CodegenCx<'_, 'tcx> {
-    type FnAbiOfResult = &'tcx rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>;
+    type FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>;
 
     fn handle_fn_abi_err(
         &self,
@@ -47,8 +42,8 @@ impl<'tcx> FnAbiOfHelpers<'tcx> for CodegenCx<'_, 'tcx> {
         span: rustc_span::Span,
         fn_abi_request: rustc_middle::ty::layout::FnAbiRequest<'tcx>,
     ) -> <Self::FnAbiOfResult as rustc_middle::ty::layout::MaybeResult<
-        &'tcx rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
-    >>::Error {
+        &'tcx FnAbi<'tcx, Ty<'tcx>>,
+    >>::Error{
         todo!()
     }
 }
@@ -69,27 +64,24 @@ impl<'tcx> LayoutOfHelpers<'tcx> for CodegenCx<'_, 'tcx> {
 }
 
 impl HasDataLayout for CodegenCx<'_, '_> {
-    fn data_layout(&self) -> &rustc_target::abi::TargetDataLayout {
+    fn data_layout(&self) -> &TargetDataLayout {
         &self.tcx.data_layout
     }
 }
 
-impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
-    fn backend_type(&self, layout_ty: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> Self::Type {
+impl<'tcx, 'm> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
+    fn backend_type(&self, layout_ty: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> TyNVVM<'m> {
         if layout_ty.is_1zst() {
             return self.type_void();
         }
         self.lower_layout(layout_ty)
     }
 
-    fn cast_backend_type(&self, ty: &rustc_target::abi::call::CastTarget) -> Self::Type {
+    fn cast_backend_type(&self, ty: &CastTarget) -> TyNVVM<'m> {
         todo!()
     }
 
-    fn fn_decl_backend_type(
-        &self,
-        fn_abi: &rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
-    ) -> Self::Type {
+    fn fn_decl_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> TyNVVM<'m> {
         let mut args = vec![]; // = abi.args.iter().enumerate().map(|(idx, arg)| {
 
         if fn_abi.ret.is_indirect() {
@@ -101,12 +93,12 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
 
         for (idx, arg) in fn_abi.args.iter().enumerate() {
             // lower the type to the NVVM type
-            
+
             match arg.mode {
                 PassMode::Ignore => continue,
                 PassMode::Pair(a, b) => {
                     // add 2 arguments to the list
-                    
+
                     //let ty1 = self.backend_type(arg.layout.field(self, 0));
                     //let ty2 = self.backend_type(arg.layout.field(self, 1));
                     let (ty1, ty2) = match find_scalarpair_types(self, arg.layout) {
@@ -145,39 +137,38 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         module.ty_from_type(TypeNVVM::Fn(args, ret))
     }
 
-    fn fn_ptr_backend_type(
-        &self,
-        fn_abi: &rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
-    ) -> Self::Type {
+    fn fn_ptr_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> TyNVVM<'m> {
         let fn_ty = self.fn_decl_backend_type(fn_abi);
         let mut module = self.get_module_mut();
         module.ty_from_type(TypeNVVM::Pointer(fn_ty))
     }
 
-    fn reg_backend_type(&self, ty: &rustc_target::abi::call::Reg) -> Self::Type {
+    fn reg_backend_type(&self, ty: &Reg) -> TyNVVM<'m> {
         todo!()
     }
 
     fn immediate_backend_type(
         &self,
         layout: rustc_middle::ty::layout::TyAndLayout<'tcx>,
-    ) -> Self::Type {
+    ) -> TyNVVM<'m> {
         self.backend_type(layout)
     }
 
     fn is_backend_immediate(&self, layout: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> bool {
         //println!("is_backend_immediate, abi: {:?}", layout.abi);
-        match layout.abi {
-            Abi::Scalar(_) | Abi::Vector { .. } => true,
-            Abi::ScalarPair(..) | Abi::Uninhabited | Abi::Aggregate { .. } => false,
+        match layout.backend_repr {
+            BackendRepr::Scalar(_) | BackendRepr::SimdVector { .. } => true,
+            BackendRepr::ScalarPair(..) | BackendRepr::Memory { .. } => false,
         }
     }
 
     fn is_backend_scalar_pair(&self, layout: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> bool {
         //println!("is_backend_scalar_pair, abi: {:?}", layout.abi);
-        match layout.abi {
-            Abi::ScalarPair(..) => true,
-            Abi::Uninhabited | Abi::Scalar(_) | Abi::Vector { .. } | Abi::Aggregate { .. } => false,
+        match layout.backend_repr {
+            BackendRepr::ScalarPair(..) => true,
+            BackendRepr::Scalar(_)
+            | BackendRepr::SimdVector { .. }
+            | BackendRepr::Memory { .. } => false,
         }
     }
 
@@ -186,11 +177,11 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         layout: rustc_middle::ty::layout::TyAndLayout<'tcx>,
         index: usize,
         immediate: bool,
-    ) -> Self::Type {
+    ) -> TyNVVM<'m> {
         // This must produce the same result for `repr(transparent)` wrappers as for the inner type!
         // In other words, this should generally not look at the type at all, but only at the
         // layout.
-        let Abi::ScalarPair(a, b) = layout.abi else {
+        let BackendRepr::ScalarPair(a, b) = layout.backend_repr else {
             bug!("scalarpair not applicable: {:?}", layout);
         };
         let scalar = [a, b][index];
@@ -202,85 +193,74 @@ impl<'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         // when immediate. We need to load/store `bool` as `i8` to avoid
         // crippling LLVM optimizations or triggering other LLVM bugs with `i1`.
         if immediate && scalar.is_bool() {
-            return self.type_i1();
+            return self.type_i8();
         }
 
         self.scalar_type_at(scalar)
     }
 }
 
-impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
-    fn type_i1(&self) -> Self::Type {
-        let mut module = unsafe { &mut *self.module.get() };
-        module.ty_from_type(crate::ty::TypeNVVM::I(1))
-    }
-
-    fn type_i8(&self) -> Self::Type {
+impl<'tcx, 'm> BaseTypeCodegenMethods for CodegenCx<'m, 'tcx> {
+    fn type_i8(&self) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         module.ty_from_type(crate::ty::TypeNVVM::I(8))
     }
 
-    fn type_i16(&self) -> Self::Type {
+    fn type_i16(&self) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         module.ty_from_type(crate::ty::TypeNVVM::I(16))
     }
 
-    fn type_i32(&self) -> Self::Type {
+    fn type_i32(&self) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         module.ty_from_type(crate::ty::TypeNVVM::I(32))
     }
 
-    fn type_i64(&self) -> Self::Type {
+    fn type_i64(&self) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         module.ty_from_type(crate::ty::TypeNVVM::I(64))
     }
 
-    fn type_i128(&self) -> Self::Type {
+    fn type_i128(&self) -> TyNVVM<'m> {
         todo!()
     }
 
-    fn type_isize(&self) -> Self::Type {
+    fn type_isize(&self) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         module.ty_from_type(crate::ty::TypeNVVM::I(32))
     }
 
-    fn type_f16(&self) -> Self::Type {
+    fn type_f16(&self) -> TyNVVM<'m> {
         todo!()
     }
 
-    fn type_f32(&self) -> Self::Type {
+    fn type_f32(&self) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         module.ty_from_type(crate::ty::TypeNVVM::F32)
     }
 
-    fn type_f64(&self) -> Self::Type {
+    fn type_f64(&self) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         module.ty_from_type(crate::ty::TypeNVVM::F64)
     }
 
-    fn type_f128(&self) -> Self::Type {
+    fn type_f128(&self) -> TyNVVM<'m> {
         todo!()
     }
 
-    fn type_array(&self, ty: Self::Type, len: u64) -> Self::Type {
+    fn type_array(&self, ty: TyNVVM<'m>, len: u64) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         let typ = TypeNVVM::Array(ty, len as usize);
         module.ty_from_type(typ)
     }
 
-    fn type_func(&self, args: &[Self::Type], ret: Self::Type) -> Self::Type {
+    fn type_func(&self, args: &[TyNVVM<'m>], ret: TyNVVM<'m>) -> TyNVVM<'m> {
         let mut module = unsafe { &mut *self.module.get() };
         let typ = TypeNVVM::Fn(Vec::from(args), ret);
         module.ty_from_type(typ)
     }
 
-    fn type_struct(&self, els: &[Self::Type], packed: bool) -> Self::Type {
-        let mut module = unsafe { &mut *self.module.get() };
-        let typ = TypeNVVM::Struct(Vec::from(els));
-        module.ty_from_type(typ)
-    }
-
-    fn type_kind(&self, ty: Self::Type) -> TypeKind {
+    fn type_kind(&self, ty: TyNVVM<'m>) -> TypeKind {
         match *ty {
             TypeNVVM::I(_) => TypeKind::Integer,
             TypeNVVM::F32 => TypeKind::Float,
@@ -295,11 +275,11 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         }
     }
 
-    fn type_ptr(&self) -> Self::Type {
+    fn type_ptr(&self) -> TyNVVM<'m> {
         self.type_ptr_ext(AddressSpace::DATA)
     }
 
-    fn type_ptr_ext(&self, address_space: AddressSpace) -> Self::Type {
+    fn type_ptr_ext(&self, address_space: AddressSpace) -> TyNVVM<'m> {
         if (address_space != AddressSpace::DATA) {
             println!("type_ptr_ext, address_space: {:?}", address_space);
         }
@@ -308,23 +288,23 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
         module.ty_from_type(crate::ty::TypeNVVM::Pointer(i8))
     }
 
-    fn element_type(&self, ty: Self::Type) -> Self::Type {
+    fn element_type(&self, ty: TyNVVM<'m>) -> TyNVVM<'m> {
         todo!()
     }
 
-    fn vector_length(&self, ty: Self::Type) -> usize {
+    fn vector_length(&self, ty: TyNVVM<'m>) -> usize {
         todo!()
     }
 
-    fn float_width(&self, ty: Self::Type) -> usize {
+    fn float_width(&self, ty: TyNVVM<'m>) -> usize {
         todo!()
     }
 
-    fn int_width(&self, ty: Self::Type) -> u64 {
+    fn int_width(&self, ty: TyNVVM<'m>) -> u64 {
         32
     }
 
-    fn val_ty(&self, v: Self::Value) -> Self::Type {
+    fn val_ty(&self, v: Self::Value) -> TyNVVM<'m> {
         match self.get_module().valtypes.get(&v) {
             Some(ty) => *ty,
             None => {
@@ -337,25 +317,24 @@ impl<'tcx> BaseTypeMethods<'tcx> for CodegenCx<'_, 'tcx> {
 impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
     pub fn lower_layout(&self, layout: TyAndLayout<'tcx, Ty<'tcx>>) -> TyNVVM<'m> {
         let module = unsafe { &mut *self.module.get() };
-        println!("lower_layout, FieldsShape: {:?}", layout.fields);
-        println!("lower_layout, abi: {:?}", layout.abi);
-        println!("lower_layout, ty: {:?}", layout.ty);
 
-        match layout.abi {
-            Abi::Scalar(_) | Abi::Vector { .. } => return self.lower_ty(&layout.ty),
-            Abi::ScalarPair(s1, s2) => {
+        match layout.backend_repr {
+            BackendRepr::Scalar(_) | BackendRepr::Memory { .. } => {
+                return self.lower_ty(&layout.ty);
+            }
+            BackendRepr::ScalarPair(s1, s2) => {
                 let ty1 = self.scalar_type_at(s1);
                 let ty2 = self.scalar_type_at(s2);
                 return self.type_struct(&[ty1, ty2], false);
             }
-            Abi::Uninhabited | Abi::Aggregate { .. } => {},
+            BackendRepr::SimdVector { element, count } => {
+                let elem_ty = self.scalar_type_at(element);
+                return self.type_array(elem_ty, count as u64);
+            }
         }
 
-
         match layout.fields {
-            FieldsShape::Array { .. } => {
-                self.lower_ty(&layout.ty)
-            }
+            FieldsShape::Array { .. } => self.lower_ty(&layout.ty),
             FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
                 let (llfields, packed) = struct_llfields(self, layout);
                 self.type_struct(&llfields, packed)
@@ -412,7 +391,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
             ty::Array(ty, len) => {
                 let ty = self.lower_ty(ty);
-                let len = len.eval_target_usize(self.tcx, ty::ParamEnv::reveal_all());
+                let len = len.try_to_target_usize(self.tcx).unwrap();
                 module.ty_from_type(crate::ty::TypeNVVM::Array(ty, len as usize))
             }
 
@@ -472,7 +451,8 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                             index,
                             (max_size - size) as usize,
                         ));
-                        let padded = module.ty_from_type(crate::ty::TypeNVVM::Struct(vec![*ty, padding]));
+                        let padded =
+                            module.ty_from_type(crate::ty::TypeNVVM::Struct(vec![*ty, padding]));
                         padded_tys.push(padded);
                     } else {
                         padded_tys.push(*ty);
@@ -528,7 +508,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
             ty::Char => module.ty_from_type(crate::ty::TypeNVVM::I(32)),
 
-            ty::FnPtr(sig) => {
+            ty::FnPtr(sig, _) => {
                 //todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
                 //this should be a function pointer
                 //to the (instantiated) function signature
@@ -585,6 +565,10 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                 // let fn_ty = module.ty_from_type(crate::ty::TypeNVVM::Fn(inputs_tys, output_ty));
                 // module.ty_from_type(crate::ty::TypeNVVM::Pointer(fn_ty))
                 //self.type_voidptr()
+            }
+
+            ty::UnsafeBinder(binder) => {
+                todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())
             }
 
             ty::Coroutine(did, substs) => {
@@ -654,22 +638,28 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
     pub fn scalar_type_at(&self, scalar: Scalar) -> TyNVVM<'m> {
         match scalar.primitive() {
             Primitive::Int(i, _) => self.type_from_integer(i),
-            Primitive::F16 => self.type_f16(),
-            Primitive::F32 => self.type_f32(),
-            Primitive::F64 => self.type_f64(),
-            Primitive::F128 => self.type_f128(),
+            Primitive::Float(Float::F16) => self.type_f16(),
+            Primitive::Float(Float::F32) => self.type_f32(),
+            Primitive::Float(Float::F64) => self.type_f64(),
+            Primitive::Float(Float::F128) => self.type_f128(),
             Primitive::Pointer(address_space) => self.type_ptr_ext(address_space),
         }
     }
 
-    pub fn type_from_integer(&self, int: rustc_target::abi::Integer) -> TyNVVM<'m> {
+    pub fn type_from_integer(&self, int: Integer) -> TyNVVM<'m> {
         match int {
-            rustc_target::abi::Integer::I8 => self.type_i8(),
-            rustc_target::abi::Integer::I16 => self.type_i16(),
-            rustc_target::abi::Integer::I32 => self.type_i32(),
-            rustc_target::abi::Integer::I64 => self.type_i64(),
-            rustc_target::abi::Integer::I128 => self.type_i128(),
+            Integer::I8 => self.type_i8(),
+            Integer::I16 => self.type_i16(),
+            Integer::I32 => self.type_i32(),
+            Integer::I64 => self.type_i64(),
+            Integer::I128 => self.type_i128(),
         }
+    }
+
+    pub fn type_struct(&self, els: &[TyNVVM<'m>], packed: bool) -> TyNVVM<'m> {
+        let mut module = unsafe { &mut *self.module.get() };
+        let typ = TypeNVVM::Struct(Vec::from(els));
+        module.ty_from_type(typ)
     }
 }
 
@@ -679,9 +669,9 @@ pub trait LayoutExt {
 
 impl<'tcx> LayoutExt for TyAndLayout<'tcx, Ty<'tcx>> {
     fn is_immediate(&self) -> bool {
-        match self.abi {
-            Abi::Scalar(_) | Abi::Vector { .. } => true,
-            Abi::ScalarPair(..) | Abi::Uninhabited | Abi::Aggregate { .. } => false,
+        match self.backend_repr {
+            BackendRepr::Scalar(_) | BackendRepr::SimdVector { .. } => true,
+            BackendRepr::ScalarPair(..) | BackendRepr::Memory { .. } => false,
         }
     }
 }
@@ -751,7 +741,6 @@ impl<'m, 'tcx> Lower<'m, 'tcx> for Scalar {
     }
 }
 
-
 fn find_scalarpairs<'m, 'tcx>(ty: TyNVVM<'m>, scalars: &mut Vec<TyNVVM<'m>>) {
     match *ty {
         TypeNVVM::Struct(ref tys) => {
@@ -761,13 +750,15 @@ fn find_scalarpairs<'m, 'tcx>(ty: TyNVVM<'m>, scalars: &mut Vec<TyNVVM<'m>>) {
                     return;
                 }
             }
-        },
-        TypeNVVM::F32 | TypeNVVM::F64 | TypeNVVM::I(_) 
-        | TypeNVVM::Pointer(_) | TypeNVVM::Array(_, _) => {
+        }
+        TypeNVVM::F32
+        | TypeNVVM::F64
+        | TypeNVVM::I(_)
+        | TypeNVVM::Pointer(_)
+        | TypeNVVM::Array(_, _) => {
             scalars.push(ty);
-        },
+        }
         _ => bug!("find_first_scalarpair: {:?}", ty),
-        
     }
 }
 
@@ -775,8 +766,8 @@ pub fn find_scalarpair_types<'m, 'tcx>(
     cx: &CodegenCx<'m, 'tcx>,
     layout: TyAndLayout<'tcx, Ty<'tcx>>,
 ) -> Option<(TyNVVM<'m>, TyNVVM<'m>)> {
-    match layout.abi {
-        Abi::ScalarPair(a, b) => {
+    match layout.backend_repr {
+        BackendRepr::ScalarPair(a, b) => {
             let a = cx.scalar_type_at(a);
             let b = cx.scalar_type_at(b);
             //let lty = cx.lower_layout(layout);
@@ -785,7 +776,7 @@ pub fn find_scalarpair_types<'m, 'tcx>(
             // if scalars.len() == 2 {
             //     Some((scalars[0], scalars[1]))
             // } else {
-                
+
             //     panic!("find_scalarpair_types: {:?}, scalars found: {:?}, layout: {:#?}", lty, scalars, layout);
             // }
             Some((a, b))

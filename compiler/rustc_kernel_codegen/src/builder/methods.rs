@@ -1,34 +1,32 @@
 use std::cell::UnsafeCell;
 
-use crate::codegen_cx::abi::LayoutExt;
-use crate::module::MetadataNode;
-use crate::{
-    basic_block::BasicBlock,
-    ty::{TyNVVM, TypeNVVM},
-    value::{Const, FComp, IComp, Instruction, Val, ValueNVVM},
+use rustc_abi::{Align, BackendRepr, Scalar, Size, WrappingRange};
+use rustc_codegen_ssa::MemFlags;
+use rustc_codegen_ssa::common::{IntPredicate, SynchronizationScope};
+use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
+use rustc_codegen_ssa::mir::place::PlaceRef;
+use rustc_codegen_ssa::traits::{
+    BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods, LayoutTypeCodegenMethods,
+    MiscCodegenMethods, OverflowOp,
 };
-use rustc_codegen_ssa::common::IntPredicate;
-use rustc_codegen_ssa::traits::StaticMethods;
-use rustc_codegen_ssa::{
-    mir::{
-        operand::{OperandRef, OperandValue},
-        place::PlaceRef,
-    },
-    traits::{
-        BaseTypeMethods, BuilderMethods, ConstMethods, LayoutTypeMethods, MiscMethods, OverflowOp,
-    },
-    MemFlags,
-};
-use rustc_middle::{
-    bug,
-    ty::{layout::HasTyCtxt, Ty, TyCtxt},
-};
+use rustc_middle::bug;
+use rustc_middle::ty::layout::HasTyCtxt;
+use rustc_middle::ty::{AtomicOrdering, Ty, TyCtxt};
 use rustc_span::symbol::kw::In;
-use rustc_target::abi::{call::FnAbi, Abi, Align, Scalar, Size, WrappingRange};
+use rustc_target::callconv::FnAbi;
 
 use super::Builder;
+use crate::basic_block::BasicBlock;
+use crate::codegen_cx::CodegenCx;
+use crate::codegen_cx::abi::LayoutExt;
+use crate::function::FunctionNVVM;
+use crate::module::MetadataNode;
+use crate::ty::{TyNVVM, TypeNVVM};
+use crate::value::{Const, FComp, IComp, Instruction, Val, ValueNVVM};
 
 impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
+    type CodegenCx = CodegenCx<'m, 'tcx>;
+
     fn build(cx: &'a Self::CodegenCx, llbb: Self::BasicBlock) -> Self {
         Self { codegen_cx: cx, basic_block: llbb }
     }
@@ -512,19 +510,15 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn from_immediate(&mut self, val: Self::Value) -> Self::Value {
-        if self.cx().val_ty(val) == self.cx().type_i1() {
-            self.zext(val, self.cx().type_i8())
-        } else {
-            val
-        }
+        val
     }
 
     fn to_immediate_scalar(&mut self, val: Self::Value, scalar: Scalar) -> Self::Value {
         if scalar.is_bool() {
-            if self.cx().val_ty(val) == self.cx().type_i1() {
+            if self.cx().val_ty(val) == self.cx().type_i8() {
                 return val;
             }
-            return self.trunc(val, self.cx().type_i1());
+            return self.trunc(val, self.cx().type_i8());
         }
         val
     }
@@ -568,7 +562,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         &mut self,
         ty: Self::Type,
         ptr: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: AtomicOrdering,
         size: Size,
     ) -> Self::Value {
         todo!()
@@ -605,8 +599,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             // we check if the value is a struct or array constant, if it is, we must use it as a global variable
             if let ValueNVVM::Constant(Const::Arr(_) | Const::Struct(_)) = place.val.llval.0 {
                 // get the static address of the constant
-                const_llval =
-                    Some(self.cx().static_addr_of(place.val.llval, place.val.align, None));
+                const_llval = Some(self.cx().default_static_addr_of(place.val.llval, None));
             }
             let llval = const_llval.unwrap_or_else(|| {
                 let load = self.load(llty, place.val.llval, place.val.align);
@@ -615,11 +608,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
                 // }
                 load
             });
-            OperandValue::Immediate(self.to_immediate(llval, place.layout))
-        } else if let Abi::ScalarPair(a, b) = place.layout.abi {
+
+            OperandValue::Immediate(llval)
+        } else if let BackendRepr::ScalarPair(a, b) = place.layout.backend_repr {
             let b_offset = a.size(self).align_to(b.align(self).abi);
 
-            let mut load = |i, scalar: rustc_target::abi::Scalar, layout, align, offset| {
+            let mut load = |i, scalar: rustc_abi::Scalar, layout, align, offset| {
                 let llptr = if i == 0 {
                     place.val.llval
                 } else {
@@ -702,8 +696,6 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         let target_ty = self.cx().type_pointer(self.cx().val_ty(val));
         let org_ptr_ty = self.cx().val_ty(ptr);
 
-        
-
         // if the types are not the same, cast the value to the type of the pointer
         let ptr = if target_ty != org_ptr_ty {
             // let cast = Instruction::BitCast { ty: org_ptr_ty, val: ptr, to: target_ty };
@@ -729,7 +721,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         &mut self,
         val: Self::Value,
         ptr: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: AtomicOrdering,
         size: Size,
     ) {
         todo!()
@@ -939,7 +931,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         let v = self
             .cx()
             .get_module_mut()
-            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i1()));
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i8()));
         self.basic_block.add_instr(v);
         v
     }
@@ -952,8 +944,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     ) -> Self::Value {
         let module = self.cx().get_module();
         // check if the types of the operands are the same
-        let (_, args) =
-            self.convert_arguments_to_largest(&[lhs, rhs]); // convert both arguments to the largest type
+        let (_, args) = self.convert_arguments_to_largest(&[lhs, rhs]); // convert both arguments to the largest type
         let lhs = args[0];
         let rhs = args[1];
 
@@ -961,7 +952,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         let v = self
             .cx()
             .get_module_mut()
-            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i1()));
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i8()));
         self.basic_block.add_instr(v);
         v
     }
@@ -1119,33 +1110,30 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             }
             _ => panic!("Expected struct type, found {:?}", final_ty),
         };
-        
+
         let conv = self.convert_argument(elt, to_ty);
 
         // create a new insert value instruction
         let instr = Instruction::InsertValue { aggregate: agg_val, elt: conv, idx };
 
-        let v = self
-            .cx()
-            .get_module_mut()
-            .create_val(ValueNVVM::Instr(instr), Some(final_ty));
+        let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), Some(final_ty));
         self.basic_block.add_instr(v);
         v
     }
 
-    fn set_personality_fn(&mut self, personality: Self::Value) {
+    fn set_personality_fn(&mut self, personality: &'m FunctionNVVM<'m>) {
         //todo!()
         panic!("set_personality_fn not supported by nvvm");
     }
 
-    fn cleanup_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value) {
+    fn cleanup_landing_pad(&mut self, pers_fn: &'m FunctionNVVM<'m>) -> (Self::Value, Self::Value) {
         // let ty = self.cx().type_struct(&[self.type_ptr(), self.type_i32()], false);
         // let landing_pad = self.landing_pad(ty, pers_fn, 0, true);
         // (self.extract_value(landing_pad, 0), self.extract_value(landing_pad, 1))
         panic!("cleanup_landing_pad not supported by nvvm");
     }
 
-    fn filter_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value) {
+    fn filter_landing_pad(&mut self, pers_fn: &'m FunctionNVVM<'m>) -> (Self::Value, Self::Value) {
         todo!()
     }
 
@@ -1188,8 +1176,8 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         dst: Self::Value,
         cmp: Self::Value,
         src: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
-        failure_order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: AtomicOrdering,
+        failure_order: AtomicOrdering,
         weak: bool,
     ) -> (Self::Value, Self::Value) {
         todo!()
@@ -1200,16 +1188,12 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         op: rustc_codegen_ssa::common::AtomicRmwBinOp,
         dst: Self::Value,
         src: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: AtomicOrdering,
     ) -> Self::Value {
         todo!()
     }
 
-    fn atomic_fence(
-        &mut self,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
-        scope: rustc_codegen_ssa::common::SynchronizationScope,
-    ) {
+    fn atomic_fence(&mut self, order: AtomicOrdering, scope: SynchronizationScope) {
         todo!()
     }
 
@@ -1223,16 +1207,6 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 
     fn lifetime_end(&mut self, ptr: Self::Value, size: Size) {
         self.call_lifetime_intrinsic("llvm.lifetime.end.p0i8", ptr, size)
-    }
-
-    fn instrprof_increment(
-        &mut self,
-        fn_name: Self::Value,
-        hash: Self::Value,
-        num_counters: Self::Value,
-        index: Self::Value,
-    ) {
-        todo!()
     }
 
     fn call(
@@ -1249,11 +1223,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
             bug!("Expected function type, found {:?}", llty);
         };
 
-        let ret = if ret.is_zst() {
-            self.cx().type_void()
-        } else {
-            *ret
-        };
+        let ret = if ret.is_zst() { self.cx().type_void() } else { *ret };
 
         let mut args_vec = Vec::new();
         let fn_decl_ty = self.cx().fn_decl_backend_type(fn_abi.unwrap());
@@ -1305,11 +1275,7 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
         };
         assert_eq!(args.len(), fn_args.len());
 
-
-        println!(
-            "Calling intrinsic: {}, args: {:?}, ret: {:?}",
-            name, args, fn_ret
-        );
+        println!("Calling intrinsic: {}, args: {:?}, ret: {:?}", name, args, fn_ret);
 
         let mut args_vec = Vec::new();
         for (arg, expected_ty) in args.iter().zip(fn_args.iter()) {
@@ -1339,10 +1305,7 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
     fn convert_argument(&mut self, arg: Val<'m>, to_ty: TyNVVM<'m>) -> Val<'m> {
         let from_ty = self.cx().val_ty(arg);
         if from_ty == to_ty {
-            println!(
-                "convert_argument: types are equal, returning original arg: {:?}",
-                from_ty
-            );
+            println!("convert_argument: types are equal, returning original arg: {:?}", from_ty);
             return arg;
         } else if *from_ty == *to_ty {
             bug!("convert_argument: types are equal but not the same");
@@ -1350,16 +1313,13 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
 
         let module = self.cx().get_module();
 
-        println!(
-            "convert_argument: converting {:?} to {:?} with value {:?}",
-            from_ty, to_ty, arg
-        );
+        println!("convert_argument: converting {:?} to {:?} with value {:?}", from_ty, to_ty, arg);
 
         // if the arg is a struct or array constant, we need to get the static address of the constant
         if let ValueNVVM::Constant(Const::Arr(_) | Const::Struct(_)) = arg.0 {
             // get the static address of the constant
             // TODO alignment is not considered here
-            let s_addr = self.cx().static_addr_of(arg, Align::from_bytes(8).unwrap(), None);
+            let s_addr = self.cx().default_static_addr_of(arg, None);
             return self.convert_argument(s_addr, to_ty);
         }
 
@@ -1465,12 +1425,7 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
         }
     }
 
-    pub fn shuffle_vector(
-        &mut self,
-        vec1: Val<'m>,
-        vec2: Val<'m>,
-        mask: Val<'m>,
-    ) -> Val<'m> {
+    pub fn shuffle_vector(&mut self, vec1: Val<'m>, vec2: Val<'m>, mask: Val<'m>) -> Val<'m> {
         //unsafe { llvm::LLVMBuildShuffleVector(self.llbuilder, v1, v2, mask, UNNAMED) }
         let instr = Instruction::ShuffleVector { vec1, vec2, mask };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), None);
@@ -1478,12 +1433,7 @@ impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
         v
     }
 
-    pub fn insert_element(
-        &mut self,
-        vec: Val<'m>,
-        elt: Val<'m>,
-        idx: Val<'m>,
-    ) -> Val<'m> {
+    pub fn insert_element(&mut self, vec: Val<'m>, elt: Val<'m>, idx: Val<'m>) -> Val<'m> {
         //unsafe { llvm::LLVMBuildInsertElement(self.llbuilder, vec, elt, idx, UNNAMED) }
         let instr = Instruction::InsertElement { vec, elt, idx };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), None);

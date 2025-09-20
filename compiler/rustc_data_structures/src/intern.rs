@@ -92,10 +92,7 @@ impl<'a, T: Ord> Ord for Interned<'a, T> {
     }
 }
 
-impl<'a, T> Hash for Interned<'a, T>
-where
-    T: Hash,
-{
+impl<'a, T> Hash for Interned<'a, T> {
     #[inline]
     fn hash<H: Hasher>(&self, s: &mut H) {
         // Pointer hashing is sufficient, due to the uniqueness constraint.

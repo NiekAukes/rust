@@ -1,27 +1,28 @@
-use rustc_codegen_ssa::traits::DebugInfoMethods;
+use rustc_codegen_ssa::traits::DebugInfoCodegenMethods;
 use rustc_middle::ty::Ty;
-use rustc_middle::ty;
-use rustc_middle::mir;
-use rustc_target::abi::call::FnAbi;
+use rustc_middle::{mir, ty};
+use rustc_target::callconv::FnAbi;
 
 use super::CodegenCx;
+use crate::function::FunctionNVVM;
+use crate::value::Val;
 
-impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
+impl<'tcx, 'm> DebugInfoCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn create_vtable_debuginfo(
         &self,
         ty: Ty<'tcx>,
         trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>,
-        vtable: Self::Value,
+        vtable: Val<'tcx>,
     ) {
     }
 
     fn create_function_debug_context(
         &self,
         instance: ty::Instance<'tcx>,
-        fn_abi: &rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
-        llfn: Self::Function,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llfn: &'m FunctionNVVM<'m>,
         mir: &rustc_middle::mir::Body<'tcx>,
-    ) -> Option<rustc_codegen_ssa::mir::debuginfo::FunctionDebugContext<'tcx, Self::DIScope, Self::DILocation>> {
+    ) -> Option<rustc_codegen_ssa::mir::debuginfo::FunctionDebugContext<'tcx, (), ()>> {
         None
     }
 
@@ -48,8 +49,7 @@ impl<'tcx> DebugInfoMethods<'tcx> for CodegenCx<'_, 'tcx> {
     ) -> Self::DIScope {
     }
 
-    fn debuginfo_finalize(&self) {
-    }
+    fn debuginfo_finalize(&self) {}
 
     fn create_dbg_var(
         &self,

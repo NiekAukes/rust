@@ -1,13 +1,16 @@
-use rustc_middle::ty::{layout::{HasParamEnv, HasTyCtxt}, TyCtxt};
-use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, HasCodegen, StaticBuilderMethods};
-use rustc_target::{abi::HasDataLayout, spec::{HasTargetSpec, Target}};
+use rustc_abi::HasDataLayout;
+use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, StaticBuilderMethods};
+use rustc_middle::ty::TyCtxt;
+use rustc_middle::ty::layout::HasTyCtxt;
+use rustc_target::spec::{HasTargetSpec, Target};
+
 use crate::codegen_cx::CodegenCx;
 
-mod methods;
-mod asm;
 mod abi;
-mod intrinsic;
+mod asm;
 mod debug_info;
+mod intrinsic;
+mod methods;
 pub struct Builder<'a, 'm, 'tcx> {
     codegen_cx: &'a CodegenCx<'m, 'tcx>,
     basic_block: &'m crate::basic_block::BasicBlock<'m>,
@@ -35,16 +38,8 @@ impl<'m, 'tcx> BackendTypes for Builder<'_, 'm, 'tcx> {
     type DIScope = <CodegenCx<'m, 'tcx> as BackendTypes>::DIScope;
     type DILocation = <CodegenCx<'m, 'tcx> as BackendTypes>::DILocation;
     type DIVariable = <CodegenCx<'m, 'tcx> as BackendTypes>::DIVariable;
-}
 
-impl<'m, 'tcx> HasCodegen<'tcx> for Builder<'_, 'm, 'tcx> {
-    type CodegenCx = CodegenCx<'m, 'tcx>;
-}
-
-impl<'tcx> HasParamEnv<'tcx> for Builder<'_, '_, 'tcx> {
-    fn param_env(&self) -> rustc_middle::ty::ParamEnv<'tcx> {
-        self.cx().param_env()
-    }
+    type Metadata = ();
 }
 
 impl<'tcx> HasTyCtxt<'tcx> for Builder<'_, '_, 'tcx> {
@@ -54,11 +49,10 @@ impl<'tcx> HasTyCtxt<'tcx> for Builder<'_, '_, 'tcx> {
 }
 
 impl HasDataLayout for Builder<'_, '_, '_> {
-    fn data_layout(&self) -> &rustc_target::abi::TargetDataLayout {
+    fn data_layout(&self) -> &rustc_abi::TargetDataLayout {
         self.codegen_cx.data_layout()
     }
 }
-
 
 impl<'m, 'tcx> std::ops::Deref for Builder<'_, 'm, 'tcx> {
     type Target = CodegenCx<'m, 'tcx>;

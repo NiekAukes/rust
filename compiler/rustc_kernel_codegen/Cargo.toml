@@ -13,6 +13,7 @@ rustc_mir_build = { path = "../rustc_mir_build" }
 rustc_ast = { path = "../rustc_ast" }
 rustc_arena = { path = "../rustc_arena" }
 rustc_target = { path = "../rustc_target" }
+rustc_abi = { path = "../rustc_abi" }
 rustc_codegen_llvm = { path = "../rustc_codegen_llvm" }
 rustc_data_structures = { path = "../rustc_data_structures" }
 

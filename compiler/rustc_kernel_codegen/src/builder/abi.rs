@@ -1,26 +1,20 @@
-use rustc_codegen_ssa::traits::ConstMethods;
-use rustc_codegen_ssa::{
-    mir::{
-        operand::{OperandRef, OperandValue},
-        place::{PlaceRef, PlaceValue},
-    },
-    traits::{AbiBuilderMethods, ArgAbiMethods, BuilderMethods},
-    MemFlags,
+use rustc_codegen_ssa::MemFlags;
+use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
+use rustc_codegen_ssa::mir::place::{PlaceRef, PlaceValue};
+use rustc_codegen_ssa::traits::{
+    AbiBuilderMethods, ArgAbiBuilderMethods, BuilderMethods, ConstCodegenMethods,
 };
-use rustc_middle::{
-    bug,
-    ty::{
-        layout::{FnAbiOfHelpers, LayoutOfHelpers},
-        Ty,
-    },
-};
-use rustc_target::abi::call::{ArgAbi, PassMode};
-
-use crate::{codegen_cx::CodegenCx, ty::TyNVVM, value::Val};
+use rustc_middle::bug;
+use rustc_middle::ty::Ty;
+use rustc_middle::ty::layout::{FnAbiOfHelpers, HasTypingEnv, LayoutOfHelpers};
+use rustc_target::callconv::{ArgAbi, FnAbi, PassMode};
 
 use super::Builder;
+use crate::codegen_cx::CodegenCx;
+use crate::ty::TyNVVM;
+use crate::value::Val;
 
-impl<'tcx> AbiBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
+impl<'tcx> AbiBuilderMethods for Builder<'_, '_, 'tcx> {
     fn get_param(&mut self, index: usize) -> Self::Value {
         // get the parameter of the function at the given index
         match self.basic_block.func.args.get(index) {
@@ -30,7 +24,7 @@ impl<'tcx> AbiBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     }
 }
 
-impl<'m, 'tcx> ArgAbiMethods<'tcx> for Builder<'_, 'm, 'tcx> {
+impl<'m, 'tcx> ArgAbiBuilderMethods<'tcx> for Builder<'_, 'm, 'tcx> {
     fn store_fn_arg(
         &mut self,
         arg_abi: &ArgAbi<'tcx, Ty<'tcx>>,
@@ -47,13 +41,10 @@ impl<'m, 'tcx> ArgAbiMethods<'tcx> for Builder<'_, 'm, 'tcx> {
     ) {
         arg_abi.store(self, val, dst)
     }
-    fn arg_memory_ty(&self, arg_abi: &ArgAbi<'tcx, Ty<'tcx>>) -> TyNVVM<'m> {
-        arg_abi.memory_ty(self)
-    }
 }
 
 impl<'tcx> FnAbiOfHelpers<'tcx> for Builder<'_, '_, 'tcx> {
-    type FnAbiOfResult = &'tcx rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>;
+    type FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>;
 
     fn handle_fn_abi_err(
         &self,
@@ -61,8 +52,14 @@ impl<'tcx> FnAbiOfHelpers<'tcx> for Builder<'_, '_, 'tcx> {
         span: rustc_span::Span,
         fn_abi_request: rustc_middle::ty::layout::FnAbiRequest<'tcx>,
     ) -> <Self::FnAbiOfResult as rustc_middle::ty::layout::MaybeResult<
-        &'tcx rustc_target::abi::call::FnAbi<'tcx, Ty<'tcx>>,
-    >>::Error {
+        &'tcx FnAbi<'tcx, Ty<'tcx>>,
+    >>::Error{
+        todo!()
+    }
+}
+
+impl<'tcx> HasTypingEnv<'tcx> for Builder<'_, '_, 'tcx> {
+    fn typing_env(&self) -> rustc_middle::ty::TypingEnv<'tcx> {
         todo!()
     }
 }
@@ -105,7 +102,6 @@ impl<'m, 'tcx> ArgAbiExt<'m, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
     /// Can be used for both storing formal arguments into Rust variables
     /// or results of call/invoke instructions into their destinations.
     fn store(&self, bx: &mut Builder<'_, 'm, 'tcx>, val: Val<'m>, dst: PlaceRef<'tcx, Val<'m>>) {
-        
         match &self.mode {
             PassMode::Ignore => {}
             // Sized indirect arguments
@@ -135,10 +131,7 @@ impl<'m, 'tcx> ArgAbiExt<'m, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                 bx.lifetime_start(llscratch, scratch_size);
                 // ...store the value...
 
-                println!(
-            "ArgAbiExt::store: val: {:?}, dst: {:?}, mode: {:?}",
-            val, dst, self.mode
-        );
+                println!("ArgAbiExt::store: val: {:?}, dst: {:?}, mode: {:?}", val, dst, self.mode);
                 bx.store(val, llscratch, scratch_align);
                 // ... and then memcpy it to the intended destination.
                 bx.memcpy(

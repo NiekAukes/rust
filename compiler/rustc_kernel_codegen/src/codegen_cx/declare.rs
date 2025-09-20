@@ -1,24 +1,17 @@
-use rustc_codegen_ssa::traits::{BaseTypeMethods, LayoutTypeMethods, PreDefineMethods};
+use rustc_abi::{BackendRepr, Reg, RegKind, Size};
+use rustc_codegen_ssa::traits::PreDefineCodegenMethods;
 use rustc_middle::ty::{self, Ty};
-use rustc_target::abi::{
-    call::{ArgAbi, ArgAttribute, CastTarget, PassMode, Reg, RegKind},
-    Abi, Scalar, Size,
-};
+use rustc_target::callconv::{CastTarget, PassMode};
 
-use crate::{
-    function::FunctionNVVM,
-    ty::{TyNVVM, TypeNVVM},
-    value::{Const, Val, ValueNVVM},
-};
+use super::CodegenCx;
+use super::abi::{Lower, find_scalarpair_types};
+use crate::function::FunctionNVVM;
+use crate::ty::{TyNVVM, TypeNVVM};
+use crate::value::{Const, Val, ValueNVVM};
 
-use super::{
-    abi::{find_scalarpair_types, Lower},
-    CodegenCx,
-};
-
-impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
+impl<'m, 'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn predefine_static(
-        &self,
+        &mut self,
         def_id: rustc_hir::def_id::DefId,
         linkage: rustc_middle::mir::mono::Linkage,
         visibility: rustc_middle::mir::mono::Visibility,
@@ -28,6 +21,18 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
     }
 
     fn predefine_fn(
+        &mut self,
+        instance: ty::Instance<'tcx>,
+        linkage: rustc_middle::mir::mono::Linkage,
+        visibility: rustc_middle::mir::mono::Visibility,
+        symbol_name: &str,
+    ) {
+        self.predefine_fn_immut(instance, linkage, visibility, symbol_name);
+    }
+}
+
+impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
+    pub fn predefine_fn_immut(
         &self,
         instance: rustc_middle::ty::Instance<'tcx>,
         linkage: rustc_middle::mir::mono::Linkage,
@@ -79,9 +84,9 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
                     // let ty1 = self.backend_type(arg.layout.field(self, 0));
                     // let value1 = ValueNVVM::Param {func_name: symbol_name.to_string(), idx: arg_count, ty: ty1};
                     // module.create_val(value1, Some(ty1))
-                    
-                    let (val1, val2) = match arg.layout.abi {
-                        Abi::ScalarPair(s1, s2) => {
+
+                    let (val1, val2) = match arg.layout.backend_repr {
+                        BackendRepr::ScalarPair(s1, s2) => {
                             let (ty1, ty2) = match find_scalarpair_types(self, arg.layout) {
                                 Some(t) => t,
                                 None => panic!("Expected scalar pair"),
@@ -113,8 +118,11 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
                     // CHECK: is this correct?
                     let ty = self.backend_type(arg.layout);
                     let ty_ptr = self.type_pointer(ty);
-                    let value =
-                        ValueNVVM::Param { func_name: symbol_name.to_string(), idx: arg_count, ty: ty_ptr };
+                    let value = ValueNVVM::Param {
+                        func_name: symbol_name.to_string(),
+                        idx: arg_count,
+                        ty: ty_ptr,
+                    };
                     let val = module.create_val(value, Some(ty_ptr));
                     args.push(val);
                     arg_count += 1;
@@ -142,11 +150,7 @@ impl<'m, 'tcx> PreDefineMethods<'tcx> for CodegenCx<'m, 'tcx> {
             self.type_void()
         } else {
             let ty = self.backend_type(abi.ret.layout);
-            if ty.is_zst() {
-                self.type_void()
-            } else {
-                ty
-            }
+            if ty.is_zst() { self.type_void() } else { ty }
         };
 
         // build the type

@@ -1,19 +1,13 @@
-use rustc_codegen_ssa::traits::StaticMethods;
+use rustc_abi::Align;
+use rustc_codegen_ssa::traits::StaticCodegenMethods;
 
-use crate::{
-    global::GlobalNVVM,
-    value::{Const, Val, ValueNVVM},
-};
+use super::CodegenCx;
+use super::declare::fix_ptx_name;
+use crate::global::GlobalNVVM;
+use crate::value::{Const, Val, ValueNVVM};
 
-use super::{declare::fix_ptx_name, CodegenCx};
-
-impl<'m> StaticMethods for CodegenCx<'m, '_> {
-    fn static_addr_of(
-        &self,
-        cv: Self::Value,
-        align: rustc_target::abi::Align,
-        kind: Option<&str>,
-    ) -> Val<'m> {
+impl<'m> StaticCodegenMethods for CodegenCx<'m, '_> {
+    fn static_addr_of(&self, cv: Val<'m>, align: Align, kind: Option<&str>) -> Val<'m> {
         // lookup the constant value in the globals map
         // if it exists, return the existing global variable
         // if it does not exist, create a new global variable
@@ -43,15 +37,7 @@ impl<'m> StaticMethods for CodegenCx<'m, '_> {
         val
     }
 
-    fn codegen_static(&self, def_id: rustc_hir::def_id::DefId) {
-        todo!()
-    }
-
-    fn add_used_global(&self, global: Self::Value) {
-        todo!()
-    }
-
-    fn add_compiler_used_global(&self, global: Self::Value) {
+    fn codegen_static(&mut self, def_id: rustc_hir::def_id::DefId) {
         todo!()
     }
 }
@@ -61,6 +47,10 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         let next_id = self.next_static_id.get();
         self.next_static_id.set(next_id + 1);
         next_id
+    }
+
+    pub fn default_static_addr_of(&self, cv: Val<'m>, kind: Option<&str>) -> Val<'m> {
+        self.static_addr_of(cv, Align::from_bytes(8).unwrap(), kind)
     }
 
     // pub fn add_expr_as_global(&self, val: Val<'m>, kind: Option<&str>) -> Val<'m> {

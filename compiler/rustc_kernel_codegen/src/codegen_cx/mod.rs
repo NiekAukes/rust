@@ -1,32 +1,21 @@
 use std::borrow::Cow;
-use std::cell::Cell;
-use std::cell::RefCell;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::HashMap;
+
+use rustc_codegen_ssa::traits::{
+    AsmCodegenMethods, BackendTypes, BaseTypeCodegenMethods, CodegenMethods,
+};
+use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::intern::Interned;
+use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv};
+use rustc_middle::ty::{ExistentialTraitRef, PolyExistentialTraitRef, Ty, TyCtxt, TypingEnv};
+use rustc_target::spec::{HasTargetSpec, Target};
 
 use crate::basic_block::BasicBlock;
 use crate::function::FunctionNVVM;
 use crate::module::ModuleNVVM;
 use crate::ty::{TyNVVM, TypeNVVM};
-use crate::value::Const;
-use crate::value::Val;
-use crate::value::ValueNVVM;
-use rustc_codegen_ssa::traits::AsmMethods;
-use rustc_codegen_ssa::traits::BackendTypes;
-use rustc_codegen_ssa::traits::BaseTypeMethods;
-use rustc_codegen_ssa::traits::CodegenMethods;
-use rustc_codegen_ssa::traits::DebugInfoMethods;
-use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::intern::Interned;
-use rustc_middle::ty::layout::HasParamEnv;
-use rustc_middle::ty::layout::HasTyCtxt;
-use rustc_middle::ty::ExistentialTraitRef;
-use rustc_middle::ty::PolyExistentialTraitRef;
-use rustc_middle::ty::Ty;
-use rustc_middle::ty::TyCtxt;
-use rustc_target::abi::VariantIdx;
-use rustc_target::spec::HasTargetSpec;
-use rustc_target::spec::Target;
+use crate::value::{Const, Val, ValueNVVM};
 
 pub mod abi;
 mod allocator;
@@ -52,7 +41,7 @@ pub struct CodegenCx<'m, 'tcx> {
     next_static_id: Cell<usize>,
 
     //session: &'tcx rustc_session::Session,
-    pub(crate) eh_personality: Cell<Option<Val<'m>>>,
+    pub(crate) eh_personality: Cell<Option<&'m FunctionNVVM<'m>>>,
 
     target: &'tcx Target,
 }
@@ -69,6 +58,8 @@ impl<'m> BackendTypes for CodegenCx<'m, '_> {
     type DIScope = ();
     type DILocation = ();
     type DIVariable = ();
+
+    type Metadata = ();
 }
 
 //impl<'tcx> CodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {}
@@ -79,9 +70,19 @@ impl HasTargetSpec for CodegenCx<'_, '_> {
     }
 }
 
-impl<'tcx> AsmMethods<'tcx> for CodegenCx<'_, 'tcx> {
+impl<'tcx> HasTypingEnv<'tcx> for CodegenCx<'_, 'tcx> {
+    fn param_env(&self) -> rustc_middle::ty::ParamEnv<'tcx> {
+        self.typing_env().param_env
+    }
+
+    fn typing_env(&self) -> TypingEnv<'tcx> {
+        TypingEnv::fully_monomorphized()
+    }
+}
+
+impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
     fn codegen_global_asm(
-        &self,
+        &mut self,
         template: &[rustc_ast::InlineAsmTemplatePiece],
         operands: &[rustc_codegen_ssa::traits::GlobalAsmOperandRef<'tcx>],
         options: rustc_ast::InlineAsmOptions,
@@ -89,11 +90,9 @@ impl<'tcx> AsmMethods<'tcx> for CodegenCx<'_, 'tcx> {
     ) {
         todo!()
     }
-}
 
-impl<'tcx> HasParamEnv<'tcx> for CodegenCx<'_, 'tcx> {
-    fn param_env(&self) -> rustc_middle::ty::ParamEnv<'tcx> {
-        rustc_middle::ty::ParamEnv::reveal_all()
+    fn mangled_name(&self, instance: rustc_middle::ty::Instance<'tcx>) -> String {
+        todo!()
     }
 }
 
@@ -149,7 +148,7 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
 
         let i8p = self.type_ptr();
         let void = self.type_void();
-        let i1 = self.type_i1();
+        let i1 = self.type_i8();
         let t_i8 = self.type_i8();
         let t_i16 = self.type_i16();
         let t_i32 = self.type_i32();

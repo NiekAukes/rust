@@ -3993,6 +3993,7 @@ dependencies = [
  "cc",
  "curl",
  "libc",
+ "rustc_abi",
  "rustc_arena",
  "rustc_ast",
  "rustc_codegen_llvm",

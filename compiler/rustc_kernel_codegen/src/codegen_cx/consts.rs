@@ -1,26 +1,21 @@
 use std::ops::Range;
 
-use rustc_codegen_ssa::traits::{BaseTypeMethods, ConstMethods, MiscMethods, StaticMethods};
+use rustc_abi::{self, Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
+use rustc_codegen_ssa::traits::ConstCodegenMethods;
 use rustc_hir::def_id::DefId;
-use rustc_middle::{
-    bug,
-    mir::interpret::{
-        read_target_uint, AllocId, AllocRange, Allocation, ConstAllocation, GlobalAlloc, InitChunk,
-        Pointer, Scalar as InterpScalar,
-    },
-};
-use rustc_target::abi::{self, Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
-
-use crate::{
-    codegen_cx::declare::fix_ptx_name,
-    global::{ConstExpr, GlobalNVVM},
-    ty::{TyNVVM, TypeNVVM},
-    value::{Const, Instruction, Val, ValueNVVM},
+use rustc_middle::bug;
+use rustc_middle::mir::interpret::{
+    AllocId, AllocRange, Allocation, ConstAllocation, GlobalAlloc, InitChunk, Pointer,
+    Scalar as InterpScalar, read_target_uint,
 };
 
 use super::CodegenCx;
+use crate::codegen_cx::declare::fix_ptx_name;
+use crate::global::{ConstExpr, GlobalNVVM};
+use crate::ty::{TyNVVM, TypeNVVM};
+use crate::value::{Const, Instruction, Val, ValueNVVM};
 
-impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
+impl<'m, 'tcx> ConstCodegenMethods for CodegenCx<'m, 'tcx> {
     fn const_null(&self, t: Self::Type) -> Self::Value {
         match t.0 {
             TypeNVVM::I(1) => self.const_bool(false),
@@ -313,7 +308,7 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn scalar_to_backend(
         &self,
         cv: rustc_middle::mir::interpret::Scalar,
-        layout: rustc_target::abi::Scalar,
+        layout: Scalar,
         llty: Self::Type,
     ) -> Self::Value {
         let value = match cv {
@@ -339,7 +334,11 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
                         self.const_real(llty, f)
                     }
                     _ if i.is_null() => self.const_null(llty),
-                    _ => panic!("unsupported int size for scalar_to_backend: {:?}. Value: {:?}", (sz, llty), i),
+                    _ => panic!(
+                        "unsupported int size for scalar_to_backend: {:?}. Value: {:?}",
+                        (sz, llty),
+                        i
+                    ),
                 }
             }
             InterpScalar::Ptr(p, _) => {
@@ -382,17 +381,7 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
         value
     }
 
-    fn const_bitcast(&self, val: Val<'m>, ty: TyNVVM<'m>) -> Val<'m> {
-        // create a bitcast instruction
-        // let expr = ConstExpr::BitCast { val, ty };
-        // let value = ValueNVVM::ConstExpr(expr);
-        // let val = self.get_module_mut().create_val(value, Some(ty));
-        let val = self.inner_bitcast(val, ty);
-
-        self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
-    }
-
-    fn const_ptr_byte_offset(&self, val: Val<'m>, offset: rustc_target::abi::Size) -> Val<'m> {
+    fn const_ptr_byte_offset(&self, val: Val<'m>, offset: rustc_abi::Size) -> Val<'m> {
         let mut module = self.get_module_mut();
         // infer the type of the operation, in practice the val is almost always a pointer
         let val_ty = *module.valtypes.get(&val).expect("const_ptr_byte_offset must have a type");
@@ -434,7 +423,11 @@ impl<'m, 'tcx> ConstMethods<'tcx> for CodegenCx<'m, 'tcx> {
         let value = ValueNVVM::ConstExpr(gep);
         let val = module.create_val(value, Some(i8ptr_ty));
 
-        self.static_addr_of(val, Align::from_bytes(8).unwrap(), None)
+        self.static_addr_of(val, None)
+    }
+
+    fn const_vector(&self, elts: &[Self::Value]) -> Self::Value {
+        todo!()
     }
 }
 
@@ -501,5 +494,15 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         // };
         // self.get_static_inner(def_id, llty)
         todo!()
+    }
+
+    fn const_bitcast(&self, val: Val<'m>, ty: TyNVVM<'m>) -> Val<'m> {
+        // create a bitcast instruction
+        // let expr = ConstExpr::BitCast { val, ty };
+        // let value = ValueNVVM::ConstExpr(expr);
+        // let val = self.get_module_mut().create_val(value, Some(ty));
+        let val = self.inner_bitcast(val, ty);
+
+        self.static_addr_of(val, None)
     }
 }
