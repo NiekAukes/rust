@@ -1,4 +1,3 @@
-
 # General Dependencies
 
 Make sure you have the required hardware and software to run CUDA programs:
@@ -116,16 +115,9 @@ python x.py build
 
 # Using this compiler with the sample project
 
-## Clone the sample project including dependencies
-
-you can clone the sample project setup found on the [rust-kernels](https://github.com/NiekAukes/rust-kernels) repository, Preferably outside the compiler folder to avoid confusion.
-In rust-kernels, there is the sample folder, and 3 dependencies to execute the code on the GPU.
-
 ## Linking the compiler
 
-There are 2 methods to install the compiler.
-
-### 1. Link a new toolchain via rustup (recommended):
+Use the following command to link the compiler to rustup:
 
 ```sh
 rustup toolchain link rust-gpuhc [path-to-compiler]/rust-gpuhc
@@ -137,17 +129,12 @@ or when building from source:
 rustup toolchain link rust-gpuhc [path-to-compiler]/build/host/stage1
 ```
 
-<!-- Then in the sample folder, create a new file called `rust-toolchain` (without file extension), and paste in `rust-gpuhc`. Cargo should now know to compile the project with the modified compiler -->
-
-### 2. Link via cargo:
-
-in the sample project, create a new folder called `.cargo` and in that folder a file `config.toml`. This file should have contents similar to
-`[build]
-    rustc = "[path-to-compiler]/rust-gpuhc/bin/rustc"
-    // or when building from source
-    rustc = "[path-to-compiler]/build/host/stage1/bin/rustc"`
-
 please note that rust-analyzer is not used to this compiler and may give faulty feedback. please refer to the compiler output for potential syntax errors.
+
+## Clone the sample project including dependencies
+
+you can clone the sample project setup found on the [rust-kernels](https://github.com/NiekAukes/rust-kernels) repository, Preferably outside the compiler folder to avoid confusion.
+In rust-kernels, there is the sample folder, and 2 dependencies to execute the code on the GPU (`nvvm` and `cuda`). The dependencies are mandatory to run the code on the GPU.
 
 ## Writing code
 
@@ -190,13 +177,30 @@ This constraint is not directly enforced by the compiler. However, the interface
 
 ### Supported language features
 
-Unfortunately not all language features are supported by the compiler, and some care should be taken when writing code. A very stringent limitation is that the compiler cannot use features defined in the `std` library, even if they can be defined for non-std use cases. Examples of this are panics and (dynamic) memory allocation. The compiler does not support these features, and will crash when you use them.
+<!-- Not all language features are supported by the compiler, and some care should be taken when writing code. A very stringent limitation is that the compiler cannot use features defined in the `std` library, even if they can be defined for non-std use cases. Examples of this are panics and (dynamic) memory allocation. The compiler does not support these features, and will crash when you use them. -->
+
+Not all functions of Rust are supported on the GPU. The following features are known not to work:
+
+-   most `std` library features (you shouldn't be using std on the GPU anyway)
+-   most panic related features (only `panic!()` is supported until now)
+-   closures (not yet implemented)
+-   async/await
+
+What is supported:
+
+-   the `core` library
+-   `unsafe` code
+-   generics (with the exception of the kernel function itself)
+-   traits
+-   dynamic dispatch
+
+Experimental features (may not work as expected):
+
+-   dynamic memory allocation on the GPU (including `Box`, `Vec`, etc)
 
 ### Specifying an engine
 
 To make a program compilable, an engine must be specified. This is done by adding the `#![engine(cuda::engine)]` attribute to the crate root. This attribute is required for the compiler to know where to store the compiled code.
-
-<!-- For devices that don't support CUDA, the `#![engine(placeholder)]` attribute can be used. This engine will compile the code, but won't provide any functionality to run it. -->
 
 ## Running code
 
@@ -227,7 +231,7 @@ fn main() {
 
 ### Instantiating buffers
 
-Unlike other types, `Buffer<T>` cannot be used on the CPU. Buffers created are only valid on the GPU. Using a buffer on the CPU will result in UB. `Buffer::alloc` is used to create a new empty buffer with memory allocated on the GPU. To create a buffer with data, use `Buffer::allocate_with`.
+Unlike other types, `Buffer<T>` cannot be indexed on the CPU. Buffers created are only valid on the GPU. Using a buffer on the CPU will result in Undefined Behaviour. `Buffer::alloc` is used to create a new empty buffer with memory allocated on the GPU. To create a buffer with data, use `Buffer::allocate_with`.
 
 To copy data from the GPU, you can use the `retrieve` method. This method will copy the data from the GPU to the CPU and return it as a vector.
 
@@ -261,5 +265,3 @@ The compiler is still in development, and some features may not work as expected
 ### Known Issues
 
 -   incompatible NVVM version: Most likely, your driver version is not compatible with the CUDA toolkit you're running. Please install an appropriate nvidia driver ([see table here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id6))
-
--   "parse invalid cast opcode for cast from 'i8\*' to 'i64'": This is a known issue with the compiler. Compiling with --release should fix this issue in most cases. If not, please report it on the issues page.
