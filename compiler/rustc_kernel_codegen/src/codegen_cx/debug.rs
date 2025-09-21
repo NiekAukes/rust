@@ -8,14 +8,6 @@ use crate::function::FunctionNVVM;
 use crate::value::Val;
 
 impl<'tcx, 'm> DebugInfoCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
-    fn create_vtable_debuginfo(
-        &self,
-        ty: Ty<'tcx>,
-        trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>,
-        vtable: Val<'tcx>,
-    ) {
-    }
-
     fn create_function_debug_context(
         &self,
         instance: ty::Instance<'tcx>,
@@ -59,5 +51,13 @@ impl<'tcx, 'm> DebugInfoCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
         variable_kind: rustc_codegen_ssa::mir::debuginfo::VariableKind,
         span: rustc_span::Span,
     ) -> Self::DIVariable {
+    }
+
+    fn create_vtable_debuginfo(
+        &self,
+        ty: Ty<'tcx>,
+        trait_ref: Option<ty::ExistentialTraitRef<'tcx>>,
+        vtable: Self::Value,
+    ) {
     }
 }

@@ -1,6 +1,8 @@
 use rustc_abi::{BackendRepr, Reg, RegKind, Size};
-use rustc_codegen_ssa::traits::PreDefineCodegenMethods;
-use rustc_middle::ty::{self, Ty};
+use rustc_codegen_ssa::traits::{
+    BaseTypeCodegenMethods, LayoutTypeCodegenMethods, PreDefineCodegenMethods,
+};
+use rustc_middle::ty::{self, PseudoCanonicalInput, Ty, TypingEnv};
 use rustc_target::callconv::{CastTarget, PassMode};
 
 use super::CodegenCx;
@@ -45,12 +47,13 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         // to declare the function, we need to specify the return type and the arguments
         // and wether it is a kernel function or not
         let is_kernel = self.tcx.is_kernel(instance.def_id());
-        let param_env = self.tcx.param_env(instance.def_id());
-        let ty = instance.ty(self.tcx, param_env);
+        let typing_env = TypingEnv::fully_monomorphized();
+        let ty = instance.ty(self.tcx, typing_env);
 
-        let pea = param_env.and((instance, ty::List::empty()));
+        //let pea = param_env.and((instance, ty::List::empty()));
+        let pci = typing_env.as_query_input((instance, ty::List::empty()));
 
-        let abi = match self.tcx.fn_abi_of_instance(pea) {
+        let abi = match self.tcx.fn_abi_of_instance(pci) {
             Ok(abi) => abi,
             Err(e) => {
                 // KURVA

@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use rustc_abi::{self, Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
-use rustc_codegen_ssa::traits::ConstCodegenMethods;
+use rustc_codegen_ssa::traits::{BaseTypeCodegenMethods, ConstCodegenMethods, MiscCodegenMethods};
 use rustc_hir::def_id::DefId;
 use rustc_middle::bug;
 use rustc_middle::mir::interpret::{
@@ -197,7 +197,7 @@ impl<'m, 'tcx> ConstCodegenMethods for CodegenCx<'m, 'tcx> {
 
     fn const_data_from_alloc(
         &self,
-        alloc: rustc_middle::mir::interpret::ConstAllocation<'tcx>,
+        alloc: rustc_middle::mir::interpret::ConstAllocation<'_>,
     ) -> Self::Value {
         // return the const value of what to allocate.
         let alloc = alloc.inner();
@@ -316,20 +316,20 @@ impl<'m, 'tcx> ConstCodegenMethods for CodegenCx<'m, 'tcx> {
                 let sz = i.size().bytes();
                 match (sz, llty.0) {
                     (1, TypeNVVM::I(1)) => self.const_bool(i.try_to_bool().unwrap()),
-                    (1, TypeNVVM::I(8)) => self.const_i8(i.try_to_i8().unwrap()),
-                    (2, TypeNVVM::I(16)) => self.const_i16(i.try_to_i16().unwrap()),
-                    (4, TypeNVVM::I(32)) => self.const_i32(i.try_to_i32().unwrap()),
-                    (8, TypeNVVM::I(64)) => self.const_i64(i.try_to_i64().unwrap()),
-                    (16, TypeNVVM::I(128)) => self.const_u128(i.try_to_u128().unwrap()),
+                    (1, TypeNVVM::I(8)) => self.const_i8(i.to_i8()),
+                    (2, TypeNVVM::I(16)) => self.const_i16(i.to_i16()),
+                    (4, TypeNVVM::I(32)) => self.const_i32(i.to_i32()),
+                    (8, TypeNVVM::I(64)) => self.const_i64(i.to_i64()),
+                    (16, TypeNVVM::I(128)) => self.const_u128(i.to_u128()),
                     (4, TypeNVVM::F32) => {
                         // convert to f32
-                        let b = i.try_to_u32().unwrap();
+                        let b = i.to_u32();
                         let f = f32::from_bits(b);
                         self.const_real(llty, f as f64)
                     }
                     (8, TypeNVVM::F64) => {
                         // convert to f64
-                        let b = i.try_to_u64().unwrap();
+                        let b = i.to_u64();
                         let f = f64::from_bits(b);
                         self.const_real(llty, f)
                     }
@@ -347,7 +347,7 @@ impl<'m, 'tcx> ConstCodegenMethods for CodegenCx<'m, 'tcx> {
                     GlobalAlloc::Memory(alloc) => {
                         return self.const_data_from_alloc(alloc);
                     }
-                    GlobalAlloc::Function(instance) => {
+                    GlobalAlloc::Function { instance } => {
                         // make an fnref to the function
                         let symbol_name = self.tcx.symbol_name(instance).name.to_string();
                         let symbol_name = fix_ptx_name(&symbol_name);
@@ -361,7 +361,10 @@ impl<'m, 'tcx> ConstCodegenMethods for CodegenCx<'m, 'tcx> {
                         return self.const_data_from_alloc(alloc);
                     }
                     GlobalAlloc::VTable(ty, binder) => {
-                        let key = (ty, binder);
+                        let existential_trait_ref = binder.principal().map(|principal| {
+                            self.tcx.instantiate_bound_regions_with_erased(principal)
+                        });
+                        let key = (ty, existential_trait_ref);
                         let alloc_id = self.tcx.vtable_allocation(key);
                         match self.tcx.global_alloc(alloc_id) {
                             GlobalAlloc::Memory(alloc) => {
@@ -423,7 +426,7 @@ impl<'m, 'tcx> ConstCodegenMethods for CodegenCx<'m, 'tcx> {
         let value = ValueNVVM::ConstExpr(gep);
         let val = module.create_val(value, Some(i8ptr_ty));
 
-        self.static_addr_of(val, None)
+        self.default_static_addr_of(val, None)
     }
 
     fn const_vector(&self, elts: &[Self::Value]) -> Self::Value {
@@ -503,6 +506,6 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         // let val = self.get_module_mut().create_val(value, Some(ty));
         let val = self.inner_bitcast(val, ty);
 
-        self.static_addr_of(val, None)
+        self.default_static_addr_of(val, None)
     }
 }

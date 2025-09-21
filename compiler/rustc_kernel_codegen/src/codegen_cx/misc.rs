@@ -5,7 +5,9 @@ use rustc_codegen_ssa::traits::{MiscCodegenMethods, PreDefineCodegenMethods};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::query::queries::symbol_name;
 use rustc_middle::ty::layout::HasTyCtxt;
-use rustc_middle::ty::{Instance, List, ParamEnv, PolyExistentialTraitRef, Ty, TypingEnv};
+use rustc_middle::ty::{
+    ExistentialTraitRef, Instance, List, ParamEnv, PolyExistentialTraitRef, Ty, TypingEnv,
+};
 use rustc_span::DUMMY_SP;
 
 use super::CodegenCx;
@@ -16,7 +18,7 @@ use crate::value::{Val, ValueNVVM};
 impl<'m, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
     fn vtables(
         &self,
-    ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), Self::Value>> {
+    ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<ExistentialTraitRef<'tcx>>), Val<'m>>> {
         &self.vtables
     }
 
@@ -123,7 +125,7 @@ fn generate_extern_decl<'m, 'tcx>(
     let funcaddr = ValueNVVM::FnRef(name.to_string());
     module.create_val(funcaddr, Some(ty))*/
 
-    cx.predefine_fn(
+    cx.predefine_fn_immut(
         instance,
         rustc_middle::mir::mono::Linkage::Common,
         rustc_middle::mir::mono::Visibility::Default,

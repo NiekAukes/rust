@@ -635,6 +635,11 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
         module.ty_from_type(crate::ty::TypeNVVM::Pointer(void))
     }
 
+    pub fn type_i1(&self) -> TyNVVM<'m> {
+        let mut module = unsafe { &mut *self.module.get() };
+        module.ty_from_type(crate::ty::TypeNVVM::I(1))
+    }
+
     pub fn scalar_type_at(&self, scalar: Scalar) -> TyNVVM<'m> {
         match scalar.primitive() {
             Primitive::Int(i, _) => self.type_from_integer(i),

@@ -10,7 +10,6 @@ rustc_session = { path = "../rustc_session" }
 rustc_codegen_ssa = { path = "../rustc_codegen_ssa" }
 rustc_hir = { path = "../rustc_hir" }
 rustc_mir_build = { path = "../rustc_mir_build" }
-rustc_ast = { path = "../rustc_ast" }
 
 rustc_kernel_codegen = { path = "../rustc_kernel_codegen" }
 

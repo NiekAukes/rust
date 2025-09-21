@@ -1,16 +1,13 @@
-use rustc_hir::def_id::{CrateNum, DefId};
-use rustc_span::symbol::sym;
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::mir::interpret::ConstAllocation;
-use rustc_middle::mir::Body;
-use rustc_middle::ty::{Instance, TyCtxt};
-use rustc_middle::query::Providers;
-use rustc_middle::bug;
 use rustc_hir::def::DefKind;
-use rustc_middle::mir::mono::{CodegenUnit, Linkage, MonoItem, MonoItemData, Visibility};
+use rustc_hir::def_id::{CrateNum, DefId};
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use rustc_middle::mir::Body;
+use rustc_middle::query::Providers;
+use rustc_middle::ty::TyCtxt;
+use rustc_span::symbol::sym;
 
-mod kernel_embedder;
-mod codegen;
+pub mod codegen;
+pub mod kernel_embedder;
 
 #[macro_use]
 extern crate tracing;
@@ -28,8 +25,8 @@ pub fn is_kernel<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
 pub fn kernel_allocator_provider(tcx: TyCtxt<'_>, _krate: CrateNum) -> Option<DefId> {
     let mut allocator = None;
 
-    for item_id in tcx.hir().items() {
-        let def_id = item_id.owner_id.to_def_id();
+    for item_id in tcx.hir_body_owners() {
+        let def_id = item_id.to_def_id();
 
         if tcx.has_attr(def_id, sym::kernel_allocator) {
             if allocator.is_some() {

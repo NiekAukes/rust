@@ -33,7 +33,7 @@ pub struct CodegenCx<'m, 'tcx> {
 
     pub(crate) typecache: UnsafeCell<FxHashMap<Ty<'tcx>, TyNVVM<'m>>>,
 
-    pub vtables: RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), Val<'m>>>,
+    pub vtables: RefCell<FxHashMap<(Ty<'tcx>, Option<ExistentialTraitRef<'tcx>>), Val<'m>>>,
 
     // map of a value
     pub globals: RefCell<FxHashMap<Val<'m>, Val<'m>>>,
