@@ -96,8 +96,11 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         then_llbb: Self::BasicBlock,
         else_llbb: Self::BasicBlock,
     ) {
+
+        let conv = self.convert_argument(cond, self.cx().type_i1());
+
         let instr =
-            Instruction::ConditionalBranch { cond, true_block: then_llbb, false_block: else_llbb };
+            Instruction::ConditionalBranch { cond: conv, true_block: then_llbb, false_block: else_llbb };
         let v = self.cx().get_module_mut().create_val(ValueNVVM::Instr(instr), None);
 
         // add the instruction to the current basic block
@@ -409,6 +412,10 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
     }
 
     fn xor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+
+        let (_, vrs) = self.convert_arguments_to_largest(&[lhs, rhs]);
+        let (lhs, rhs) = (vrs[0], vrs[1]);
+
         let instr = Instruction::Xor(lhs, rhs);
         let v = self
             .cx()
@@ -515,10 +522,10 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 
     fn to_immediate_scalar(&mut self, val: Self::Value, scalar: Scalar) -> Self::Value {
         if scalar.is_bool() {
-            if self.cx().val_ty(val) == self.cx().type_i8() {
+            if self.cx().val_ty(val) == self.cx().type_i1() {
                 return val;
             }
-            return self.trunc(val, self.cx().type_i8());
+            return self.trunc(val, self.cx().type_i1());
         }
         val
     }
@@ -931,7 +938,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         let v = self
             .cx()
             .get_module_mut()
-            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i8()));
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i1()));
         self.basic_block.add_instr(v);
         v
     }
@@ -952,7 +959,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
         let v = self
             .cx()
             .get_module_mut()
-            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i8()));
+            .create_val(ValueNVVM::Instr(instr), Some(self.cx().type_i1()));
         self.basic_block.add_instr(v);
         v
     }
@@ -1048,7 +1055,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
                 self.basic_block.add_instr(v);
                 v
             }
-            TypeNVVM::Union(els) => {
+            TypeNVVM::Union(els, _) => {
                 // extraction in a struct is a bit different.
                 // we need to bitcast the initial value pointer to the requested type
                 // and then return that type
@@ -1263,6 +1270,7 @@ impl<'a, 'm, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'm, 'tcx> {
 impl<'a, 'm, 'tcx> Builder<'a, 'm, 'tcx> {
     pub(crate) fn call_intrinsic(&mut self, name: &str, args: &[Val<'m>]) -> Val<'m> {
         let module = self.codegen_cx.get_module_mut();
+
         module.use_intrinsic(name);
         let fn_val = if let Some(intr) = module.get_intrinsic(name) {
             intr

@@ -19,6 +19,7 @@ impl KernelLangItemSwap {
             (LangItemVariant::PanicImpl, |li: &LanguageItems| li.kernel_panic_impl()),
             (LangItemVariant::PanicFmt, |li: &LanguageItems| li.kernel_panic_fmt_impl()),
             (LangItemVariant::PanicNounwind, |li: &LanguageItems| li.kernel_panic_nounwind_impl()),
+            (LangItemVariant::PanicCannotUnwind, |li: &LanguageItems| li.kernel_panic_cannot_unwind_impl()),
             (LangItemVariant::ExchangeMalloc, |li: &LanguageItems| li.kernel_exchange_malloc_fn()),
         ];
 
@@ -64,7 +65,7 @@ impl<'tcx> MirPass<'tcx> for KernelLangItemSwap {
     }
 
     fn is_required(&self) -> bool {
-        true
+        false
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -90,8 +91,15 @@ impl<'tcx> MirPass<'tcx> for KernelLangItemSwap {
                     }
                     _ => None,
                 };
+                
 
                 if let Some(callee_def_id) = callee_def_id_opt {
+                    println!(
+                        "KernelLangItemSwap: In {}, found call to {} ({})",
+                        fn_path_str,
+                        tcx.def_path_str(callee_def_id),
+                        tcx.item_name(callee_def_id).as_str()
+                    );
                     if let Some(&kernel_target_def_id) = self.swap_map.get(&callee_def_id) {
                         let span = terminator.source_info.span;
                         let new_fn_ty = tcx.type_of(kernel_target_def_id).instantiate_identity();
@@ -99,6 +107,13 @@ impl<'tcx> MirPass<'tcx> for KernelLangItemSwap {
                             ty::Const::new_value(tcx, ty::ValTree::zst(tcx), new_fn_ty);
                         //let new_mir_const = mir::Const::from_ty_const(new_ty_const, tcx);
                         let new_mir_const = mir::Const::Ty(new_fn_ty, new_ty_const);
+
+                        *func = Operand::Constant(Box::new(ConstOperand {
+                            span,
+                            user_ty: None,
+                            const_: new_mir_const,
+                        }));
+
                         println!(
                             "KernelLangItemSwap: In {}, swapped call to lang item {:?} with kernel version {:?} ({})",
                             fn_path_str,
@@ -110,5 +125,7 @@ impl<'tcx> MirPass<'tcx> for KernelLangItemSwap {
                 }
             }
         }
+
+        println!("KernelLangItemSwap: Finished processing function {}", fn_path_str);
     }
 }

@@ -3979,6 +3979,7 @@ dependencies = [
  "rustc_kernel_codegen",
  "rustc_middle",
  "rustc_mir_build",
+ "rustc_mir_transform",
  "rustc_session",
  "rustc_span",
  "tracing",

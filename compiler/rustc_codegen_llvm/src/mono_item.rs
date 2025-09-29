@@ -23,7 +23,14 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
         symbol_name: &str,
     ) {
         let instance = Instance::mono(self.tcx, def_id);
-        let DefKind::Static { nested, .. } = self.tcx.def_kind(def_id) else { bug!() };
+        //let DefKind::Static { nested, .. } = self.tcx.def_kind(def_id) else { bug!() };
+        let nested = if let DefKind::Static { nested, .. } = self.tcx.def_kind(def_id) {
+            nested
+        } else if self.tcx.is_kernel(def_id) {
+            false
+        } else {
+            bug!("predefine_static: expected static, got {:?}", self.tcx.def_kind(def_id));
+        };
         // Nested statics do not have a type, so pick a dummy type and let `codegen_static` figure
         // out the llvm type from the actual evaluated initializer.
         let ty =

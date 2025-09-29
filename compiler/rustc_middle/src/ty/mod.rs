@@ -1755,13 +1755,13 @@ impl<'tcx> TyCtxt<'tcx> {
                 let def_kind = self.def_kind(def);
                 debug!("returned from def_kind: {:?}", def_kind);
                 match def_kind {
+                    _ if self.is_kernel(def) => self.optimized_kernel_mir(def),
                     DefKind::Const
                     | DefKind::Static { .. }
                     | DefKind::AssocConst
                     | DefKind::Ctor(..)
                     | DefKind::AnonConst
                     | DefKind::InlineConst => self.mir_for_ctfe(def),
-                    _ if self.is_kernel(def) => self.optimized_kernel_mir(def),
                     // If the caller wants `mir_for_ctfe` of a function they should not be using
                     // `instance_mir`, so we'll assume const fn also wants the optimized version.
                     _ => self.optimized_mir(def),

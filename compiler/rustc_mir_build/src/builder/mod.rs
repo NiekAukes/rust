@@ -1157,10 +1157,9 @@ pub fn construct_literal_const<'tcx>(
     let mut canonical_user_type_annotations = IndexVec::new();
 
     // get kernel ADT def id
-    let kernel_def_id: DefId = todo!("FILL IN KERNEL DEF ID");
-    // let Some(kernel_def_id) = tcx.resolutions(()).kernel_candidate else {
-    //     bug!("kernel attribute present but no kernel type found")
-    // };
+    let Some(kernel_def_id) = tcx.lang_items().kernel_type() else {
+        bug!("kernel attribute present but no kernel type found")
+    };
 
     // create &[u8] type
     let tykind = TyKind::Ref(

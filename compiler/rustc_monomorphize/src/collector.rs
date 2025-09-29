@@ -839,6 +839,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
                     || lang_item == LangItem::PanicRemZero
                     || lang_item == LangItem::ExchangeMalloc)
             {
+                //panic!("not collecting panic lang item in kernel context: {:?}", lang_item);
                 return;
             }
 
@@ -925,7 +926,9 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
             | mir::TerminatorKind::SwitchInt { .. }
             | mir::TerminatorKind::UnwindResume
             | mir::TerminatorKind::Return
-            | mir::TerminatorKind::Unreachable => {}
+            | mir::TerminatorKind::Unreachable => {
+                push_mono_lang_item(self, LangItem::PanicCannotUnwind);
+            }
             mir::TerminatorKind::CoroutineDrop
             | mir::TerminatorKind::Yield { .. }
             | mir::TerminatorKind::FalseEdge { .. }
@@ -1004,13 +1007,21 @@ fn visit_instance_use<'tcx>(
             // be lowered in codegen to nothing or a call to panic_nounwind. So if we encounter any
             // of those intrinsics, we need to include a mono item for panic_nounwind, else we may try to
             // codegen a call to that function without generating code for the function itself.
-            if !is_in_kernel {
-                let def_id = tcx.require_lang_item(LangItem::PanicNounwind, source);
-                let panic_instance = Instance::mono(tcx, def_id);
-                if tcx.should_codegen_locally(panic_instance, is_in_kernel) {
-                    output.push(create_fn_mono_item(tcx, panic_instance, source));
-                }
+
+            let lang_item = if is_in_kernel {
+                // In kernel context, we don't want to collect panic lang items
+                // We use panic_nounwind as it is the most basic one and should not pull in
+                // too many dependencies.
+                LangItem::KernelPanicNounwind
+            } else {
+                LangItem::PanicNounwind
+            };
+            let def_id = tcx.require_lang_item(lang_item, source);
+            let panic_instance = Instance::mono(tcx, def_id);
+            if tcx.should_codegen_locally(panic_instance, is_in_kernel) {
+                output.push(create_fn_mono_item(tcx, panic_instance, source));
             }
+            
         } else if !intrinsic.must_be_overridden {
             // Codegen the fallback body of intrinsics with fallback bodies.
             // We explicitly skip this otherwise to ensure we get a linker error
@@ -1087,8 +1098,8 @@ pub(crate) fn should_codegen_locally<'tcx>(
         return true;
     }
 
-    if tcx.is_reachable_non_generic(def_id)
-        || instance.upstream_monomorphization(tcx).is_some() && !is_in_kernel
+    if (tcx.is_reachable_non_generic(def_id)
+        || instance.upstream_monomorphization(tcx).is_some()) && !is_in_kernel
     {
         // We can link to the item in question, no instance needed in this crate.
         return false;
@@ -1861,6 +1872,7 @@ pub(crate) fn collect_crate_mono_items<'tcx>(
 pub(crate) fn provide(providers: &mut Providers) {
     providers.hooks.should_codegen_locally = should_codegen_locally;
     providers.items_of_instance = |tcx, key| items_of_instance_inner(tcx, key, false);
+    providers.items_of_kernel_instance = kernel_items_of_instance;
 }
 
 //=-----------------------------------------------------------------------------

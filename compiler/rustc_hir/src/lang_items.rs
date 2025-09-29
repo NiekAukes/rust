@@ -427,11 +427,14 @@ language_item_table! {
     String,                  sym::String,              string,                     Target::Struct,         GenericRequirement::None;
     CStr,                    sym::CStr,                c_str,                      Target::Struct,         GenericRequirement::None;
 
-    // Kernel lang items
+    // Kernel lang items    
+    Kernel,                  sym::kernel_type,           kernel_type,              Target::Struct,         GenericRequirement::None;
     KernelPanicImpl,         sym::kernel_panic_impl,     kernel_panic_impl,        Target::Fn,             GenericRequirement::None;
     KernelPanicFmtImpl,      sym::kernel_panic_fmt_impl, kernel_panic_fmt_impl,    Target::Fn,             GenericRequirement::None;
     KernelPanicNounwind,     sym::kernel_panic_nounwind_impl,  kernel_panic_nounwind_impl, Target::Fn,             GenericRequirement::None;
+    KernelPanicCannotunwind,     sym::kernel_panic_cannot_unwind_impl,  kernel_panic_cannot_unwind_impl, Target::Fn,             GenericRequirement::None;
     KernelExchangeMalloc,    sym::kernel_exchange_malloc_fn, kernel_exchange_malloc_fn, Target::Fn,           GenericRequirement::None;
+    
     // Experimental lang items for implementing contract pre- and post-condition checking.
     ContractBuildCheckEnsures, sym::contract_build_check_ensures, contract_build_check_ensures_fn, Target::Fn, GenericRequirement::None;
     ContractCheckRequires,     sym::contract_check_requires,      contract_check_requires_fn,      Target::Fn, GenericRequirement::None;

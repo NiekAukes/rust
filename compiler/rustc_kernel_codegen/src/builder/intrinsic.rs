@@ -1,6 +1,6 @@
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::mir::place::PlaceRef;
-use rustc_codegen_ssa::traits::{BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods};
+use rustc_codegen_ssa::traits::{BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods, MiscCodegenMethods};
 use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt};
 use rustc_middle::ty::{Instance, List, ParamEnv, Ty, TyKind, TypingEnv};
 use rustc_span::{Span, sym};
@@ -70,7 +70,15 @@ impl<'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     }
 
     fn expect(&mut self, cond: Self::Value, expected: bool) -> Self::Value {
-        todo!()
+        // if self.cx().sess().opts.optimize != rustc_session::config::OptLevel::No {
+        //     self.call_intrinsic(
+        //         "llvm.expect.i1",
+        //         &[cond, self.const_bool(expected)],
+        //     )
+        // } else {
+        //     cond
+        // }
+        cond // expect is ignored in NVVM
     }
 
     fn type_checked_load(

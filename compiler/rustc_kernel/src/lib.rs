@@ -4,6 +4,7 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::Body;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
+use rustc_mir_build::thir::print;
 use rustc_span::symbol::sym;
 
 pub mod codegen;
@@ -19,7 +20,8 @@ pub fn is_kernel<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
     }
 
     let fn_attrs = tcx.codegen_fn_attrs(def_id).flags;
-    fn_attrs.contains(CodegenFnAttrFlags::KERNEL)
+    let a = fn_attrs.contains(CodegenFnAttrFlags::KERNEL);
+    a
 }
 
 pub fn kernel_allocator_provider(tcx: TyCtxt<'_>, _krate: CrateNum) -> Option<DefId> {

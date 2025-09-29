@@ -31,7 +31,10 @@ impl<'m, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'m, 'tcx> {
         let symbol_name = self.tcx.symbol_name(instance).name.to_string();
         let symbol_name = fix_ptx_name(&symbol_name);
 
-        module.functions.get(&symbol_name).unwrap()
+        module.functions.get(&symbol_name).expect(format!(
+            "Function {} not found in module when looking up fn {:?}",
+            symbol_name, instance
+        ).as_str()).clone()
     }
 
     fn get_fn_addr(&self, instance: rustc_middle::ty::Instance<'tcx>) -> Self::Value {

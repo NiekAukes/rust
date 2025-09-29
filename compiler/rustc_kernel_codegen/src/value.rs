@@ -584,7 +584,7 @@ impl<'m> Const<'m> {
                         s.push_str(", ");
                     }
 
-                    s.push_str(&c.assemble(module));
+                    s.push_str(&c.assemble_for_const(module));
                 }
                 s.push_str("]");
                 s
@@ -596,7 +596,7 @@ impl<'m> Const<'m> {
                         s.push_str(", ");
                     }
 
-                    s.push_str(&c.assemble(module));
+                    s.push_str(&c.assemble_for_const(module));
                 }
                 s.push_str("}");
                 s

@@ -29,7 +29,7 @@ impl<'m, 'tcx> ConstCodegenMethods for CodegenCx<'m, 'tcx> {
                 let value = ValueNVVM::Constant(Const::NullPtr);
                 self.get_module_mut().create_val(value, Some(t))
             }
-            TypeNVVM::Struct(_) | TypeNVVM::Array(_, _) | TypeNVVM::Union(_) => {
+            TypeNVVM::Struct(_) | TypeNVVM::Array(_, _) | TypeNVVM::Union(_, _) => {
                 let value = ValueNVVM::Constant(Const::ZeroInitializer);
                 self.get_module_mut().create_val(value, Some(t))
             }

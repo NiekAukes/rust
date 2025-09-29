@@ -56,7 +56,7 @@ impl<'tcx> AbortUnwindingCalls {
             ty::Coroutine(..) => ExternAbi::Rust,
             ty::Error(_) => return,
             // if we are working with a kernel, we know that the ABI is Rust
-            _ if !device_code && tcx.is_kernel(def_id) => ExternAbi::Rust,
+            _ if device_code || tcx.is_kernel(def_id) => ExternAbi::Rust,
             _ => span_bug!(body.span, "unexpected body ty: {:?}", body_ty),
         };
         let body_can_unwind = layout::fn_can_unwind(tcx, Some(def_id), body_abi);
@@ -81,8 +81,7 @@ impl<'tcx> AbortUnwindingCalls {
                 continue;
             }
 
-            let call_can_unwind = !device_code
-                && match &terminator.kind {
+            let call_can_unwind = match &terminator.kind {
                     TerminatorKind::Call { func, .. } => {
                         let ty = func.ty(&body.local_decls, tcx);
                         let sig = ty.fn_sig(tcx);
@@ -126,6 +125,11 @@ impl<'tcx> AbortUnwindingCalls {
                 // the `UnwindResume` -> `UnwindTerminate` terminator replacement.
                 let cleanup = block.terminator_mut().unwind_mut().unwrap();
                 *cleanup = UnwindAction::Terminate(UnwindTerminateReason::Abi);
+            } else if device_code {
+                
+                if let Some(action) = terminator.unwind_mut() {
+                    *action = UnwindAction::Terminate(UnwindTerminateReason::Abi);
+                }
             }
         }
 

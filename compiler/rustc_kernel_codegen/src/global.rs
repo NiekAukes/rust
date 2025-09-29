@@ -72,7 +72,7 @@ impl<'m> ConstExpr<'m> {
                 let val_ty = *module.valtypes.get(val).expect("ConstExpr GEP must have a type");
                 let val_tystr = val_ty.assemble(module);
                 let indices_str: Vec<String> =
-                    indices.iter().map(|i| format!("i64 {}", i.assemble(module))).collect();
+                    indices.iter().map(|i| format!("{}", i.assemble_for_const(module))).collect();
                 format!(
                     "getelementptr ({}, {} {}, {})",
                     ty.assemble(module),

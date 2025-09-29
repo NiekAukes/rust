@@ -16,7 +16,7 @@ use rustc_target::callconv::{CastTarget, FnAbi, PassMode};
 use tracing::debug;
 
 use super::CodegenCx;
-use crate::ty::{TyNVVM, TypeNVVM};
+use crate::ty::{size_of_union, TyNVVM, TypeNVVM};
 use crate::value::ValueNVVM;
 
 impl<'tcx> TypeMembershipCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
@@ -269,7 +269,7 @@ impl<'tcx, 'm> BaseTypeCodegenMethods for CodegenCx<'m, 'tcx> {
             TypeNVVM::Array(_, _) => TypeKind::Array,
             TypeNVVM::Fn(_, _) => TypeKind::Function,
             TypeNVVM::Struct(_) => TypeKind::Struct,
-            TypeNVVM::Union(_) => TypeKind::Struct,
+            TypeNVVM::Union(_, _) => TypeKind::Struct,
             TypeNVVM::AdtDefForwardDecl(_, _) => TypeKind::Struct,
             TypeNVVM::Zst => TypeKind::Struct,
         }
@@ -459,7 +459,10 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                     }
                 }
 
-                module.ty_from_type(crate::ty::TypeNVVM::Union(padded_tys))
+                // calculate the size of the union
+                let size = size_of_union(&padded_tys, module);
+
+                module.ty_from_type(crate::ty::TypeNVVM::Union(padded_tys, size))
             }
 
             ty::Adt(adtdef, gargs) if adtdef.is_box() => {
@@ -468,14 +471,14 @@ impl<'m, 'tcx> CodegenCx<'m, 'tcx> {
                 module.ty_from_type(crate::ty::TypeNVVM::Pointer(ty))
             }
 
-            ty::Adt(adtdef, gargs) if adtdef.is_union() => {
-                let mut tys = Vec::new();
-                for field in adtdef.non_enum_variant().fields.iter() {
-                    let ty = self.lower_ty(&field.ty(self.tcx, gargs));
-                    tys.push(ty);
-                }
-                module.ty_from_type(crate::ty::TypeNVVM::Union(tys))
-            }
+            // ty::Adt(adtdef, gargs) if adtdef.is_union() => {
+            //     let mut tys = Vec::new();
+            //     for field in adtdef.non_enum_variant().fields.iter() {
+            //         let ty = self.lower_ty(&field.ty(self.tcx, gargs));
+            //         tys.push(ty);
+            //     }
+            //     module.ty_from_type(crate::ty::TypeNVVM::Union(tys))
+            // }
 
             ty::Adt(_, _) => {
                 todo!("unimplemented type: {:?} with kind: {:?}", ty, ty.kind())

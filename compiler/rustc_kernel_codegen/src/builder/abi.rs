@@ -5,8 +5,8 @@ use rustc_codegen_ssa::traits::{
     AbiBuilderMethods, ArgAbiBuilderMethods, BuilderMethods, ConstCodegenMethods,
 };
 use rustc_middle::bug;
-use rustc_middle::ty::Ty;
-use rustc_middle::ty::layout::{FnAbiOfHelpers, HasTypingEnv, LayoutOfHelpers};
+use rustc_middle::ty::{Ty, TypingEnv};
+use rustc_middle::ty::layout::{FnAbiOfHelpers, HasTyCtxt, HasTypingEnv, LayoutOfHelpers};
 use rustc_target::callconv::{ArgAbi, FnAbi, PassMode};
 
 use super::Builder;
@@ -60,7 +60,7 @@ impl<'tcx> FnAbiOfHelpers<'tcx> for Builder<'_, '_, 'tcx> {
 
 impl<'tcx> HasTypingEnv<'tcx> for Builder<'_, '_, 'tcx> {
     fn typing_env(&self) -> rustc_middle::ty::TypingEnv<'tcx> {
-        todo!()
+        TypingEnv::fully_monomorphized()
     }
 }
 

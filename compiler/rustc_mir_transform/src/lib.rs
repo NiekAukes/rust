@@ -42,6 +42,7 @@ use std::sync::LazyLock;
 
 use pass_manager::{self as pm, Lint, MirLint, MirPass, WithMinOptLevel};
 
+pub mod kernel_lang_item_swap;
 use crate::kernel_lang_item_swap::KernelLangItemSwap;
 
 mod check_pointers;
@@ -198,7 +199,7 @@ declare_passes! {
     mod unreachable_enum_branching : UnreachableEnumBranching;
     mod unreachable_prop : UnreachablePropagation;
     mod validate : Validator;
-    mod kernel_lang_item_swap : KernelLangItemSwap;
+    // mod kernel_lang_item_swap : KernelLangItemSwap;
     // mod remove_drop_glue : RemoveDropGlue; --- IGNORE ---
 }
 
@@ -840,4 +841,8 @@ fn promoted_kernel_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, 
     }
 
     tcx.arena.alloc(promoted)
+}
+
+pub fn optimize_generated_kernel_mir<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+    RequiredConstsVisitor::compute_required_consts(body);
 }

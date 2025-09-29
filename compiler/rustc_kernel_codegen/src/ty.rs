@@ -17,13 +17,17 @@ pub enum TypeNVVM<'m> {
     Pointer(TyNVVM<'m>),
     Array(TyNVVM<'m>, usize),
     Struct(Vec<TyNVVM<'m>>),
-    Union(Vec<TyNVVM<'m>>),
+    Union(Vec<TyNVVM<'m>>, usize), // size of the union in BYTES
     Fn(Vec<TyNVVM<'m>>, TyNVVM<'m>),
     AdtDefForwardDecl(DefId, String),
 }
 
 /// Interned type for NVVM.
 pub type TyNVVM<'m> = Interned<'m, TypeNVVM<'m>>;
+
+pub fn size_of_union<'m>(tys: &[TyNVVM<'m>], module: &ModuleNVVM<'m>) -> usize {
+    tys.iter().map(|f| f.size(module)).max().unwrap_or(0)
+}
 
 impl<'m> PartialEq for TypeNVVM<'m> {
     fn eq(&self, other: &Self) -> bool {
@@ -35,7 +39,7 @@ impl<'m> PartialEq for TypeNVVM<'m> {
             (TypeNVVM::Pointer(a), TypeNVVM::Pointer(b)) => a == b,
             (TypeNVVM::Array(a, s1), TypeNVVM::Array(b, s2)) => a == b && s1 == s2,
             (TypeNVVM::Struct(a), TypeNVVM::Struct(b)) => a == b,
-            (TypeNVVM::Union(a), TypeNVVM::Union(b)) => a == b,
+            (TypeNVVM::Union(a, s), TypeNVVM::Union(b, u)) => a == b && s == u,
             (TypeNVVM::Fn(a1, b1), TypeNVVM::Fn(a2, b2)) => a1 == a2 && b1 == b2,
             _ => false,
         }
@@ -66,7 +70,7 @@ impl<'m> TypeNVVM<'m> {
             TypeNVVM::Array(ty, size) => ty.simple_size() * size,
             TypeNVVM::Struct(fields) => fields.iter().map(|f| f.simple_size()).sum(),
             TypeNVVM::Fn(_, _) => 8, // function pointer size
-            TypeNVVM::Union(fields) => fields.iter().map(|f| f.simple_size()).max().unwrap_or(0),
+            TypeNVVM::Union(fields, size) => *size,
             TypeNVVM::AdtDefForwardDecl(did, name) => {
                 panic!("AdtDefForwardDecl should not be used for size calculation")
             }
@@ -83,7 +87,7 @@ impl<'m> TypeNVVM<'m> {
             TypeNVVM::Array(ty, size) => ty.size(module) * size,
             TypeNVVM::Struct(fields) => fields.iter().map(|f| f.size(module)).sum(),
             TypeNVVM::Fn(_, _) => 8, // function pointer size
-            TypeNVVM::Union(fields) => fields.iter().map(|f| f.size(module)).max().unwrap_or(0),
+            TypeNVVM::Union(fields, _) => fields.iter().map(|f| f.size(module)).max().unwrap_or(0),
             TypeNVVM::AdtDefForwardDecl(did, name) => {
                 //panic!("AdtDefForwardDecl should not be used for size calculation")
                 if let Some((_, ty)) = module.get_adt(*did) {
@@ -136,17 +140,10 @@ impl Display for TypeNVVM<'_> {
                 write!(f, ")")
             }
 
-            TypeNVVM::Union(fields) => {
+            TypeNVVM::Union(_, size) => {
                 // when generating a union, pick the type with the greatest width,
                 // and simply create an i8 array of that width
-                let mut max_size = 0;
-                for field in fields {
-                    let size = field.simple_size();
-                    if size > max_size {
-                        max_size = size;
-                    }
-                }
-                write!(f, "[{} x i8]", max_size)
+                write!(f, "[{} x i8]", size)
             }
 
             TypeNVVM::AdtDefForwardDecl(did, name) => {

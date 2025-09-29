@@ -113,11 +113,11 @@ fn const_arg_anon_type_of<'tcx>(icx: &ItemCtxt<'tcx>, arg_hir_id: HirId, span: S
     }
 }
 
-pub(super) fn type_of_inner(
-    tcx: TyCtxt<'_>,
+pub(super) fn type_of_inner<'tcx>(
+    tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
     original: bool,
-) -> ty::EarlyBinder<Ty<'_>> {
+) -> ty::EarlyBinder<'tcx, Ty<'tcx>> {
     use rustc_hir::*;
     use rustc_middle::ty::Ty;
 
@@ -258,15 +258,13 @@ pub(super) fn type_of_inner(
                     // create a hir Ty from the path
 
                     // TODO GPU find alternative method for kernel type
-                    //let Some(kernel_def_id) = todo!("FIND KERNEL TYPE") else {
-                    {
+                    let Some(kernel_def_id) = tcx.lang_items().kernel_type() else {
                         let guar = tcx
                             .dcx()
                             .emit_err(crate::errors::KernelTypeMissing { span: item.span });
                         //bug!("kernel attribute present but no kernel type found");
                         return ty::EarlyBinder::bind(Ty::new_error(tcx, guar));
                     };
-                    let kernel_def_id: DefId = todo!();
                     let kernel_type = tcx.type_of(kernel_def_id);
                     // we now have the kernel type, but we still need populate the generic args
                     // they are: the dimension (for now just usize)

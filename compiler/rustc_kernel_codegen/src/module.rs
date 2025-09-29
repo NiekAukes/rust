@@ -267,7 +267,6 @@ pub fn assemble<'m>(module: &mut ModuleNVVM<'m>) -> String {
     let forward_decls = module.forward_decls.clone();
     for (_, (name, ty)) in forward_decls.iter() {
         if let Some(ty) = ty {
-            println!("Defining forward declaration: {} with {:#?}", name, ty);
             let ty_str = ty.assemble(module);
             s.push_str(&format!("%{} = type {}\n", name, ty_str));
         } else {
