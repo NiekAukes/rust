@@ -647,8 +647,9 @@ rustc_queries! {
     /// See the [rustc dev guide] for more info.
     ///
     /// [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/mir/construction.html
-    query mir_built(key: LocalDefId) -> &'tcx Steal<mir::Body<'tcx>> {
+    query mir_built(key: DefId) -> &'tcx mir::Body<'tcx> {
         desc { |tcx| "building MIR for `{}`", tcx.def_path_str(key) }
+        cache_on_disk_if { true }
         feedable
     }
 
@@ -723,9 +724,9 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    query optimized_kernel_mir(key: DefId) -> &'tcx mir::Body<'tcx> {
-        desc { |tcx| "optimizing kernel MIR for `{}`", tcx.def_path_str(key) }
-        cache_on_disk_if { key.is_local() }
+    query optimized_kernel_mir(key: (DefId, Symbol)) -> &'tcx mir::Body<'tcx> {
+        desc { |tcx| "optimizing kernel MIR for `{}` and target {}", tcx.def_path_str(key.0), key.1 }
+        cache_on_disk_if { key.0.is_local() }
     }
 
     /// Checks for the nearest `#[coverage(off)]` or `#[coverage(on)]` on

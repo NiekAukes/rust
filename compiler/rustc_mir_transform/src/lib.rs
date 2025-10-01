@@ -377,7 +377,10 @@ fn mir_const_qualif(tcx: TyCtxt<'_>, def: LocalDefId) -> ConstQualifs {
     validator.qualifs_in_return_place()
 }
 
-fn mir_built(tcx: TyCtxt<'_>, def: LocalDefId) -> &Steal<Body<'_>> {
+// This MIR build is used for borrowck, const-checking, and other
+// it is specifically *not* Steal, because we need to keep this version
+// around for other targets to be copied.
+fn mir_built(tcx: TyCtxt<'_>, def: LocalDefId) -> &Body<'_> {
     let mut body = build_mir(tcx, def);
 
     pass_manager::dump_mir_for_phase_change(tcx, &body);
@@ -393,12 +396,40 @@ fn mir_built(tcx: TyCtxt<'_>, def: LocalDefId) -> &Steal<Body<'_>> {
             &Lint(check_const_item_mutation::CheckConstItemMutation),
             &Lint(function_item_references::FunctionItemReferences),
             // What we need to do constant evaluation.
+            //&simplify::SimplifyCfg::Initial,
+            //&Lint(sanity_check::SanityCheck),
+        ],
+        None,
+        pm::Optimizations::Allowed,
+    );
+    //tcx.alloc_steal_mir(body)
+    tcx.arena.alloc(body)
+}
+
+fn mir_spec_target(
+    tcx: TyCtxt<'_>,
+    def: LocalDefId,
+    target: Option<&CodeGenMirPasses<'_>>,
+) -> &Steal<Body<'_>> {
+    let mut body = tcx.mir_built(def).clone();
+    pm::run_passes(
+        tcx,
+        &mut body,
+        &[
+            &target_swap::TargetSwap { target },
+            &kernel_lang_item_swap::KernelLangItemSwap,
             &simplify::SimplifyCfg::Initial,
             &Lint(sanity_check::SanityCheck),
         ],
         None,
         pm::Optimizations::Allowed,
     );
+
+    if target.is_some() {
+        // apply passes supplied by CodeGenMirPasses
+        pm::run_passes(tcx, &mut body, target.get_passes(), None, pm::Optimizations::Allowed);
+    }
+
     tcx.alloc_steal_mir(body)
 }
 

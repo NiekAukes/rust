@@ -640,3 +640,11 @@ impl<'tcx> Key for (ty::Instance<'tcx>, CollectionMode) {
         self.0.default_span(tcx)
     }
 }
+
+impl<'tcx> Key for (DefId, Symbol) {
+    type Cache<V> = DefaultCache<Self, V>;
+
+    fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
+        self.0.default_span(tcx)
+    }
+}
