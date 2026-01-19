@@ -43,6 +43,18 @@ impl<'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, '_, 'tcx> {
                 let arg = args[0].immediate();
                 self.call_intrinsic("llvm.ctpop", &[arg])
             }
+            sym::expf64 => {
+                let arg = args[0].immediate();
+                (self).call_intrinsic("__nv_exp", &[arg])
+            }
+            sym::sinf64 => {
+                let arg = args[0].immediate();
+                (self).call_intrinsic("__nv_sin", &[arg])
+            }
+            sym::cosf64 => {
+                let arg = args[0].immediate();
+                (self).call_intrinsic("__nv_cos", &[arg])
+            }
             _ => panic!("unknown intrinsic '{}'", name),
         };
 
